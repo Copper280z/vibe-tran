@@ -59,6 +59,7 @@ enum class ElementType {
   CQUAD4,
   CTRIA3,
   CHEXA8,
+  CHEXA20,
   CTETRA4,
 };
 

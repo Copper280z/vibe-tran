@@ -182,12 +182,17 @@ Model BdfParser::parse_stream(std::istream &in) {
   auto is_continuation = [](const std::string &l) -> bool {
     if (l.empty())
       return false;
-    // Small field continuation: col 0 is '+' or '*'
     char c0 = l[0];
-    if (c0 == '+' || c0 == '*')
+    if (c0 == '+')
       return true;
-    // Check first 8 chars for a non-blank continuation marker
-    // If col 0 is blank and col 8+ has content, may be large-field
+    if (c0 == '*') {
+      // A bare '*' (cols 0-7 contain only '*' and spaces) is a large-field
+      // continuation marker. '*GRID', '*MAT1', etc. are new large-field cards.
+      for (size_t i = 1; i < std::min(l.size(), size_t(8)); ++i)
+        if (!std::isspace((unsigned char)l[i]))
+          return false;
+      return true;
+    }
     return false;
   };
 
@@ -254,8 +259,10 @@ Model BdfParser::parse_stream(std::istream &in) {
     if (card.fields.empty())
       continue;
     std::string kw = card.fields[0];
-    // Uppercase, strip trailing whitespace
+    // Uppercase, strip leading '*' (large-field prefix), trailing whitespace
     std::transform(kw.begin(), kw.end(), kw.begin(), ::toupper);
+    if (!kw.empty() && kw[0] == '*')
+      kw.erase(0, 1);
     while (!kw.empty() && std::isspace((unsigned char)kw.back()))
       kw.pop_back();
 
@@ -328,7 +335,7 @@ std::vector<std::string> BdfParser::split_small_field(const std::string &line) {
   fields.push_back(get_field(0, 8)); // keyword
   for (int i = 0; i < 8; ++i)
     fields.push_back(get_field(8 + i * 8, 8)); // fields 1-8
-  fields.push_back(get_field(72, 8));          // continuation
+  // Cols 72-79 hold the continuation label; not a data field.
   return fields;
 }
 
@@ -348,7 +355,7 @@ std::vector<std::string> BdfParser::split_large_field(const std::string &line,
   fields.push_back(get_field(0, 8));
   for (int i = 0; i < 4; ++i)
     fields.push_back(get_field(8 + i * 16, 16));
-  fields.push_back(get_field(72, 8));
+  // Cols 72-79 hold the continuation label; not a data field.
   return fields;
 }
 
@@ -496,15 +503,24 @@ void BdfParser::process_ctria3(ParseContext &ctx,
 
 void BdfParser::process_chexa(ParseContext &ctx,
                               const std::vector<std::string> &f) {
-  // CHEXA, EID, PID, G1..G8 (G5-G8 on continuation)
+  // CHEXA, EID, PID, G1..G8 or G1..G20. Node count determines variant:
+  // 8 nodes → CHEXA8, 20 nodes → CHEXA20. Nodes may span continuation lines.
+  // Empty slots (e.g. blank continuation-label fields) are skipped.
   ElementData e;
   e.id = ElementId(parse_int(f[1], ctx.line_num));
   e.pid = PropertyId(parse_int(f[2], ctx.line_num));
-  e.type = ElementType::CHEXA8;
-  // Fields 3-10 (8 nodes, may span continuation)
-  for (int i = 0; i < 8 && (3 + i) < static_cast<int>(f.size()); ++i)
-    if (!f[3 + i].empty())
-      e.nodes.push_back(NodeId(parse_int(f[3 + i], ctx.line_num)));
+  for (int i = 3; i < static_cast<int>(f.size()); ++i)
+    if (!f[i].empty())
+      e.nodes.push_back(NodeId(parse_int(f[i], ctx.line_num)));
+
+  if (e.nodes.size() == 8)
+    e.type = ElementType::CHEXA8;
+  else if (e.nodes.size() > 8)
+    throw ParseError(std::format("Line {}: CHEXA has {} nodes; CHEXA20 is not yet supported",
+                                 ctx.line_num, e.nodes.size()));
+  else
+    throw ParseError(std::format("Line {}: CHEXA has {} nodes; expected 8",
+                                 ctx.line_num, e.nodes.size()));
   ctx.model.elements.push_back(std::move(e));
 }
 
