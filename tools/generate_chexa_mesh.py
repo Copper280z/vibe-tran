@@ -233,7 +233,7 @@ def generate(n_target: int, load_case: str, out_path: str) -> None:
     # ── Material ─────────────────────────────────────────────────────────────
     wr("$")
     wr("$ ── Material ───────────────────────────────────────────────────────────")
-    wr(f"MAT1,1,{fmt_float(E)},,{nu},{fmt_float(0.0)},{fmt_float(alpha)}")
+    wr(f"MAT1,1,{fmt_float(E)},,{fmt_float(nu)},{fmt_float(0.0)},{fmt_float(alpha)}")
 
     # ── Property ─────────────────────────────────────────────────────────────
     wr("$")
@@ -250,7 +250,7 @@ def generate(n_target: int, load_case: str, out_path: str) -> None:
             for k in range(NZ + 1):
                 z = k * d
                 nid = node_id(i, j, k)
-                wr(f"GRID,{nid},,{x:.6G},{y:.6G},{z:.6G}")
+                wr(f"GRID,{nid},,{fmt_float(x)},{fmt_float(y)},{fmt_float(z)}")
 
     # ── Elements ─────────────────────────────────────────────────────────────
     wr("$")
@@ -328,7 +328,7 @@ def generate(n_target: int, load_case: str, out_path: str) -> None:
             direction = "0.0,0.0,1.0"
 
         for nid in range(free_face_first, free_face_last + 1):
-            wr(f"FORCE,1,{nid},0,{f_per_node:.6G},{direction}")
+            wr(f"FORCE,1,{nid},0,{fmt_float(f_per_node)},{direction}")
 
     wr("ENDDATA")
 
