@@ -13,6 +13,10 @@ TEST(BdfParser, ParseSimpleBdf) {
     // Minimal valid BDF: one node, one material, one property, one element, one SPC
     const std::string bdf = R"(
 SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
 BEGIN BULK
 GRID,1,,0.0,0.0,0.0
 GRID,2,,1.0,0.0,0.0
@@ -90,7 +94,7 @@ ENDDATA
 TEST(BdfParser, ForceCard) {
     const std::string bdf = R"(
 BEGIN BULK
-GRID,1,,0,0,0
+GRID,1,,0.0,0.0,0.0
 FORCE,1,1,0,1000.0,0.0,0.0,1.0
 ENDDATA
 )";
@@ -106,9 +110,9 @@ ENDDATA
 TEST(BdfParser, SPC1WithThruRange) {
     const std::string bdf = R"(
 BEGIN BULK
-GRID,1,,0,0,0
-GRID,2,,1,0,0
-GRID,3,,2,0,0
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,2.0,0.0,0.0
 SPC1,1,123,1,THRU,3
 ENDDATA
 )";
@@ -124,8 +128,8 @@ ENDDATA
 TEST(BdfParser, TempCard) {
     const std::string bdf = R"(
 BEGIN BULK
-GRID,1,,0,0,0
-GRID,2,,1,0,0
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
 TEMP,1,1,100.0,2,200.0
 ENDDATA
 )";
@@ -264,7 +268,7 @@ TEST(BdfParser, MomentCard) {
     // MOMENT, SID, G, CID, M, N1, N2, N3
     const std::string bdf = R"(
 BEGIN BULK
-GRID,1,,0,0,0
+GRID,1,,0.0,0.0,0.0
 MOMENT,2,1,0,500.0,0.0,1.0,0.0
 ENDDATA
 )";
@@ -283,8 +287,8 @@ TEST(BdfParser, SpcCard) {
     // SPC allows per-DOF displacement values; two entries per line.
     const std::string bdf = R"(
 BEGIN BULK
-GRID,1,,0,0,0
-GRID,2,,1,0,0
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
 SPC,1,1,123,0.0,2,3,0.0
 ENDDATA
 )";
@@ -303,6 +307,7 @@ TEST(BdfParser, TempdCard) {
     // t_ref is present on the subcase, it should be applied from tempd_map.
     const std::string bdf = R"(
 SOL 101
+CEND
 SUBCASE 1
   LOAD = 5
   SPC  = 1
@@ -338,6 +343,10 @@ TEST(BdfParser, SmallFieldSpcFullLine) {
 static Model make_simple_model() {
     const std::string bdf = R"(
 SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
 BEGIN BULK
 GRID,1,,0.0,0.0,0.0
 GRID,2,,1.0,0.0,0.0

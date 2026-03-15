@@ -360,7 +360,9 @@ std::vector<std::string> BdfParser::split_large_field(const std::string &line,
 }
 
 std::vector<std::string> BdfParser::split_free_field(const std::string &line) {
-  // Free-field: comma-separated, strip $ comments
+  // Free-field: comma-separated, strip $ comments.
+  // The 10th field (index 9, after keyword + 8 data fields) is a continuation
+  // label, not a data field — strip it so it does not appear in the data.
   std::string clean;
   size_t dlr = line.find('$');
   clean = (dlr == std::string::npos) ? line : line.substr(0, dlr);
@@ -373,6 +375,15 @@ std::vector<std::string> BdfParser::split_free_field(const std::string &line) {
     size_t e = tok.find_last_not_of(" \t");
     fields.push_back((s == std::string::npos) ? "" : tok.substr(s, e - s + 1));
   }
+
+  // Strip continuation marker: if there are 10+ fields and the 10th (index 9)
+  // starts with '+' or '*', it is a continuation label, not data.
+  if (fields.size() >= 10) {
+    const std::string &f9 = fields[9];
+    if (!f9.empty() && (f9[0] == '+' || f9[0] == '*'))
+      fields.erase(fields.begin() + 9);
+  }
+
   return fields;
 }
 

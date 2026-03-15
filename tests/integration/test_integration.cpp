@@ -59,6 +59,10 @@ static double get_disp(const SolverResults& res, int node_id, int dof_0based) {
 TEST(Integration, AxialPlateExtension) {
     const std::string bdf = R"(
 SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
 BEGIN BULK
 $ Nodes: 4 corners of a 10x1 plate
 GRID,1,,0.0,0.0,0.0
@@ -129,6 +133,10 @@ TEST(Integration, CantileverBeamBending) {
     // 4-element cantilever, each element 2.5 m long × 1 m tall
     const std::string bdf = R"(
 SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
 BEGIN BULK
 GRID,1,,0.0,0.0,0.0
 GRID,2,,2.5,0.0,0.0
@@ -202,6 +210,10 @@ TEST(Integration, TetraBarAxialExtension) {
     // Face z=1: nodes 5-8 (loaded)
     const std::string bdf = R"(
 SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
 BEGIN BULK
 GRID,1,,0.0,0.0,0.0
 GRID,2,,1.0,0.0,0.0
@@ -288,6 +300,10 @@ ENDDATA
 TEST(Integration, FreeThermalExpansionPlate) {
     const std::string bdf = R"(
 SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
 BEGIN BULK
 GRID,1,,0.0,0.0,0.0
 GRID,2,,1.0,0.0,0.0
@@ -355,6 +371,10 @@ ENDDATA
 TEST(Integration, HexaBarAxialExtension) {
     const std::string bdf = R"(
 SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
 BEGIN BULK
 GRID,1,,0.0,0.0,0.0
 GRID,2,,1.0,0.0,0.0
@@ -366,7 +386,8 @@ GRID,7,,1.0,1.0,1.0
 GRID,8,,0.0,1.0,1.0
 MAT1,1,1.0E6,,0.3
 PSOLID,1,1
-CHEXA,1,1,1,2,3,4,5,6,7,8
+CHEXA,1,1,1,2,3,4,5,6,+
++,7,8
 $ Minimal BCs: fix T3 (z) for all base nodes, plus minimal RBM prevention
 $ Allows Poisson contraction so the exact bar-extension solution is recoverable
 SPC1,1,3,1
@@ -420,9 +441,13 @@ ENDDATA
 
 TEST(Integration, DefaultSubcaseViaRunAnalysis) {
     // Same geometry as AxialPlateExtension, but using run_analysis (no manual subcase setup).
-    // The BDF does not specify a SUBCASE entry; the parser creates the default subcase.
+    // The BDF specifies global LOAD/SPC in the Case Control without a SUBCASE entry;
+    // the parser falls back to the default subcase {1, "DEFAULT", LoadSetId{1}, SpcSetId{1}}.
     const std::string bdf = R"(
 SOL 101
+CEND
+LOAD = 1
+SPC  = 1
 BEGIN BULK
 GRID,1,,0.0,0.0,0.0
 GRID,2,,10.0,0.0,0.0
