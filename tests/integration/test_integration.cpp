@@ -224,7 +224,7 @@ GRID,6,,1.0,0.0,1.0
 GRID,7,,1.0,1.0,1.0
 GRID,8,,0.0,1.0,1.0
 MAT1,1,1.0E6,,0.3
-PSOLID,1,1
+PSOLID,1,1,,2
 $ 6-tet Kuhn decomposition of unit cube (all positive det, V=1/6 each)
 CTETRA,1,1,1,2,3,7
 CTETRA,2,1,1,5,6,7
@@ -385,7 +385,7 @@ GRID,6,,1.0,0.0,1.0
 GRID,7,,1.0,1.0,1.0
 GRID,8,,0.0,1.0,1.0
 MAT1,1,1.0E6,,0.3
-PSOLID,1,1
+PSOLID,1,1,,2
 CHEXA,1,1,1,2,3,4,5,6,+
 +,7,8
 $ Minimal BCs: fix T3 (z) for all base nodes, plus minimal RBM prevention

@@ -238,7 +238,7 @@ def generate(n_target: int, load_case: str, out_path: str) -> None:
     # ── Property ─────────────────────────────────────────────────────────────
     wr("$")
     wr("$ ── Property ───────────────────────────────────────────────────────────")
-    wr("PSOLID,1,1")
+    wr("PSOLID,1,1,,2")  # IN=2: 2x2x2 full Gauss integration for CHEXA8
 
     # ── Nodes ────────────────────────────────────────────────────────────────
     wr("$")
