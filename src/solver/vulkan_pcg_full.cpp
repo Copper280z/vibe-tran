@@ -129,6 +129,7 @@ static void gpu_spmv(const VulkanContext& ctx, Pipelines& pl,
                       const VulkanBuffer& row_ptr_buf, const VulkanBuffer& col_ind_buf,
                       const VulkanBuffer& val_buf, const VulkanBuffer& x_buf,
                       const VulkanBuffer& y_buf, uint32_t n) {
+    const uint32_t max_wg = ctx.device_info().max_workgroup_count_x;
     auto cmd = begin_one_shot(ctx);
     VkDescriptorSet ds = pl.alloc_set(PL_SPMV);
     Pipelines::bind_buffer(ctx.device(), ds, 0, row_ptr_buf.handle(), row_ptr_buf.size_bytes());
@@ -136,8 +137,14 @@ static void gpu_spmv(const VulkanContext& ctx, Pipelines& pl,
     Pipelines::bind_buffer(ctx.device(), ds, 2, val_buf.handle(),     val_buf.size_bytes());
     Pipelines::bind_buffer(ctx.device(), ds, 3, x_buf.handle(),       x_buf.size_bytes());
     Pipelines::bind_buffer(ctx.device(), ds, 4, y_buf.handle(),       y_buf.size_bytes());
-    PCSpmv pc{0, n, n};
-    cmd_spmv(cmd, pl, ds, pc, n);
+    // Batch dispatch: SpMV uses one workgroup per row, which can exceed the
+    // device's maxComputeWorkGroupCount[0] (65535 on AMD RDNA).  The shader's
+    // row_start push constant lets us dispatch in batches.
+    for (uint32_t row = 0; row < n; row += max_wg) {
+        uint32_t batch = std::min(max_wg, n - row);
+        PCSpmv pc{row, batch, n};
+        cmd_spmv(cmd, pl, ds, pc, batch);
+    }
     end_and_submit(ctx, cmd);
     vkFreeDescriptorSets(ctx.device(), pl.pool, 1, &ds);
 }
@@ -209,27 +216,32 @@ solve_full_gpu(VulkanContext& ctx, Pipelines& pl,
 
     double rz_old = gpu_dot(ctx, pl, r_buf, z_buf, partial_buf, n);
 
-    // Use the M^{-1}-norm of b as the convergence denominator.
-    // Mixed norms (preconditioned numerator / Euclidean denominator) cause false
-    // convergence for stiff systems where K_ii >> ||F||_2: the initial ratio
-    // sqrt(r^T M^{-1} r) / ||b||_2 can already be below tolerance before any
-    // meaningful iteration occurs.  With norm_b_m = sqrt(b^T M^{-1} b) =
-    // sqrt(rz_old) (since x=0 => r=b at this point), the initial residual
-    // ratio is exactly 1.0 by construction.
-    double norm_b_m = std::sqrt(std::abs(rz_old));
-    if (norm_b_m < 1e-300) {
-        // b is effectively zero — trivial solution is x = 0
+    // Use the 2-norm of b for the convergence denominator.
+    // The preconditioned residual norm sqrt(r^T M^{-1} r) is NOT monotonically
+    // decreasing in PCG — it can oscillate significantly for ill-conditioned
+    // systems (e.g. 3D elasticity with Jacobi preconditioning), causing the
+    // stagnation detector to false-trigger.  The 2-norm ||r||_2 is much better
+    // behaved and is the standard metric used in practical PCG implementations.
+    double norm_b_sq = gpu_dot(ctx, pl, r_buf, r_buf, partial_buf, n); // r=b here
+    double norm_b    = std::sqrt(norm_b_sq);
+    if (norm_b < 1e-300) {
         out_iters    = 0;
         out_residual = 0.0;
         return std::vector<double>(n, 0.0);
     }
 
     out_iters    = 0;
-    out_residual = 1.0; // sqrt(rz_old) / norm_b_m = 1 by construction
+    out_residual = 1.0; // ||b||/||b|| = 1 by construction
 
     // ── PCG iteration ─────────────────────────────────────────────────────
-    double best_residual  = out_residual;
-    int    stagnation_count = 0;
+    // Stagnation detection uses the A-norm error decrease, which is
+    // monotonically non-negative in CG (unlike the 2-norm residual which
+    // oscillates).  Each iteration decreases ||e||_A^2 by rz_old^2 / pAp.
+    // We track cumulative progress and check that recent iterations
+    // contribute a meaningful fraction.
+    double cum_anorm_progress    = 0.0;
+    double checkpoint_progress   = 0.0;
+    int    iters_since_checkpoint = 0;
 
     for (int iter = 0; iter < cfg.max_iterations; ++iter) {
         gpu_spmv(ctx, pl, row_ptr_buf, col_ind_buf, val_buf, p_buf, Ap_buf, n);
@@ -248,27 +260,38 @@ solve_full_gpu(VulkanContext& ctx, Pipelines& pl,
         gpu_jacobi(ctx, pl, diag_buf, r_buf, z_buf, n);
 
         double rz_new = gpu_dot(ctx, pl, r_buf, z_buf, partial_buf, n);
-        out_residual  = std::sqrt(std::abs(rz_new)) / norm_b_m;
+
+        // Convergence metric: ||r||_2 / ||b||_2
+        double rr     = gpu_dot(ctx, pl, r_buf, r_buf, partial_buf, n);
+        out_residual  = std::sqrt(std::abs(rr)) / norm_b;
         out_iters     = iter + 1;
 
         if (out_residual < cfg.tolerance) break;
         if (iter + 1 == cfg.max_iterations) break;
 
-        // Stagnation detection: float32 precision floor prevents further progress.
-        if (out_residual < best_residual * (1.0 - cfg.stagnation_threshold)) {
-            best_residual    = out_residual;
-            stagnation_count = 0;
-        } else {
-            ++stagnation_count;
+        // A-norm stagnation detection: the decrease in ||e||_A^2 per
+        // iteration is rz_old^2 / pAp (always non-negative for SPD K).
+        // If the last `stagnation_window` iterations contributed less than
+        // `stagnation_threshold` of total cumulative progress, the solver
+        // has hit the precision floor and further iterations are wasted.
+        cum_anorm_progress += rz_old * rz_old / pAp;
+        ++iters_since_checkpoint;
+        if (iters_since_checkpoint >= cfg.stagnation_window) {
+            double window_progress = cum_anorm_progress - checkpoint_progress;
+            if (cum_anorm_progress > 0.0 &&
+                window_progress < cfg.stagnation_threshold * cum_anorm_progress) {
+                throw SolverError(std::format(
+                    "Vulkan PCG stagnated: A-norm progress over last {} iterations was {:.1e}% "
+                    "of total (precision floor reached). "
+                    "Relative residual = {:.3e}. "
+                    "Consider --cpu for higher precision.",
+                    cfg.stagnation_window,
+                    100.0 * window_progress / cum_anorm_progress,
+                    out_residual));
+            }
+            checkpoint_progress = cum_anorm_progress;
+            iters_since_checkpoint = 0;
         }
-        if (stagnation_count >= cfg.stagnation_window)
-            throw SolverError(std::format(
-                "Vulkan PCG stagnated: residual has not improved by {:.0f}% in {} iterations "
-                "(best = {:.3e}, current = {:.3e}). "
-                "The matrix may be ill-conditioned or the float32 precision floor has been reached. "
-                "Consider --cpu for higher precision.",
-                cfg.stagnation_threshold * 100.0, cfg.stagnation_window,
-                best_residual, out_residual));
 
         float beta = static_cast<float>(rz_new / rz_old);
         gpu_axpby(ctx, pl, z_buf, p_buf, 1.0f, beta, n); // p = z + beta*p
@@ -339,6 +362,7 @@ static void gpu_spmv_d(const VulkanContext& ctx, Pipelines& pl,
                         const VulkanBuffer& row_ptr_buf, const VulkanBuffer& col_ind_buf,
                         const VulkanBuffer& val_buf, const VulkanBuffer& x_buf,
                         const VulkanBuffer& y_buf, uint32_t n) {
+    const uint32_t max_wg = ctx.device_info().max_workgroup_count_x;
     auto cmd = begin_one_shot(ctx);
     VkDescriptorSet ds = pl.alloc_set(PL_SPMV_D);
     Pipelines::bind_buffer(ctx.device(), ds, 0, row_ptr_buf.handle(), row_ptr_buf.size_bytes());
@@ -346,8 +370,11 @@ static void gpu_spmv_d(const VulkanContext& ctx, Pipelines& pl,
     Pipelines::bind_buffer(ctx.device(), ds, 2, val_buf.handle(),     val_buf.size_bytes());
     Pipelines::bind_buffer(ctx.device(), ds, 3, x_buf.handle(),       x_buf.size_bytes());
     Pipelines::bind_buffer(ctx.device(), ds, 4, y_buf.handle(),       y_buf.size_bytes());
-    PCSpmv pc{0, n, n};
-    cmd_spmv_d(cmd, pl, ds, pc, n);
+    for (uint32_t row = 0; row < n; row += max_wg) {
+        uint32_t batch = std::min(max_wg, n - row);
+        PCSpmv pc{row, batch, n};
+        cmd_spmv_d(cmd, pl, ds, pc, batch);
+    }
     end_and_submit(ctx, cmd);
     vkFreeDescriptorSets(ctx.device(), pl.pool, 1, &ds);
 }
@@ -401,21 +428,22 @@ solve_full_gpu_double(VulkanContext& ctx, Pipelines& pl,
 
     double rz_old = gpu_dot_d(ctx, pl, r_buf, z_buf, partial_buf, n);
 
-    // Use the M^{-1}-norm of b as the convergence denominator (same rationale
-    // as solve_full_gpu — see comment there for full explanation).
-    double norm_b_m = std::sqrt(std::abs(rz_old));
-    if (norm_b_m < 1e-300) {
+    // Use 2-norm of b for convergence (see solve_full_gpu comment for rationale).
+    double norm_b_sq = gpu_dot_d(ctx, pl, r_buf, r_buf, partial_buf, n); // r=b here
+    double norm_b    = std::sqrt(norm_b_sq);
+    if (norm_b < 1e-300) {
         out_iters    = 0;
         out_residual = 0.0;
         return std::vector<double>(n, 0.0);
     }
 
     out_iters    = 0;
-    out_residual = 1.0; // sqrt(rz_old) / norm_b_m = 1 by construction
+    out_residual = 1.0;
 
     // ── PCG iteration ─────────────────────────────────────────────────────
-    double best_residual   = out_residual;
-    int    stagnation_count = 0;
+    double cum_anorm_progress    = 0.0;
+    double checkpoint_progress   = 0.0;
+    int    iters_since_checkpoint = 0;
 
     for (int iter = 0; iter < cfg.max_iterations; ++iter) {
         gpu_spmv_d(ctx, pl, row_ptr_buf, col_ind_buf, val_buf, p_buf, Ap_buf, n);
@@ -434,25 +462,34 @@ solve_full_gpu_double(VulkanContext& ctx, Pipelines& pl,
         gpu_jacobi_d(ctx, pl, diag_buf, r_buf, z_buf, n);
 
         double rz_new = gpu_dot_d(ctx, pl, r_buf, z_buf, partial_buf, n);
-        out_residual  = std::sqrt(std::abs(rz_new)) / norm_b_m;
+
+        // Convergence metric: ||r||_2 / ||b||_2
+        double rr     = gpu_dot_d(ctx, pl, r_buf, r_buf, partial_buf, n);
+        out_residual  = std::sqrt(std::abs(rr)) / norm_b;
         out_iters     = iter + 1;
 
         if (out_residual < cfg.tolerance) break;
         if (iter + 1 == cfg.max_iterations) break;
 
-        if (out_residual < best_residual * (1.0 - cfg.stagnation_threshold)) {
-            best_residual    = out_residual;
-            stagnation_count = 0;
-        } else {
-            ++stagnation_count;
+        // A-norm stagnation detection (same as float32 path).
+        cum_anorm_progress += rz_old * rz_old / pAp;
+        ++iters_since_checkpoint;
+        if (iters_since_checkpoint >= cfg.stagnation_window) {
+            double window_progress = cum_anorm_progress - checkpoint_progress;
+            if (cum_anorm_progress > 0.0 &&
+                window_progress < cfg.stagnation_threshold * cum_anorm_progress) {
+                throw SolverError(std::format(
+                    "Vulkan PCG (float64) stagnated: A-norm progress over last {} iterations "
+                    "was {:.1e}% of total (precision floor reached). "
+                    "Relative residual = {:.3e}. "
+                    "Check boundary conditions.",
+                    cfg.stagnation_window,
+                    100.0 * window_progress / cum_anorm_progress,
+                    out_residual));
+            }
+            checkpoint_progress = cum_anorm_progress;
+            iters_since_checkpoint = 0;
         }
-        if (stagnation_count >= cfg.stagnation_window)
-            throw SolverError(std::format(
-                "Vulkan PCG (float64) stagnated: residual has not improved by {:.0f}% "
-                "in {} iterations (best = {:.3e}, current = {:.3e}). "
-                "Check boundary conditions.",
-                cfg.stagnation_threshold * 100.0, cfg.stagnation_window,
-                best_residual, out_residual));
 
         double beta = rz_new / rz_old;
         gpu_axpby_d(ctx, pl, z_buf, p_buf, 1.0, beta, n); // p = z + beta*p

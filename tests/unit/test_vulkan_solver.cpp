@@ -461,3 +461,61 @@ TEST_F(VulkanTest, VulkanContextHandlesAreValid) {
     EXPECT_LT(ctx->compute_queue_family(), UINT32_MAX)
         << "compute_queue_family() must return a valid queue family index";
 }
+
+// ── Test 14: Ill-conditioned tridiagonal converges (stagnation regression) ────
+// Regression test for false stagnation detection.
+//
+// Root cause: the stagnation detector monitored the 2-norm residual ||r||/||b||
+// or the preconditioned residual sqrt(r^T M^{-1} r), both of which oscillate in
+// PCG for ill-conditioned systems.  A stagnation window of 50 iterations would
+// false-trigger even though the A-norm error was decreasing monotonically.
+//
+// Fix: stagnation detection now tracks the A-norm error decrease per window,
+// which is guaranteed monotonic in CG for SPD systems.
+//
+// This test constructs a tridiagonal system with κ ≈ n² = 250000 (n=500),
+// requiring ~500 Jacobi-PCG iterations.  With the old residual-based stagnation
+// detector (window=50), this would throw SolverError.  With A-norm stagnation
+// detection it converges correctly.
+
+TEST_F(VulkanTest, IllConditionedTridiagonalConverges) {
+    const int n = 500;
+    SparseMatrixBuilder builder(n);
+    for (int i = 0; i < n; ++i) {
+        builder.add(i, i, 2.0);
+        if (i > 0)     builder.add(i, i - 1, -1.0);
+        if (i < n - 1) builder.add(i, i + 1, -1.0);
+    }
+    auto csr = builder.build_csr();
+    // F chosen to excite multiple eigenmodes — maximizes residual oscillation.
+    std::vector<double> F(n);
+    for (int i = 0; i < n; ++i)
+        F[i] = (i % 2 == 0) ? 1.0 : -1.0;
+
+    EigenSolverBackend eigen_backend;
+    auto u_eigen = eigen_backend.solve(csr, F);
+
+    // Use float64 to avoid float32 precision issues on this ill-conditioned system.
+    auto ctx = nastran::VulkanContext::create();
+    if (!ctx || !ctx->device_info().supports_float64)
+        GTEST_SKIP() << "GPU lacks shaderFloat64";
+
+    VulkanSolverConfig cfg = gpu_test_cfg();
+    cfg.use_double = true;
+    cfg.tolerance  = 1e-6;
+
+    auto dbl_backend = VulkanSolverBackend::try_create(cfg);
+    if (!dbl_backend.has_value())
+        GTEST_SKIP() << "Vulkan unavailable";
+
+    auto u_vulkan = dbl_backend->solve(csr, F);
+
+    ASSERT_EQ(static_cast<int>(u_vulkan.size()), n);
+    for (int i = 0; i < n; i += 50)
+        EXPECT_NEAR(u_vulkan[i], u_eigen[i], 1e-5)
+            << "Ill-conditioned tridiagonal: component " << i << " differs from Eigen";
+
+    // Must have taken many iterations (κ ≈ 250000, expect ~100-500 CG iterations).
+    EXPECT_GT(dbl_backend->last_iteration_count(), 10)
+        << "Ill-conditioned tridiagonal should require many iterations";
+}

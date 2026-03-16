@@ -190,9 +190,10 @@ std::optional<VulkanContext> VulkanContext::create() noexcept {
 
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(ctx.phys_dev_, &props);
-    ctx.device_info_.device_name      = props.deviceName;
-    ctx.device_info_.vram_bytes       = best.vram_bytes;
-    ctx.device_info_.supports_float64 = best.float64;
+    ctx.device_info_.device_name           = props.deviceName;
+    ctx.device_info_.vram_bytes            = best.vram_bytes;
+    ctx.device_info_.supports_float64      = best.float64;
+    ctx.device_info_.max_workgroup_count_x = props.limits.maxComputeWorkGroupCount[0];
 
     return ctx;
 }

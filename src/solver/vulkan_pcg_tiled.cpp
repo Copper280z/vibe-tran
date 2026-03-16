@@ -124,11 +124,12 @@ solve_tiled(VulkanContext& ctx, Pipelines& pl,
     if (norm_b < 1e-300) norm_b = 1.0;
 
     out_iters    = 0;
-    out_residual = std::sqrt(std::abs(rz_old)) / norm_b;
+    out_residual = 1.0; // ||b||/||b|| = 1 (since r=b at x=0)
 
     // ── PCG iteration ─────────────────────────────────────────────────────
-    double best_residual   = out_residual;
-    int    stagnation_count = 0;
+    double cum_anorm_progress    = 0.0;
+    double checkpoint_progress   = 0.0;
+    int    iters_since_checkpoint = 0;
 
     for (int iter = 0; iter < cfg.max_iterations; ++iter) {
         // ── Tiled SpMV: Ap = K * p ────────────────────────────────────────
@@ -209,27 +210,32 @@ solve_tiled(VulkanContext& ctx, Pipelines& pl,
 
         jacobi_cpu(diag, r, z);
         double rz_new = dot_cpu(r, z);
-        out_residual  = std::sqrt(std::abs(rz_new)) / norm_b;
+        // Convergence metric: ||r||_2 / ||b||_2
+        out_residual  = std::sqrt(dot_cpu(r, r)) / norm_b;
         out_iters     = iter + 1;
 
         if (out_residual < cfg.tolerance) break;
         if (iter + 1 == cfg.max_iterations) break;
 
-        // Stagnation detection: float32 SpMV precision floor prevents further progress.
-        if (out_residual < best_residual * (1.0 - cfg.stagnation_threshold)) {
-            best_residual    = out_residual;
-            stagnation_count = 0;
-        } else {
-            ++stagnation_count;
+        // A-norm stagnation detection (same as full-GPU path).
+        cum_anorm_progress += rz_old * rz_old / pAp;
+        ++iters_since_checkpoint;
+        if (iters_since_checkpoint >= cfg.stagnation_window) {
+            double window_progress = cum_anorm_progress - checkpoint_progress;
+            if (cum_anorm_progress > 0.0 &&
+                window_progress < cfg.stagnation_threshold * cum_anorm_progress) {
+                throw SolverError(std::format(
+                    "Vulkan PCG (tiled) stagnated: A-norm progress over last {} iterations "
+                    "was {:.1e}% of total (precision floor reached). "
+                    "Relative residual = {:.3e}. "
+                    "Consider --cpu for higher precision.",
+                    cfg.stagnation_window,
+                    100.0 * window_progress / cum_anorm_progress,
+                    out_residual));
+            }
+            checkpoint_progress = cum_anorm_progress;
+            iters_since_checkpoint = 0;
         }
-        if (stagnation_count >= cfg.stagnation_window)
-            throw SolverError(std::format(
-                "Vulkan PCG (tiled) stagnated: residual has not improved by {:.0f}% in {} iterations "
-                "(best = {:.3e}, current = {:.3e}). "
-                "The matrix may be ill-conditioned or the float32 precision floor has been reached. "
-                "Consider --cpu for higher precision.",
-                cfg.stagnation_threshold * 100.0, cfg.stagnation_window,
-                best_residual, out_residual));
 
         double beta = rz_new / rz_old;
         axpby_cpu(1.0, z, beta, p); // p = z + beta*p

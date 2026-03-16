@@ -35,7 +35,7 @@ struct VulkanSolverConfig {
   bool force_tiled =
       false; // bypass VRAM check and always use tiled path (for testing)
   int stagnation_window =
-      50; // throw if residual hasn't improved within this many iters
+      200; // throw if A-norm progress hasn't improved within this many iters
   double stagnation_threshold =
       0.01; // minimum fractional improvement required per window (1%)
   int min_dofs_for_gpu =
