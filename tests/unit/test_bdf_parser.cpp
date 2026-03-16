@@ -424,3 +424,92 @@ TEST(Model, SpcsForSetReturnsEmptyForUnknownSet) {
     auto spcs = m.spcs_for_set(SpcSetId{999});
     EXPECT_TRUE(spcs.empty());
 }
+
+// ── Formulation selection parsing ─────────────────────────────────────────────
+
+TEST(BdfParser, PsolidIsopEas) {
+    // PSOLID field f[6] == "EAS" → SolidFormulation::EAS
+    const std::string bdf = R"(
+BEGIN BULK
+PSOLID,1,1,0,SMEAR,NO,EAS
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.properties.size(), 1u);
+    const PSolid& ps = std::get<PSolid>(m.properties.at(PropertyId{1}));
+    EXPECT_EQ(ps.isop, SolidFormulation::EAS);
+}
+
+TEST(BdfParser, PsolidDefaultIsopSri) {
+    // PSOLID without ISOP field → default SolidFormulation::SRI
+    const std::string bdf = R"(
+BEGIN BULK
+PSOLID,1,1
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.properties.size(), 1u);
+    const PSolid& ps = std::get<PSolid>(m.properties.at(PropertyId{1}));
+    EXPECT_EQ(ps.isop, SolidFormulation::SRI);
+}
+
+TEST(BdfParser, Ctetra10Nodes) {
+    // CTETRA with 10 node IDs → ElementType::CTETRA10
+    const std::string bdf =
+        "BEGIN BULK\n"
+        "CTETRA         1       1       1       2       3       4       5       6\n"
+        "+              7       8       9      10\n"
+        "ENDDATA\n";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.elements.size(), 1u);
+    const ElementData& e = m.elements[0];
+    EXPECT_EQ(e.type, ElementType::CTETRA10);
+    ASSERT_EQ(e.nodes.size(), 10u);
+    EXPECT_EQ(e.nodes[0].value, 1);
+    EXPECT_EQ(e.nodes[9].value, 10);
+}
+
+TEST(BdfParser, Ctetra4NodesStillCtetra4) {
+    // CTETRA with 4 nodes → ElementType::CTETRA4 (existing behavior unchanged)
+    const std::string bdf =
+        "BEGIN BULK\n"
+        "CTETRA         1       1       1       2       3       4\n"
+        "ENDDATA\n";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.elements.size(), 1u);
+    EXPECT_EQ(m.elements[0].type, ElementType::CTETRA4);
+    ASSERT_EQ(m.elements[0].nodes.size(), 4u);
+}
+
+TEST(BdfParser, ParamShellformMindlin) {
+    // PARAM,SHELLFORM,MINDLIN → all PShell::shell_form == ShellFormulation::MINDLIN
+    const std::string bdf = R"(
+BEGIN BULK
+MAT1,1,2.0E7,,0.3
+PSHELL,1,1,0.1
+PSHELL,2,1,0.2
+PARAM,SHELLFORM,MINDLIN
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.properties.size(), 2u);
+    const PShell& ps1 = std::get<PShell>(m.properties.at(PropertyId{1}));
+    const PShell& ps2 = std::get<PShell>(m.properties.at(PropertyId{2}));
+    EXPECT_EQ(ps1.shell_form, ShellFormulation::MINDLIN);
+    EXPECT_EQ(ps2.shell_form, ShellFormulation::MINDLIN);
+    EXPECT_EQ(m.params.at("SHELLFORM"), "MINDLIN");
+}
+
+TEST(BdfParser, DefaultShellformMitc4) {
+    // Without any PARAM → PShell::shell_form defaults to ShellFormulation::MITC4
+    const std::string bdf = R"(
+BEGIN BULK
+MAT1,1,2.0E7,,0.3
+PSHELL,1,1,0.1
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.properties.size(), 1u);
+    const PShell& ps = std::get<PShell>(m.properties.at(PropertyId{1}));
+    EXPECT_EQ(ps.shell_form, ShellFormulation::MITC4);
+}

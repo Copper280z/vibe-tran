@@ -34,6 +34,9 @@ struct Mat1 {
 
 // ── Properties ───────────────────────────────────────────────────────────────
 
+enum class SolidFormulation { SRI, EAS };
+enum class ShellFormulation { MINDLIN, MITC4 };
+
 struct PShell {
   PropertyId pid{0};
   MaterialId mid1{0};     // membrane material
@@ -43,12 +46,14 @@ struct PShell {
   MaterialId mid3{0};     // transverse shear material
   double tst{0.833333};   // transverse shear thickness ratio
   MaterialId mid4{0};     // membrane-bending coupling
+  ShellFormulation shell_form{ShellFormulation::MITC4};
 };
 
 struct PSolid {
   PropertyId pid{0};
   MaterialId mid{0};
   int cordm{0}; // material coordinate system
+  SolidFormulation isop{SolidFormulation::SRI};
 };
 
 using Property = std::variant<PShell, PSolid>;
@@ -61,6 +66,7 @@ enum class ElementType {
   CHEXA8,
   CHEXA20,
   CTETRA4,
+  CTETRA10,
 };
 
 struct ElementData {
@@ -158,6 +164,9 @@ public:
 
   // Analysis
   AnalysisCase analysis;
+
+  // PARAM entries (name → value as string)
+  std::unordered_map<std::string, std::string> params;
 
   // ── Accessors ────────────────────────────────────────────────────────────
 

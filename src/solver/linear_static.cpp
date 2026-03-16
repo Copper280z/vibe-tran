@@ -77,6 +77,7 @@ DofMap LinearStaticSolver::build_dof_map(const Model &model,
   for (const auto &elem : model.elements) {
     bool is_shell =
         (elem.type == ElementType::CQUAD4 || elem.type == ElementType::CTRIA3);
+    // CTETRA10 nodes are solid-only (no rotational DOFs needed)
     if (is_shell)
       for (NodeId nid : elem.nodes)
         node_has_shell[nid] = true;
@@ -374,7 +375,8 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
       }
       res.plate_stresses.push_back(ps);
     } else if (elem_data.type == ElementType::CHEXA8 ||
-               elem_data.type == ElementType::CTETRA4) {
+               elem_data.type == ElementType::CTETRA4 ||
+               elem_data.type == ElementType::CTETRA10) {
       SolidStress ss;
       ss.eid = elem_data.id;
 
@@ -403,7 +405,58 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
       Eigen::Matrix<double, 6, 1> sigma;
       sigma.setZero();
 
-      if (elem_data.type == ElementType::CTETRA4) {
+      if (elem_data.type == ElementType::CTETRA10) {
+        // 10-node tet: evaluate B at centroid (L1=L2=L3=L4=0.25)
+        // using quadratic shape function derivatives
+        // Build B at centroid via CTetra10's shape function logic
+        auto nc10 = [&]() -> std::array<Vec3,10> {
+          std::array<Vec3,10> arr;
+          for (int i = 0; i < 10; ++i)
+            arr[i] = model.node(elem_data.nodes[i]).position;
+          return arr;
+        }();
+        // Shape function derivatives at centroid (L1=L2=L3=0.25, L4=0.25)
+        // dNdL1 etc. evaluated at centroid
+        double L1=0.25, L2=0.25, L3=0.25;
+        double L4 = 1.0 - L1 - L2 - L3;
+        // dN/dL1 [10]
+        std::array<double,10> dNdL1, dNdL2, dNdL3;
+        dNdL1[0] = 4*L1 - 1; dNdL1[1] = 0; dNdL1[2] = 0; dNdL1[3] = -(4*L4-1);
+        dNdL1[4] = 4*L2; dNdL1[5] = 0; dNdL1[6] = 4*L3; dNdL1[7] = 4*(L4-L1); dNdL1[8] = -4*L2; dNdL1[9] = -4*L3;
+        dNdL2[0] = 0; dNdL2[1] = 4*L2-1; dNdL2[2] = 0; dNdL2[3] = -(4*L4-1);
+        dNdL2[4] = 4*L1; dNdL2[5] = 4*L3; dNdL2[6] = 0; dNdL2[7] = -4*L1; dNdL2[8] = 4*(L4-L2); dNdL2[9] = -4*L3;
+        dNdL3[0] = 0; dNdL3[1] = 0; dNdL3[2] = 4*L3-1; dNdL3[3] = -(4*L4-1);
+        dNdL3[4] = 0; dNdL3[5] = 4*L2; dNdL3[6] = 4*L1; dNdL3[7] = -4*L1; dNdL3[8] = -4*L2; dNdL3[9] = 4*(L4-L3);
+
+        Eigen::Matrix3d J10 = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 10; ++n) {
+          J10(0,0)+=dNdL1[n]*nc10[n].x; J10(0,1)+=dNdL1[n]*nc10[n].y; J10(0,2)+=dNdL1[n]*nc10[n].z;
+          J10(1,0)+=dNdL2[n]*nc10[n].x; J10(1,1)+=dNdL2[n]*nc10[n].y; J10(1,2)+=dNdL2[n]*nc10[n].z;
+          J10(2,0)+=dNdL3[n]*nc10[n].x; J10(2,1)+=dNdL3[n]*nc10[n].y; J10(2,2)+=dNdL3[n]*nc10[n].z;
+        }
+        Eigen::Matrix3d Jinv10 = J10.inverse();
+        Eigen::MatrixXd B10(6, 30); B10.setZero();
+        for (int n = 0; n < 10; ++n) {
+          double dnx = Jinv10(0,0)*dNdL1[n]+Jinv10(0,1)*dNdL2[n]+Jinv10(0,2)*dNdL3[n];
+          double dny = Jinv10(1,0)*dNdL1[n]+Jinv10(1,1)*dNdL2[n]+Jinv10(1,2)*dNdL3[n];
+          double dnz = Jinv10(2,0)*dNdL1[n]+Jinv10(2,1)*dNdL2[n]+Jinv10(2,2)*dNdL3[n];
+          int c0=3*n;
+          B10(0,c0)=dnx; B10(1,c0+1)=dny; B10(2,c0+2)=dnz;
+          B10(3,c0)=dny; B10(3,c0+1)=dnx;
+          B10(4,c0+1)=dnz; B10(4,c0+2)=dny;
+          B10(5,c0)=dnz; B10(5,c0+2)=dnx;
+        }
+        double T10=0;
+        for (int i=0; i<10; ++i) {
+          auto it=nodal_temps_rec.find(elem_data.nodes[i]);
+          T10 += (it!=nodal_temps_rec.end()) ? it->second : sc.t_ref;
+        }
+        T10 /= 10.0;
+        double dT10 = T10 - sc.t_ref;
+        Eigen::Matrix<double,6,1> eps_th10;
+        eps_th10 << mat_.A*dT10, mat_.A*dT10, mat_.A*dT10, 0, 0, 0;
+        sigma = D_ * (B10 * ue - eps_th10);
+      } else if (elem_data.type == ElementType::CTETRA4) {
         // Constant strain tet: compute B at any point (use node coords)
         auto nc = [&]() -> std::array<Vec3, 4> {
           std::array<Vec3, 4> c;

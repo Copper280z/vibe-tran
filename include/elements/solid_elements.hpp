@@ -100,4 +100,92 @@ private:
     const PSolid& psolid() const;
 };
 
+// ── CTETRA10 ─────────────────────────────────────────────────────────────────
+// 10-node quadratic tetrahedron: 4 corners + 6 midside nodes.
+// Uses 4-point Gauss quadrature (exact for degree-2 integrands).
+
+class CTetra10 : public ElementBase {
+public:
+    static constexpr int NUM_NODES    = 10;
+    static constexpr int DOF_PER_NODE = 3;
+    static constexpr int NUM_DOFS     = NUM_NODES * DOF_PER_NODE; // 30
+
+    CTetra10(ElementId eid,
+             PropertyId pid,
+             std::array<NodeId, NUM_NODES> node_ids,
+             const Model& model);
+
+    [[nodiscard]] ElementType type()     const noexcept override { return ElementType::CTETRA10; }
+    [[nodiscard]] ElementId   id()       const noexcept override { return eid_; }
+    [[nodiscard]] int         num_dofs() const noexcept override { return NUM_DOFS; }
+
+    [[nodiscard]] LocalKe stiffness_matrix() const override;
+    [[nodiscard]] LocalFe thermal_load(std::span<const double> temperatures,
+                                        double t_ref) const override;
+    [[nodiscard]] std::vector<EqIndex> global_dof_indices(const DofMap&) const override;
+    [[nodiscard]] std::span<const NodeId> node_ids() const noexcept override {
+        return std::span<const NodeId>{nodes_.data(), NUM_NODES};
+    }
+
+private:
+    ElementId   eid_;
+    PropertyId  pid_;
+    std::array<NodeId, NUM_NODES> nodes_;
+    const Model& model_;
+
+    std::array<Vec3, NUM_NODES> node_coords() const;
+    Eigen::Matrix<double,6,6> constitutive_D() const;
+    const Mat1& material() const;
+    const PSolid& psolid() const;
+
+    // Shape functions in barycentric coords (L1,L2,L3; L4 = 1-L1-L2-L3)
+    struct ShapeData10 {
+        std::array<double, 10> N;
+        std::array<double, 10> dNdL1;
+        std::array<double, 10> dNdL2;
+        std::array<double, 10> dNdL3;
+    };
+    static ShapeData10 shape_functions(double L1, double L2, double L3) noexcept;
+};
+
+// ── CHEXA8EAS ────────────────────────────────────────────────────────────────
+// 8-node hex with Enhanced Assumed Strain (9-mode Wilson-Taylor incompatible
+// modes). Identical interface to CHexa8; uses full 2x2x2 Gauss + static
+// condensation to eliminate both volumetric and bending locking.
+
+class CHexa8Eas : public ElementBase {
+public:
+    static constexpr int NUM_NODES    = 8;
+    static constexpr int DOF_PER_NODE = 3;
+    static constexpr int NUM_DOFS     = NUM_NODES * DOF_PER_NODE; // 24
+
+    CHexa8Eas(ElementId eid,
+              PropertyId pid,
+              std::array<NodeId, NUM_NODES> node_ids,
+              const Model& model);
+
+    [[nodiscard]] ElementType type()     const noexcept override { return ElementType::CHEXA8; }
+    [[nodiscard]] ElementId   id()       const noexcept override { return eid_; }
+    [[nodiscard]] int         num_dofs() const noexcept override { return NUM_DOFS; }
+
+    [[nodiscard]] LocalKe stiffness_matrix() const override;
+    [[nodiscard]] LocalFe thermal_load(std::span<const double> temperatures,
+                                        double t_ref) const override;
+    [[nodiscard]] std::vector<EqIndex> global_dof_indices(const DofMap&) const override;
+    [[nodiscard]] std::span<const NodeId> node_ids() const noexcept override {
+        return std::span<const NodeId>{nodes_.data(), NUM_NODES};
+    }
+
+private:
+    ElementId   eid_;
+    PropertyId  pid_;
+    std::array<NodeId, NUM_NODES> nodes_;
+    const Model& model_;
+
+    std::array<Vec3, 8> node_coords() const;
+    Eigen::Matrix<double,6,6> constitutive_D() const;
+    const Mat1& material() const;
+    const PSolid& psolid() const;
+};
+
 } // namespace nastran

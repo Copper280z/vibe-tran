@@ -296,6 +296,8 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_spc(ctx, card.fields);
       else if (kw == "SPC1")
         process_spc1(ctx, card.fields);
+      else if (kw == "PARAM")
+        process_param(ctx, card.fields);
       // Silently ignore unrecognized cards
     } catch (const ParseError &) {
       throw;
@@ -309,6 +311,21 @@ Model BdfParser::parse_stream(std::istream &in) {
   for (auto &sc : ctx.model.analysis.subcases) {
     if (sc.t_ref == 0.0 && ctx.tempd_map.count(sc.load_set.value))
       sc.t_ref = ctx.tempd_map.at(sc.load_set.value);
+  }
+
+  // Post-parse: apply PARAM,SHELLFORM to all PShell properties
+  {
+    auto it = ctx.model.params.find("SHELLFORM");
+    if (it != ctx.model.params.end()) {
+      std::string val = it->second;
+      std::transform(val.begin(), val.end(), val.begin(), ::toupper);
+      ShellFormulation sf = (val == "MINDLIN") ? ShellFormulation::MINDLIN
+                                                : ShellFormulation::MITC4;
+      for (auto &[pid, prop] : ctx.model.properties) {
+        if (std::holds_alternative<PShell>(prop))
+          std::get<PShell>(prop).shell_form = sf;
+      }
+    }
   }
 
   return ctx.model;
@@ -485,6 +502,13 @@ void BdfParser::process_psolid(ParseContext &ctx,
   p.pid = PropertyId(parse_int(f[1], ctx.line_num));
   p.mid = MaterialId(parse_int(f[2], ctx.line_num));
   p.cordm = f[3].empty() ? 0 : parse_int(f[3], ctx.line_num);
+  // f[6] is ISOP: "EAS" selects Enhanced Assumed Strain formulation
+  if (f.size() > 6 && !f[6].empty()) {
+    std::string isop = f[6];
+    std::transform(isop.begin(), isop.end(), isop.begin(), ::toupper);
+    if (isop == "EAS")
+      p.isop = SolidFormulation::EAS;
+  }
   ctx.model.properties[p.pid] = p;
 }
 
@@ -537,13 +561,21 @@ void BdfParser::process_chexa(ParseContext &ctx,
 
 void BdfParser::process_ctetra(ParseContext &ctx,
                                const std::vector<std::string> &f) {
-  // CTETRA, EID, PID, G1, G2, G3, G4
+  // CTETRA, EID, PID, G1..G4 (4-node) or G1..G10 (10-node, may span continuations)
   ElementData e;
   e.id = ElementId(parse_int(f[1], ctx.line_num));
   e.pid = PropertyId(parse_int(f[2], ctx.line_num));
-  e.type = ElementType::CTETRA4;
-  for (int i = 0; i < 4; ++i)
-    e.nodes.push_back(NodeId(parse_int(f[3 + i], ctx.line_num)));
+  for (int i = 3; i < static_cast<int>(f.size()); ++i)
+    if (!f[i].empty())
+      e.nodes.push_back(NodeId(parse_int(f[i], ctx.line_num)));
+
+  if (e.nodes.size() == 4)
+    e.type = ElementType::CTETRA4;
+  else if (e.nodes.size() == 10)
+    e.type = ElementType::CTETRA10;
+  else
+    throw ParseError(std::format("Line {}: CTETRA has {} nodes; expected 4 or 10",
+                                 ctx.line_num, e.nodes.size()));
   ctx.model.elements.push_back(std::move(e));
 }
 
@@ -658,6 +690,15 @@ void BdfParser::process_spc1(ParseContext &ctx,
     spc.value = 0.0;
     ctx.model.spcs.push_back(spc);
   }
+}
+
+void BdfParser::process_param(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  // PARAM, NAME, VALUE
+  if (f.size() < 3 || f[1].empty()) return;
+  std::string name = f[1];
+  std::transform(name.begin(), name.end(), name.begin(), ::toupper);
+  ctx.model.params[name] = f[2];
 }
 
 } // namespace nastran

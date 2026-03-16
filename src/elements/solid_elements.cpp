@@ -402,4 +402,479 @@ std::vector<EqIndex> CTetra4::global_dof_indices(const DofMap& dof_map) const {
     return result;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CTETRA10
+// ═══════════════════════════════════════════════════════════════════════════════
+
+CTetra10::CTetra10(ElementId eid, PropertyId pid,
+                   std::array<NodeId, 10> node_ids,
+                   const Model& model)
+    : eid_(eid), pid_(pid), nodes_(node_ids), model_(model) {}
+
+const PSolid& CTetra10::psolid() const {
+    const auto& prop = model_.property(pid_);
+    if (!std::holds_alternative<PSolid>(prop))
+        throw SolverError(std::format("CTETRA10 {}: property {} is not PSOLID", eid_.value, pid_.value));
+    return std::get<PSolid>(prop);
+}
+
+const Mat1& CTetra10::material() const {
+    return model_.material(psolid().mid);
+}
+
+Eigen::Matrix<double,6,6> CTetra10::constitutive_D() const {
+    const Mat1& m = material();
+    return isotropic_D(m.E, m.nu);
+}
+
+std::array<Vec3, 10> CTetra10::node_coords() const {
+    std::array<Vec3, 10> c;
+    for (int i = 0; i < 10; ++i)
+        c[i] = model_.node(nodes_[i]).position;
+    return c;
+}
+
+// Node ordering (Nastran CTETRA10):
+//   0-3: corner nodes (L1=1,0,0,0), (L2=1,...), ...
+//   4: midside 0-1, 5: midside 1-2, 6: midside 0-2
+//   7: midside 0-3, 8: midside 1-3, 9: midside 2-3
+// In barycentric: corners i at Li=1, midsides at Li=Lj=0.5
+CTetra10::ShapeData10 CTetra10::shape_functions(double L1, double L2, double L3) noexcept {
+    double L4 = 1.0 - L1 - L2 - L3;
+    ShapeData10 s;
+    // Corner nodes: Ni = Li*(2Li - 1)
+    s.N[0] = L1*(2*L1 - 1);
+    s.N[1] = L2*(2*L2 - 1);
+    s.N[2] = L3*(2*L3 - 1);
+    s.N[3] = L4*(2*L4 - 1);
+    // Midside nodes: Nij = 4*Li*Lj
+    s.N[4] = 4*L1*L2;  // 0-1
+    s.N[5] = 4*L2*L3;  // 1-2
+    s.N[6] = 4*L1*L3;  // 0-2
+    s.N[7] = 4*L1*L4;  // 0-3
+    s.N[8] = 4*L2*L4;  // 1-3
+    s.N[9] = 4*L3*L4;  // 2-3
+
+    // dN/dL1
+    s.dNdL1[0] = 4*L1 - 1;
+    s.dNdL1[1] = 0;
+    s.dNdL1[2] = 0;
+    s.dNdL1[3] = -(4*L4 - 1);  // dL4/dL1 = -1
+    s.dNdL1[4] = 4*L2;
+    s.dNdL1[5] = 0;
+    s.dNdL1[6] = 4*L3;
+    s.dNdL1[7] = 4*(L4 - L1);
+    s.dNdL1[8] = -4*L2;
+    s.dNdL1[9] = -4*L3;
+
+    // dN/dL2
+    s.dNdL2[0] = 0;
+    s.dNdL2[1] = 4*L2 - 1;
+    s.dNdL2[2] = 0;
+    s.dNdL2[3] = -(4*L4 - 1);
+    s.dNdL2[4] = 4*L1;
+    s.dNdL2[5] = 4*L3;
+    s.dNdL2[6] = 0;
+    s.dNdL2[7] = -4*L1;
+    s.dNdL2[8] = 4*(L4 - L2);
+    s.dNdL2[9] = -4*L3;
+
+    // dN/dL3
+    s.dNdL3[0] = 0;
+    s.dNdL3[1] = 0;
+    s.dNdL3[2] = 4*L3 - 1;
+    s.dNdL3[3] = -(4*L4 - 1);
+    s.dNdL3[4] = 0;
+    s.dNdL3[5] = 4*L2;
+    s.dNdL3[6] = 4*L1;
+    s.dNdL3[7] = -4*L1;
+    s.dNdL3[8] = -4*L2;
+    s.dNdL3[9] = 4*(L4 - L3);
+
+    return s;
+}
+
+LocalKe CTetra10::stiffness_matrix() const {
+    LocalKe Ke = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+    auto coords = node_coords();
+    Eigen::Matrix<double,6,6> D = constitutive_D();
+
+    // 4-point Gauss quadrature for tetrahedra (exact degree 2)
+    // Points in barycentric coords (L1,L2,L3,L4), weight = 1/4 each (sum=1)
+    // Reference: Dunavant, IJNME 1985
+    const double a = 0.5854101966249685; // (5 + 3*sqrt(5)) / 20
+    const double b = 0.1381966011250105; // (5 - sqrt(5)) / 20
+    const double w = 0.25;
+
+    const double pts[4][3] = {
+        {a, b, b},
+        {b, a, b},
+        {b, b, a},
+        {b, b, b}
+    };
+
+    for (int gp = 0; gp < 4; ++gp) {
+        double L1 = pts[gp][0], L2 = pts[gp][1], L3 = pts[gp][2];
+        auto sd = shape_functions(L1, L2, L3);
+
+        // Jacobian: maps (L1,L2,L3) → (x,y,z)
+        // dX/dL = sum_i dNi/dL * xi
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 10; ++n) {
+            J(0,0) += sd.dNdL1[n] * coords[n].x;
+            J(0,1) += sd.dNdL1[n] * coords[n].y;
+            J(0,2) += sd.dNdL1[n] * coords[n].z;
+            J(1,0) += sd.dNdL2[n] * coords[n].x;
+            J(1,1) += sd.dNdL2[n] * coords[n].y;
+            J(1,2) += sd.dNdL2[n] * coords[n].z;
+            J(2,0) += sd.dNdL3[n] * coords[n].x;
+            J(2,1) += sd.dNdL3[n] * coords[n].y;
+            J(2,2) += sd.dNdL3[n] * coords[n].z;
+        }
+        double detJ = J.determinant();
+        // The Jacobian det can be negative depending on node ordering convention in
+        // barycentric coordinates — this is geometrically valid. Use |detJ| for the
+        // integration weight; check only for degeneracy (|detJ| ≈ 0 → zero-volume tet).
+        double absDetJ = std::abs(detJ);
+        if (absDetJ < 1e-14)
+            throw SolverError(std::format("CTETRA10 {}: degenerate element, |det(J)|={:.6g}", eid_.value, absDetJ));
+        Eigen::Matrix3d Jinv = J.inverse();
+
+        // B matrix [6 x 30]
+        Eigen::MatrixXd B(6, NUM_DOFS);
+        B.setZero();
+        for (int n = 0; n < 10; ++n) {
+            double dnx = Jinv(0,0)*sd.dNdL1[n] + Jinv(0,1)*sd.dNdL2[n] + Jinv(0,2)*sd.dNdL3[n];
+            double dny = Jinv(1,0)*sd.dNdL1[n] + Jinv(1,1)*sd.dNdL2[n] + Jinv(1,2)*sd.dNdL3[n];
+            double dnz = Jinv(2,0)*sd.dNdL1[n] + Jinv(2,1)*sd.dNdL2[n] + Jinv(2,2)*sd.dNdL3[n];
+            int c0 = 3*n;
+            B(0,c0+0) = dnx;
+            B(1,c0+1) = dny;
+            B(2,c0+2) = dnz;
+            B(3,c0+0) = dny; B(3,c0+1) = dnx;
+            B(4,c0+1) = dnz; B(4,c0+2) = dny;
+            B(5,c0+0) = dnz; B(5,c0+2) = dnx;
+        }
+
+        // Integration weight: w * |detJ|; the Gauss weights w=0.25 sum to 1 over
+        // the unit reference tet (volume=1/6 in 3-coord space). The transformation
+        // ∫_phys = ∫_ref |detJ| dL; reference tet integral ≈ (1/6)*sum(w_i*f_i)
+        // with w_i=0.25 (scaled so sum(w_i)=1, already includes the 1/6 factor via
+        // the standard Dunavant normalization where weights sum to volume=1/6... no,
+        // the weights here sum to 1 so they need the 1/6 reference volume factor:
+        Ke += B.transpose() * D * B * (w / 6.0) * absDetJ;
+    }
+
+    return Ke;
+}
+
+LocalFe CTetra10::thermal_load(std::span<const double> temperatures, double t_ref) const {
+    LocalFe fe = LocalFe::Zero(NUM_DOFS);
+    const double alpha = material().A;
+    if (alpha == 0.0) return fe;
+
+    auto coords = node_coords();
+    Eigen::Matrix<double,6,6> D = constitutive_D();
+
+    const double a = 0.5854101966249685;
+    const double b = 0.1381966011250105;
+    const double w = 0.25;
+    const double pts[4][3] = {{a,b,b},{b,a,b},{b,b,a},{b,b,b}};
+
+    for (int gp = 0; gp < 4; ++gp) {
+        double L1 = pts[gp][0], L2 = pts[gp][1], L3 = pts[gp][2];
+        auto sd = shape_functions(L1, L2, L3);
+
+        double T = 0;
+        for (int n = 0; n < 10; ++n) T += sd.N[n] * temperatures[n];
+        double dT = T - t_ref;
+        if (std::abs(dT) < 1e-15) continue;
+
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 10; ++n) {
+            J(0,0) += sd.dNdL1[n]*coords[n].x; J(0,1) += sd.dNdL1[n]*coords[n].y; J(0,2) += sd.dNdL1[n]*coords[n].z;
+            J(1,0) += sd.dNdL2[n]*coords[n].x; J(1,1) += sd.dNdL2[n]*coords[n].y; J(1,2) += sd.dNdL2[n]*coords[n].z;
+            J(2,0) += sd.dNdL3[n]*coords[n].x; J(2,1) += sd.dNdL3[n]*coords[n].y; J(2,2) += sd.dNdL3[n]*coords[n].z;
+        }
+        double detJ = J.determinant();
+        double absDetJ = std::abs(detJ);
+        Eigen::Matrix3d Jinv = J.inverse();
+
+        Eigen::MatrixXd B(6, NUM_DOFS);
+        B.setZero();
+        for (int n = 0; n < 10; ++n) {
+            double dnx = Jinv(0,0)*sd.dNdL1[n] + Jinv(0,1)*sd.dNdL2[n] + Jinv(0,2)*sd.dNdL3[n];
+            double dny = Jinv(1,0)*sd.dNdL1[n] + Jinv(1,1)*sd.dNdL2[n] + Jinv(1,2)*sd.dNdL3[n];
+            double dnz = Jinv(2,0)*sd.dNdL1[n] + Jinv(2,1)*sd.dNdL2[n] + Jinv(2,2)*sd.dNdL3[n];
+            int c0 = 3*n;
+            B(0,c0+0)=dnx; B(1,c0+1)=dny; B(2,c0+2)=dnz;
+            B(3,c0+0)=dny; B(3,c0+1)=dnx;
+            B(4,c0+1)=dnz; B(4,c0+2)=dny;
+            B(5,c0+0)=dnz; B(5,c0+2)=dnx;
+        }
+        Eigen::Matrix<double,6,1> eps_th;
+        eps_th << alpha*dT, alpha*dT, alpha*dT, 0, 0, 0;
+        fe += B.transpose() * D * eps_th * (w / 6.0) * absDetJ;
+    }
+    return fe;
+}
+
+std::vector<EqIndex> CTetra10::global_dof_indices(const DofMap& dof_map) const {
+    std::vector<EqIndex> result;
+    result.reserve(NUM_DOFS);
+    static constexpr int solid_dofs[3] = {0,1,2};
+    for (NodeId nid : nodes_)
+        for (int d : solid_dofs)
+            result.push_back(dof_map.eq_index(nid, d));
+    return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CHEXA8EAS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+CHexa8Eas::CHexa8Eas(ElementId eid, PropertyId pid,
+                     std::array<NodeId, 8> node_ids,
+                     const Model& model)
+    : eid_(eid), pid_(pid), nodes_(node_ids), model_(model) {}
+
+const PSolid& CHexa8Eas::psolid() const {
+    const auto& prop = model_.property(pid_);
+    if (!std::holds_alternative<PSolid>(prop))
+        throw SolverError(std::format("CHEXA8EAS {}: property {} is not PSOLID", eid_.value, pid_.value));
+    return std::get<PSolid>(prop);
+}
+
+const Mat1& CHexa8Eas::material() const {
+    return model_.material(psolid().mid);
+}
+
+Eigen::Matrix<double,6,6> CHexa8Eas::constitutive_D() const {
+    const Mat1& m = material();
+    return isotropic_D(m.E, m.nu);
+}
+
+std::array<Vec3, 8> CHexa8Eas::node_coords() const {
+    std::array<Vec3, 8> c;
+    for (int i = 0; i < 8; ++i)
+        c[i] = model_.node(nodes_[i]).position;
+    return c;
+}
+
+LocalKe CHexa8Eas::stiffness_matrix() const {
+    // EAS with 9 internal enhancement modes (3 per parametric direction).
+    // Static condensation: Ke = Kuu - Kua * Kaa^-1 * Kau
+    // Centroidal Jacobian J0 used to map enhancement modes for frame objectivity.
+
+    LocalKe Ke = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+    auto coords = node_coords();
+    Eigen::Matrix<double,6,6> D = constitutive_D();
+
+    // Centroidal Jacobian J0
+    auto sd0 = CHexa8::shape_functions(0.0, 0.0, 0.0);
+    Eigen::Matrix3d J0 = Eigen::Matrix3d::Zero();
+    for (int n = 0; n < 8; ++n) {
+        J0(0,0)+=sd0.dNdxi[n]*coords[n].x; J0(0,1)+=sd0.dNdxi[n]*coords[n].y; J0(0,2)+=sd0.dNdxi[n]*coords[n].z;
+        J0(1,0)+=sd0.dNdeta[n]*coords[n].x; J0(1,1)+=sd0.dNdeta[n]*coords[n].y; J0(1,2)+=sd0.dNdeta[n]*coords[n].z;
+        J0(2,0)+=sd0.dNdzeta[n]*coords[n].x; J0(2,1)+=sd0.dNdzeta[n]*coords[n].y; J0(2,2)+=sd0.dNdzeta[n]*coords[n].z;
+    }
+    double detJ0 = J0.determinant();
+    if (detJ0 <= 0)
+        throw SolverError(std::format("CHEXA8EAS {}: non-positive centroidal Jacobian det={:.6g}", eid_.value, detJ0));
+
+    // Sub-matrices for static condensation
+    Eigen::Matrix<double,24,24> Kuu = Eigen::Matrix<double,24,24>::Zero();
+    Eigen::Matrix<double,24,9>  Kua = Eigen::Matrix<double,24,9>::Zero();
+    Eigen::Matrix<double,9,9>   Kaa = Eigen::Matrix<double,9,9>::Zero();
+
+    auto build_B = [&](const CHexa8::ShapeData& sd, const Eigen::Matrix3d& Jinv,
+                       Eigen::Matrix<double,6,24>& B) {
+        B.setZero();
+        for (int n = 0; n < 8; ++n) {
+            double dnx = Jinv(0,0)*sd.dNdxi[n] + Jinv(0,1)*sd.dNdeta[n] + Jinv(0,2)*sd.dNdzeta[n];
+            double dny = Jinv(1,0)*sd.dNdxi[n] + Jinv(1,1)*sd.dNdeta[n] + Jinv(1,2)*sd.dNdzeta[n];
+            double dnz = Jinv(2,0)*sd.dNdxi[n] + Jinv(2,1)*sd.dNdeta[n] + Jinv(2,2)*sd.dNdzeta[n];
+            int c0 = 3*n;
+            B(0,c0+0)=dnx; B(1,c0+1)=dny; B(2,c0+2)=dnz;
+            B(3,c0+0)=dny; B(3,c0+1)=dnx;
+            B(4,c0+1)=dnz; B(4,c0+2)=dny;
+            B(5,c0+0)=dnz; B(5,c0+2)=dnx;
+        }
+    };
+
+    // Enhancement mode matrix G [6x9] in physical space at a given Gauss point.
+    // 9 modes: xi*(e1), eta*(e2), zeta*(e3) in each of 3 coordinate directions.
+    // Mapped with centroidal Jacobian for frame objectivity (Simo & Rifai 1990).
+    auto build_G = [&](double xi, double eta, double zeta,
+                       double detJ, const Eigen::Matrix3d& Jinv,
+                       Eigen::Matrix<double,6,9>& G) {
+        // In parametric space, enhancement modes are diagonal matrices of
+        // [xi, eta, zeta] ⊗ I3 restricted to symmetric gradient operator.
+        // Physical G = (detJ0/detJ) * T0 * G_param
+        // T0 = transformation from centroidal Jacobian (see Wilson-Taylor):
+        //   For isotropic: G_physical_col = (detJ0/detJ) * J0^{-T} * J^T * e_param_col
+        // Simplified (rectangular element, nearly correct for distorted):
+        // G = (detJ0/detJ) * [symmetric gradient of J0^{-1} * J * param_modes]
+        // Use: Ba(6x9) where mode i adds enhancement in direction (i/3), component (i%3)
+        double scale = detJ0 / detJ;
+        G.setZero();
+
+        // 3 modes for xi: add strain from d(xi * u_i) / dx_j
+        // Enhancement displacement field: u_alpha = xi * delta_{alpha,0}
+        // => strain e = B_enh where B_enh comes from physical gradient of enhancement
+        // Physical gradient of xi in x-space = J^{-T} * [1,0,0]^T (parametric gradient of xi)
+        // But we use J0 for objectivity: grad_phys = J0^{-1} * [1,0,0]^T
+        // Full formula: G_phys = (detJ0/detJ) * sym_grad(J0^{-1} * J_param_shape)
+        // For simplicity use the standard EAS formulation:
+        //   column i of G = (detJ0/detJ) * B_enh_i where B_enh_i encodes the enhancement
+        // Columns 0-2: xi-modes in x,y,z directions
+        // Columns 3-5: eta-modes in x,y,z directions
+        // Columns 6-8: zeta-modes in x,y,z directions
+
+        // Physical B for enhancement: d(param)/dx = J0^{-T} * e_param_dir
+        // where e_param_dir = [1,0,0] for xi, [0,1,0] for eta, [0,0,1] for zeta
+        Eigen::Vector3d gxi_phys  = Jinv.row(0).transpose() * xi;   // J^{-T} * [1,0,0] * xi
+        Eigen::Vector3d geta_phys = Jinv.row(1).transpose() * eta;
+        Eigen::Vector3d gzeta_phys= Jinv.row(2).transpose() * zeta;
+
+        // Use J0 rows for the mapping (frame objectivity)
+        Eigen::Vector3d gxi0   = J0.inverse().row(0).transpose() * xi;
+        Eigen::Vector3d geta0  = J0.inverse().row(1).transpose() * eta;
+        Eigen::Vector3d gzeta0 = J0.inverse().row(2).transpose() * zeta;
+
+        // B_enh for enhancement mode: symmetric gradient of a vector field v
+        // B_sym_grad(v) = [v_x,x; v_y,y; v_z,z; v_x,y+v_y,x; v_y,z+v_z,y; v_x,z+v_z,x]
+        // For displacement mode alpha: u_alpha = param * delta_{alpha,i}
+        // => v = [param, 0, 0] for i=0, etc.
+        // grad(param) in physical = Jinv.row(param_dir)
+        auto fill_G_col = [&](int col, const Eigen::Vector3d& g, int alpha) {
+            // alpha = 0 (x-mode), 1 (y-mode), 2 (z-mode)
+            // u_enh = g * e_alpha → symmetric gradient:
+            double gx = g(0), gy = g(1), gz = g(2);
+            if (alpha == 0) {
+                G(0,col) = gx; G(3,col) = gy; G(5,col) = gz;
+            } else if (alpha == 1) {
+                G(3,col) = gx; G(1,col) = gy; G(4,col) = gz;
+            } else {
+                G(5,col) = gx; G(4,col) = gy; G(2,col) = gz;
+            }
+        };
+
+        fill_G_col(0, gxi0,   0);
+        fill_G_col(1, gxi0,   1);
+        fill_G_col(2, gxi0,   2);
+        fill_G_col(3, geta0,  0);
+        fill_G_col(4, geta0,  1);
+        fill_G_col(5, geta0,  2);
+        fill_G_col(6, gzeta0, 0);
+        fill_G_col(7, gzeta0, 1);
+        fill_G_col(8, gzeta0, 2);
+
+        G *= scale;
+        (void)gxi_phys; (void)geta_phys; (void)gzeta_phys;
+    };
+
+    const double gp = 1.0/std::sqrt(3.0);
+    const double gpts[2] = {-gp, gp};
+
+    for (int gi = 0; gi < 2; ++gi)
+    for (int gj = 0; gj < 2; ++gj)
+    for (int gk = 0; gk < 2; ++gk) {
+        double xi=gpts[gi], eta=gpts[gj], zeta=gpts[gk];
+
+        auto sd = CHexa8::shape_functions(xi, eta, zeta);
+
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 8; ++n) {
+            J(0,0)+=sd.dNdxi[n]*coords[n].x; J(0,1)+=sd.dNdxi[n]*coords[n].y; J(0,2)+=sd.dNdxi[n]*coords[n].z;
+            J(1,0)+=sd.dNdeta[n]*coords[n].x; J(1,1)+=sd.dNdeta[n]*coords[n].y; J(1,2)+=sd.dNdeta[n]*coords[n].z;
+            J(2,0)+=sd.dNdzeta[n]*coords[n].x; J(2,1)+=sd.dNdzeta[n]*coords[n].y; J(2,2)+=sd.dNdzeta[n]*coords[n].z;
+        }
+        double detJ = J.determinant();
+        if (detJ <= 0)
+            throw SolverError(std::format("CHEXA8EAS {}: non-positive Jacobian det={:.6g}", eid_.value, detJ));
+        Eigen::Matrix3d Jinv = J.inverse();
+
+        Eigen::Matrix<double,6,24> B;
+        build_B(sd, Jinv, B);
+
+        Eigen::Matrix<double,6,9> G;
+        build_G(xi, eta, zeta, detJ, Jinv, G);
+
+        double w = detJ; // weights are 1×1×1=1 each
+        Kuu += B.transpose() * D * B * w;
+        Kua += B.transpose() * D * G * w;
+        Kaa += G.transpose() * D * G * w;
+    }
+
+    // Static condensation: Ke = Kuu - Kua * Kaa^{-1} * Kau
+    Eigen::LLT<Eigen::Matrix<double,9,9>> llt(Kaa);
+    if (llt.info() != Eigen::Success)
+        throw SolverError(std::format("CHEXA8EAS {}: Kaa factorization failed", eid_.value));
+    Ke = Kuu - Kua * llt.solve(Kua.transpose());
+    return Ke;
+}
+
+LocalFe CHexa8Eas::thermal_load(std::span<const double> temperatures, double t_ref) const {
+    // EAS enhancement modes have zero mean strain, so thermal load is identical to CHexa8.
+    LocalFe fe = LocalFe::Zero(NUM_DOFS);
+    const double alpha = material().A;
+    if (alpha == 0.0) return fe;
+
+    auto coords = node_coords();
+    Eigen::Matrix<double,6,6> D = constitutive_D();
+
+    const double gp = 1.0/std::sqrt(3.0);
+    const double gpts[2] = {-gp, gp};
+
+    for (int gi = 0; gi < 2; ++gi)
+    for (int gj = 0; gj < 2; ++gj)
+    for (int gk = 0; gk < 2; ++gk) {
+        double xi=gpts[gi], eta=gpts[gj], zeta=gpts[gk];
+
+        auto sd = CHexa8::shape_functions(xi, eta, zeta);
+
+        double T = 0;
+        for (int n = 0; n < 8; ++n) T += sd.N[n] * temperatures[n];
+        double dT = T - t_ref;
+        if (std::abs(dT) < 1e-15) continue;
+
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 8; ++n) {
+            J(0,0)+=sd.dNdxi[n]*coords[n].x; J(0,1)+=sd.dNdxi[n]*coords[n].y; J(0,2)+=sd.dNdxi[n]*coords[n].z;
+            J(1,0)+=sd.dNdeta[n]*coords[n].x; J(1,1)+=sd.dNdeta[n]*coords[n].y; J(1,2)+=sd.dNdeta[n]*coords[n].z;
+            J(2,0)+=sd.dNdzeta[n]*coords[n].x; J(2,1)+=sd.dNdzeta[n]*coords[n].y; J(2,2)+=sd.dNdzeta[n]*coords[n].z;
+        }
+        double detJ = J.determinant();
+        Eigen::Matrix3d Jinv = J.inverse();
+
+        Eigen::Matrix<double,6,24> B;
+        B.setZero();
+        for (int n = 0; n < 8; ++n) {
+            double dnx = Jinv(0,0)*sd.dNdxi[n] + Jinv(0,1)*sd.dNdeta[n] + Jinv(0,2)*sd.dNdzeta[n];
+            double dny = Jinv(1,0)*sd.dNdxi[n] + Jinv(1,1)*sd.dNdeta[n] + Jinv(1,2)*sd.dNdzeta[n];
+            double dnz = Jinv(2,0)*sd.dNdxi[n] + Jinv(2,1)*sd.dNdeta[n] + Jinv(2,2)*sd.dNdzeta[n];
+            int c0=3*n;
+            B(0,c0+0)=dnx; B(1,c0+1)=dny; B(2,c0+2)=dnz;
+            B(3,c0+0)=dny; B(3,c0+1)=dnx;
+            B(4,c0+1)=dnz; B(4,c0+2)=dny;
+            B(5,c0+0)=dnz; B(5,c0+2)=dnx;
+        }
+        Eigen::Matrix<double,6,1> eps_th;
+        eps_th << alpha*dT, alpha*dT, alpha*dT, 0, 0, 0;
+        fe += B.transpose() * D * eps_th * detJ;
+    }
+    return fe;
+}
+
+std::vector<EqIndex> CHexa8Eas::global_dof_indices(const DofMap& dof_map) const {
+    std::vector<EqIndex> result;
+    result.reserve(NUM_DOFS);
+    static constexpr int solid_dofs[3] = {0,1,2};
+    for (NodeId nid : nodes_)
+        for (int d : solid_dofs)
+            result.push_back(dof_map.eq_index(nid, d));
+    return result;
+}
+
 } // namespace nastran

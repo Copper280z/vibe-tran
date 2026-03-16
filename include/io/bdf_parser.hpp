@@ -56,6 +56,7 @@ private:
     static void process_tempd   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_spc     (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_spc1    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_param   (ParseContext& ctx, const std::vector<std::string>& fields);
 
     // Field parsing helpers
     static double parse_double(const std::string& s, int line);
