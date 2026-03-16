@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <format>
 #include <algorithm>
+#include <vector>
 
 namespace nastran {
 
@@ -49,6 +50,50 @@ void DofMap::constrain(NodeId node, int local_dof_0based) {
         }
     }
     --num_free_;
+}
+
+void DofMap::constrain_batch(std::span<const std::pair<NodeId, int>> dofs) {
+    // Step 1: collect eq indices of all DOFs that will be removed.
+    std::vector<EqIndex> removed;
+    removed.reserve(dofs.size());
+    for (const auto &[nid, d] : dofs) {
+        auto it = blocks_.find(nid);
+        if (it == blocks_.end())
+            throw std::runtime_error(
+                std::format("constrain_batch: node {} not in DofMap", nid.value));
+        EqIndex eq = it->second.eq[d];
+        if (eq != CONSTRAINED_DOF)
+            removed.push_back(eq);
+    }
+
+    if (removed.empty()) return;
+
+    // Step 2: sort so we can binary-search the shift for each live index.
+    std::sort(removed.begin(), removed.end());
+    // Remove duplicates (same DOF listed twice).
+    removed.erase(std::unique(removed.begin(), removed.end()), removed.end());
+
+    // Step 3: single pass — shift every live eq index down by the number of
+    // removed indices that are strictly less than it.
+    for (auto &[_, blk] : blocks_) {
+        for (auto &e : blk.eq) {
+            if (e == CONSTRAINED_DOF) continue;
+            // Count removed entries < e
+            auto cnt = static_cast<EqIndex>(
+                std::lower_bound(removed.begin(), removed.end(), e) - removed.begin());
+            e -= cnt;
+        }
+    }
+
+    // Step 4: mark the targeted slots as constrained.
+    for (const auto &[nid, d] : dofs) {
+        EqIndex &eq = blocks_.at(nid).eq[d];
+        // eq may have already been shifted in step 3, but we just set it to
+        // CONSTRAINED_DOF regardless.
+        eq = CONSTRAINED_DOF;
+    }
+
+    num_free_ -= static_cast<int>(removed.size());
 }
 
 EqIndex DofMap::eq_index(NodeId node, int local_dof_0based) const {

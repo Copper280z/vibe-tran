@@ -39,6 +39,10 @@ public:
   /// Mark a DOF as constrained (equation index → CONSTRAINED_DOF)
   void constrain(NodeId node, int local_dof_0based);
 
+  /// Constrain multiple DOFs in one pass.  Equivalent to calling constrain()
+  /// for each entry but O(M log M + N·log M) instead of O(M·N).
+  void constrain_batch(std::span<const std::pair<NodeId, int>> dofs);
+
   /// Retrieve equation index for (node, local_dof 0-based).
   /// Returns CONSTRAINED_DOF if fixed.
   [[nodiscard]] EqIndex eq_index(NodeId node, int local_dof_0based) const;

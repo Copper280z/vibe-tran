@@ -145,6 +145,67 @@ TEST(DofMap, GlobalIndicesMatchEqIndex) {
         EXPECT_EQ(out[d], dm.eq_index(NodeId{1}, d));
 }
 
+// Helper: build a 4-node model
+static std::unordered_map<NodeId, GridPoint> four_nodes() {
+    std::unordered_map<NodeId, GridPoint> nodes;
+    for (int i = 1; i <= 4; ++i)
+        nodes[NodeId{i}] = GridPoint{NodeId{i}, CoordId{0},
+                                     Vec3{static_cast<double>(i), 0, 0}, CoordId{0}};
+    return nodes;
+}
+
+// constrain_batch must produce the same final numbering as the equivalent
+// sequence of constrain() calls.
+TEST(DofMap, ConstrainBatchMatchesSerialConstrain) {
+    auto nodes = four_nodes();
+
+    // Serial reference
+    DofMap serial;
+    serial.build(nodes, 6);
+    serial.constrain(NodeId{1}, 3);
+    serial.constrain(NodeId{1}, 4);
+    serial.constrain(NodeId{1}, 5);
+    serial.constrain(NodeId{2}, 3);
+    serial.constrain(NodeId{2}, 4);
+    serial.constrain(NodeId{2}, 5);
+    serial.constrain(NodeId{3}, 0);
+    serial.constrain(NodeId{4}, 2);
+
+    // Batch
+    DofMap batch;
+    batch.build(nodes, 6);
+    std::vector<std::pair<NodeId,int>> dofs = {
+        {NodeId{1},3},{NodeId{1},4},{NodeId{1},5},
+        {NodeId{2},3},{NodeId{2},4},{NodeId{2},5},
+        {NodeId{3},0},{NodeId{4},2}
+    };
+    batch.constrain_batch(dofs);
+
+    EXPECT_EQ(batch.num_free_dofs(), serial.num_free_dofs());
+    for (int n = 1; n <= 4; ++n)
+        for (int d = 0; d < 6; ++d)
+            EXPECT_EQ(batch.eq_index(NodeId{n}, d), serial.eq_index(NodeId{n}, d))
+                << "mismatch at node " << n << " dof " << d;
+}
+
+// Duplicate entries in the batch list must not double-count or corrupt indices.
+TEST(DofMap, ConstrainBatchIgnoresDuplicates) {
+    auto nodes = two_nodes();
+    DofMap dm;
+    dm.build(nodes, 6);
+
+    // Constraining the same DOF twice should be idempotent.
+    std::vector<std::pair<NodeId,int>> dofs = {
+        {NodeId{1},0},{NodeId{1},0},{NodeId{1},1}
+    };
+    dm.constrain_batch(dofs);
+
+    EXPECT_EQ(dm.num_free_dofs(), 10); // 12 - 2 unique constraints
+    EXPECT_EQ(dm.eq_index(NodeId{1}, 0), CONSTRAINED_DOF);
+    EXPECT_EQ(dm.eq_index(NodeId{1}, 1), CONSTRAINED_DOF);
+    EXPECT_NE(dm.eq_index(NodeId{1}, 2), CONSTRAINED_DOF);
+}
+
 TEST(DofMap, GlobalIndicesAfterConstraint) {
     auto nodes = two_nodes();
     DofMap dm;

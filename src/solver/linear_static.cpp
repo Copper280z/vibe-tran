@@ -9,7 +9,9 @@
 #include "elements/solid_elements.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
+#include <chrono>
 #include <format>
+#include <iostream>
 #include <numbers>
 
 namespace nastran {
@@ -29,28 +31,60 @@ SolverResults LinearStaticSolver::solve(const Model &model) {
 
 SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
                                                  const SubCase &sc) {
+  using Clock = std::chrono::steady_clock;
+  using Ms = std::chrono::duration<double, std::milli>;
+  const auto t0 = Clock::now();
+
   // 1. Build DOF map and apply boundary conditions
   DofMap dof_map = build_dof_map(model, sc);
   const int n = dof_map.num_free_dofs();
+  const auto t1 = Clock::now();
+  std::clog << std::format("[subcase {}] build_dof_map: {:.3f} ms  ({} free DOFs)\n",
+                           sc.id, Ms(t1 - t0).count(), n);
 
   // 2. Assemble global K and F
   SparseMatrixBuilder K_builder(n);
   std::vector<double> F(static_cast<size_t>(n), 0.0);
 
   assemble(model, sc, dof_map, K_builder, F);
+  const auto t2 = Clock::now();
+  std::clog << std::format("[subcase {}] assemble K: {:.3f} ms\n",
+                           sc.id, Ms(t2 - t1).count());
+
   apply_point_loads(model, sc, dof_map, F);
+  const auto t3 = Clock::now();
+  std::clog << std::format("[subcase {}] apply_point_loads: {:.3f} ms\n",
+                           sc.id, Ms(t3 - t2).count());
+
   apply_thermal_loads(model, sc, dof_map, K_builder, F);
+  const auto t4 = Clock::now();
+  std::clog << std::format("[subcase {}] apply_thermal_loads: {:.3f} ms\n",
+                           sc.id, Ms(t4 - t3).count());
 
   // 3. Solve
   auto csr = K_builder.build_csr();
   std::vector<double> u_free = backend_->solve(csr, F);
+  const auto t5 = Clock::now();
+  std::clog << std::format("[subcase {}] linear solve: {:.3f} ms\n",
+                           sc.id, Ms(t5 - t4).count());
 
   // 4. Recover results
-  return recover_results(model, sc, dof_map, u_free);
+  SubCaseResults result = recover_results(model, sc, dof_map, u_free);
+  const auto t6 = Clock::now();
+  std::clog << std::format("[subcase {}] recover_results: {:.3f} ms\n",
+                           sc.id, Ms(t6 - t5).count());
+  std::clog << std::format("[subcase {}] total: {:.3f} ms\n",
+                           sc.id, Ms(t6 - t0).count());
+
+  return result;
 }
 
 DofMap LinearStaticSolver::build_dof_map(const Model &model,
                                          const SubCase &sc) {
+  using Clock = std::chrono::steady_clock;
+  using Ms = std::chrono::duration<double, std::milli>;
+  const auto t0 = Clock::now();
+
   // Determine default DOF count per node:
   // If any shell element exists → 6 DOF/node
   // Solid-only → 3 DOF/node (but to be safe, use 6 always and just constrain
@@ -58,14 +92,22 @@ DofMap LinearStaticSolver::build_dof_map(const Model &model,
   // T1-T3.
   DofMap dmap;
   dmap.build(model.nodes, 6);
+  const auto t1 = Clock::now();
+  std::clog << std::format("[subcase {}]   dof_map build: {:.3f} ms\n",
+                           sc.id, Ms(t1 - t0).count());
 
   // Apply SPCs
-  for (const Spc *spc : model.spcs_for_set(sc.spc_set)) {
-    for (int d = 0; d < 6; ++d) {
-      if (spc->dofs.has(d + 1))
-        dmap.constrain(spc->node, d);
-    }
+  {
+    std::vector<std::pair<NodeId, int>> spc_constraints;
+    for (const Spc *spc : model.spcs_for_set(sc.spc_set))
+      for (int d = 0; d < 6; ++d)
+        if (spc->dofs.has(d + 1))
+          spc_constraints.emplace_back(spc->node, d);
+    dmap.constrain_batch(spc_constraints);
   }
+  const auto t2 = Clock::now();
+  std::clog << std::format("[subcase {}]   apply SPCs: {:.3f} ms\n",
+                           sc.id, Ms(t2 - t1).count());
 
   // For solid-element-only nodes: constrain rotational DOFs (3-5)
   // We do this by checking which nodes are only connected to solid elements.
@@ -83,13 +125,19 @@ DofMap LinearStaticSolver::build_dof_map(const Model &model,
         node_has_shell[nid] = true;
   }
 
-  // Constrain rotational DOFs on nodes that have NO shell element
-  for (const auto &[nid, has_shell] : node_has_shell) {
-    if (!has_shell) {
-      for (int d = 3; d < 6; ++d)
-        dmap.constrain(nid, d);
-    }
+  // Constrain rotational DOFs on nodes that have NO shell element (batch)
+  {
+    std::vector<std::pair<NodeId, int>> rot_constraints;
+    rot_constraints.reserve(node_has_shell.size() * 3);
+    for (const auto &[nid, has_shell] : node_has_shell)
+      if (!has_shell)
+        for (int d = 3; d < 6; ++d)
+          rot_constraints.emplace_back(nid, d);
+    dmap.constrain_batch(rot_constraints);
   }
+  const auto t3 = Clock::now();
+  std::clog << std::format("[subcase {}]   constrain solid-only rot DOFs: {:.3f} ms\n",
+                           sc.id, Ms(t3 - t2).count());
 
   return dmap;
 }
