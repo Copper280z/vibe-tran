@@ -226,6 +226,8 @@ def generate(n_target: int, load_case: str, out_path: str) -> None:
         "bending": "CHEXA CANTILEVER BENDING",
     }
     wr(f"  LABEL = {labels[load_case]}")
+    wr("  DISPLACEMENT(PRINT) = ALL")
+    wr("  STRESS(PRINT) = ALL")
     wr("  LOAD  = 1")
     wr("  SPC   = 1")
     wr("BEGIN BULK")
