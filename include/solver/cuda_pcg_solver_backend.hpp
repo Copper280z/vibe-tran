@@ -2,10 +2,15 @@
 // include/solver/cuda_pcg_solver_backend.hpp
 // CUDA Preconditioned Conjugate Gradient solver backend.
 //
-// Algorithm: PCG with Jacobi (diagonal) preconditioning.
+// Algorithm: PCG with IC0 → ILU0 → Jacobi fallback preconditioning.
 //   - cuSPARSE generic API for sparse matrix-vector products (K*p)
+//   - cuSPARSE SpSV for triangular forward/backward solves (IC0/ILU0)
 //   - cuBLAS for dot products and axpy operations
 //   - Custom CUDA kernels for Jacobi preconditioner apply and axpby
+//
+// Single-precision mode: pass use_single_precision=true to try_create() to
+// perform the entire solve in float32.  Halves device memory usage vs float64,
+// which is useful for very large problems (hundreds of millions of nnz).
 //
 // Memory footprint: O(nnz + n) device memory — the matrix is stored once on
 // the device and no fill-in factorisation is performed.  This makes the PCG
@@ -39,10 +44,13 @@ public:
     CudaPCGSolverBackend& operator=(const CudaPCGSolverBackend&) = delete;
 
     /// Factory — returns nullopt when no CUDA device is available.
-    /// @param tolerance   Relative residual convergence threshold.
-    /// @param max_iters   Maximum PCG iterations (0 = default: 10000).
+    /// @param use_single_precision  Perform the solve in float32 (halves VRAM usage).
+    /// @param tolerance             Relative residual convergence threshold.
+    /// @param max_iters             Maximum PCG iterations (0 = default: 10000).
     [[nodiscard]] static std::optional<CudaPCGSolverBackend>
-    try_create(double tolerance = 1e-8, int max_iters = 0) noexcept;
+    try_create(bool use_single_precision = false,
+               double tolerance = 1e-8,
+               int max_iters = 0) noexcept;
 
     /// Solve K*u = F using PCG with Jacobi preconditioning on the GPU.
     /// Throws SolverError if the system does not converge or on GPU errors.
@@ -62,6 +70,9 @@ public:
 
     /// GPU device name reported by the CUDA runtime.
     [[nodiscard]] std::string_view device_name() const noexcept;
+
+    /// True when the backend was created with use_single_precision=true.
+    [[nodiscard]] bool uses_single_precision() const noexcept;
 
 private:
     explicit CudaPCGSolverBackend(std::unique_ptr<CudaPCGContext> ctx) noexcept;

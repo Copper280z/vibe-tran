@@ -115,7 +115,7 @@ int main(int argc, char* argv[]) {
 #endif
         } else if (backend_choice == BackendChoice::CudaPCG) {
 #ifdef HAVE_CUDA
-            auto cu = nastran::CudaPCGSolverBackend::try_create();
+            auto cu = nastran::CudaPCGSolverBackend::try_create(cuda_single_precision);
             if (cu.has_value()) {
                 backend = std::make_unique<nastran::CudaPCGSolverBackend>(std::move(*cu));
             } else {

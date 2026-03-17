@@ -1,32 +1,40 @@
 // src/solver/cuda_pcg_solver_backend.cu
 // CUDA Preconditioned Conjugate Gradient solver backend.
 //
+// Scalar precision:
+//   Double precision (default): all device buffers and arithmetic use float64.
+//   Single precision (--cuda-single-precision): all device buffers and
+//   arithmetic use float32, halving VRAM for every allocation (matrix, IC0/ILU0
+//   factor copy, SpSV scratch, PCG vectors). Input K and F are downcast to
+//   float32 before the solve; the result is upcast back to double64. Achievable
+//   accuracy is limited by float32 roundoff (~1e-7).
+//
 // Preconditioner selection (tried in order):
-//   1. IC0 (Incomplete Cholesky, zero fill-in) via cusparseDcsric02.
+//   1. IC0 (Incomplete Cholesky, zero fill-in) via cusparseTcsric02.
 //      Optimal for SPD FEM stiffness matrices; reduces iteration count 10-100×
 //      vs Jacobi.  Factorization is in-place on a copy of K; apply = two
 //      triangular solves with cusparseSpSV (forward L, backward L^T).
-//   2. ILU0 (Incomplete LU, zero fill-in) via cusparseDcsrilu02.
-//      Used when IC0 setup fails (zero pivot, non-SPD matrix).  Apply = forward
-//      L solve + backward U solve.
+//   2. ILU0 (Incomplete LU, zero fill-in) via cusparseTcsrilu02.
+//      Used when IC0 setup fails (zero pivot, non-SPD matrix).
 //   3. Jacobi (diagonal scaling).  Always succeeds; weakest preconditioner.
 //
-// PCG loop:
+// PCG loop (executed entirely in type T):
 //   r = F, z = M^{-1}r, p = z, rz = r·z
 //   while not converged:
-//     Ap = K*p                (cusparseSpMV)
+//     Ap = K*p  (cusparseSpMV)
 //     alpha = rz / (p·Ap)
 //     u += alpha*p, r -= alpha*Ap
-//     z = M^{-1}r             (two triangular solves or Jacobi kernel)
+//     z = M^{-1}r
 //     rz_new = r·z
 //     if sqrt(rz_new/rz0) < tol: done
-//     p = z + (rz_new/rz)*p  (axpby kernel)
+//     p = z + (rz_new/rz)*p
 //     rz = rz_new
 //
-// Dense vector descriptors used in analysis must be the same handles reused in
-// solve; they are stored inside TriangPrecond and point to fixed device buffers.
+// Dense vector descriptors (vec_r, vec_tmp, vec_z) are created during
+// preconditioner setup and reused in every apply call — cusparseSpSV requires
+// the same descriptor handles in solve() as were used in analysis().
 //
-// Note: <format> / std::format is intentionally avoided — nvcc uses its bundled
+// Note: <format> / std::format intentionally avoided — nvcc uses its bundled
 // g++-12 as host compiler, which does not provide <format>.
 #define HAVE_CUDA 1
 
@@ -42,9 +50,10 @@
 #include <string>
 #include <vector>
 
+// ── Memory logging helper ─────────────────────────────────────────────────────
+
 namespace {
 
-// Log free/total device memory alongside a label.
 static void log_mem(const char* label, std::size_t extra_bytes = 0) {
     std::size_t free_bytes = 0, total_bytes = 0;
     cudaMemGetInfo(&free_bytes, &total_bytes);
@@ -75,7 +84,8 @@ struct PCGDeviceBuffer {
         if (err != cudaSuccess)
             throw SolverError(
                 "CUDA PCG: cudaMalloc failed for " + std::to_string(count) +
-                " elements: " + cudaGetErrorString(err));
+                " elements (" + std::to_string(count * sizeof(T)) +
+                " bytes): " + cudaGetErrorString(err));
     }
     ~PCGDeviceBuffer() { if (ptr) cudaFree(ptr); }
 
@@ -108,13 +118,122 @@ struct PCGDeviceBuffer {
     void zero(std::size_t count) { cudaMemset(ptr, 0, count * sizeof(T)); }
 };
 
+// ── Scalar type traits ────────────────────────────────────────────────────────
+// Dispatch to the correct cuBLAS and cuSPARSE type-specific functions.
+
+template<typename T> struct ScalarTraits;
+
+template<> struct ScalarTraits<double> {
+    static constexpr cudaDataType_t cuda_dtype = CUDA_R_64F;
+    static const char* name() { return "float64"; }
+
+    static cublasStatus_t dot(cublasHandle_t h, int n,
+        const double* x, const double* y, double* r) {
+        return cublasDdot(h, n, x, 1, y, 1, r);
+    }
+    static cublasStatus_t axpy(cublasHandle_t h, int n,
+        const double* alpha, const double* x, double* y) {
+        return cublasDaxpy(h, n, alpha, x, 1, y, 1);
+    }
+
+    static cusparseStatus_t csric02_buffer_size(
+        cusparseHandle_t h, int m, int nnz, const cusparseMatDescr_t d,
+        double* vals, const int* row, const int* col,
+        csric02Info_t info, int* buf_sz) {
+        return cusparseDcsric02_bufferSize(h, m, nnz, d, vals, row, col, info, buf_sz);
+    }
+    static cusparseStatus_t csric02_analysis(
+        cusparseHandle_t h, int m, int nnz, const cusparseMatDescr_t d,
+        double* vals, const int* row, const int* col,
+        csric02Info_t info, cusparseSolvePolicy_t pol, void* buf) {
+        return cusparseDcsric02_analysis(h, m, nnz, d, vals, row, col, info, pol, buf);
+    }
+    static cusparseStatus_t csric02(
+        cusparseHandle_t h, int m, int nnz, const cusparseMatDescr_t d,
+        double* vals, const int* row, const int* col,
+        csric02Info_t info, cusparseSolvePolicy_t pol, void* buf) {
+        return cusparseDcsric02(h, m, nnz, d, vals, row, col, info, pol, buf);
+    }
+
+    static cusparseStatus_t csrilu02_buffer_size(
+        cusparseHandle_t h, int m, int nnz, const cusparseMatDescr_t d,
+        double* vals, const int* row, const int* col,
+        csrilu02Info_t info, int* buf_sz) {
+        return cusparseDcsrilu02_bufferSize(h, m, nnz, d, vals, row, col, info, buf_sz);
+    }
+    static cusparseStatus_t csrilu02_analysis(
+        cusparseHandle_t h, int m, int nnz, const cusparseMatDescr_t d,
+        double* vals, const int* row, const int* col,
+        csrilu02Info_t info, cusparseSolvePolicy_t pol, void* buf) {
+        return cusparseDcsrilu02_analysis(h, m, nnz, d, vals, row, col, info, pol, buf);
+    }
+    static cusparseStatus_t csrilu02(
+        cusparseHandle_t h, int m, int nnz, const cusparseMatDescr_t d,
+        double* vals, const int* row, const int* col,
+        csrilu02Info_t info, cusparseSolvePolicy_t pol, void* buf) {
+        return cusparseDcsrilu02(h, m, nnz, d, vals, row, col, info, pol, buf);
+    }
+};
+
+template<> struct ScalarTraits<float> {
+    static constexpr cudaDataType_t cuda_dtype = CUDA_R_32F;
+    static const char* name() { return "float32"; }
+
+    static cublasStatus_t dot(cublasHandle_t h, int n,
+        const float* x, const float* y, float* r) {
+        return cublasSdot(h, n, x, 1, y, 1, r);
+    }
+    static cublasStatus_t axpy(cublasHandle_t h, int n,
+        const float* alpha, const float* x, float* y) {
+        return cublasSaxpy(h, n, alpha, x, 1, y, 1);
+    }
+
+    static cusparseStatus_t csric02_buffer_size(
+        cusparseHandle_t h, int m, int nnz, const cusparseMatDescr_t d,
+        float* vals, const int* row, const int* col,
+        csric02Info_t info, int* buf_sz) {
+        return cusparseScsric02_bufferSize(h, m, nnz, d, vals, row, col, info, buf_sz);
+    }
+    static cusparseStatus_t csric02_analysis(
+        cusparseHandle_t h, int m, int nnz, const cusparseMatDescr_t d,
+        float* vals, const int* row, const int* col,
+        csric02Info_t info, cusparseSolvePolicy_t pol, void* buf) {
+        return cusparseScsric02_analysis(h, m, nnz, d, vals, row, col, info, pol, buf);
+    }
+    static cusparseStatus_t csric02(
+        cusparseHandle_t h, int m, int nnz, const cusparseMatDescr_t d,
+        float* vals, const int* row, const int* col,
+        csric02Info_t info, cusparseSolvePolicy_t pol, void* buf) {
+        return cusparseScsric02(h, m, nnz, d, vals, row, col, info, pol, buf);
+    }
+
+    static cusparseStatus_t csrilu02_buffer_size(
+        cusparseHandle_t h, int m, int nnz, const cusparseMatDescr_t d,
+        float* vals, const int* row, const int* col,
+        csrilu02Info_t info, int* buf_sz) {
+        return cusparseScsrilu02_bufferSize(h, m, nnz, d, vals, row, col, info, buf_sz);
+    }
+    static cusparseStatus_t csrilu02_analysis(
+        cusparseHandle_t h, int m, int nnz, const cusparseMatDescr_t d,
+        float* vals, const int* row, const int* col,
+        csrilu02Info_t info, cusparseSolvePolicy_t pol, void* buf) {
+        return cusparseScsrilu02_analysis(h, m, nnz, d, vals, row, col, info, pol, buf);
+    }
+    static cusparseStatus_t csrilu02(
+        cusparseHandle_t h, int m, int nnz, const cusparseMatDescr_t d,
+        float* vals, const int* row, const int* col,
+        csrilu02Info_t info, cusparseSolvePolicy_t pol, void* buf) {
+        return cusparseScsrilu02(h, m, nnz, d, vals, row, col, info, pol, buf);
+    }
+};
+
 // ── Custom CUDA kernels ───────────────────────────────────────────────────────
 
-// Jacobi preconditioner: z[i] = r[i] * d_inv[i]
+template<typename T>
 __global__ static void jacobi_kernel(
-    const double* __restrict__ r,
-    const double* __restrict__ d_inv,
-    double* __restrict__ z,
+    const T* __restrict__ r,
+    const T* __restrict__ d_inv,
+    T* __restrict__ z,
     int n)
 {
     int i = static_cast<int>(blockIdx.x) * blockDim.x +
@@ -122,12 +241,12 @@ __global__ static void jacobi_kernel(
     if (i < n) z[i] = r[i] * d_inv[i];
 }
 
-// axpby: y[i] = alpha*x[i] + beta*y[i]
+template<typename T>
 __global__ static void axpby_kernel(
-    const double* __restrict__ x,
-    double alpha,
-    double beta,
-    double* __restrict__ y,
+    const T* __restrict__ x,
+    T alpha,
+    T beta,
+    T* __restrict__ y,
     int n)
 {
     int i = static_cast<int>(blockIdx.x) * blockDim.x +
@@ -137,12 +256,14 @@ __global__ static void axpby_kernel(
 
 static constexpr int kBlock = 256;
 
-static void launch_jacobi(const double* r, const double* d_inv, double* z, int n) {
-    jacobi_kernel<<<(n + kBlock - 1) / kBlock, kBlock>>>(r, d_inv, z, n);
+template<typename T>
+static void launch_jacobi(const T* r, const T* d_inv, T* z, int n) {
+    jacobi_kernel<T><<<(n + kBlock - 1) / kBlock, kBlock>>>(r, d_inv, z, n);
 }
 
-static void launch_axpby(const double* x, double a, double b, double* y, int n) {
-    axpby_kernel<<<(n + kBlock - 1) / kBlock, kBlock>>>(x, a, b, y, n);
+template<typename T>
+static void launch_axpby(const T* x, T a, T b, T* y, int n) {
+    axpby_kernel<T><<<(n + kBlock - 1) / kBlock, kBlock>>>(x, a, b, y, n);
 }
 
 // ── Preconditioner type ───────────────────────────────────────────────────────
@@ -151,32 +272,27 @@ enum class PrecondKind { IC0, ILU0, Jacobi };
 
 // Stores all GPU resources for a triangular (IC0 or ILU0) preconditioner.
 // Dense vector descriptors (vec_r, vec_tmp, vec_z) are created during setup
-// and reused in each apply call — cusparseSpSV requires the same descriptor
+// and reused in every apply call — cusparseSpSV requires the same descriptor
 // handles in solve() as were used in analysis().
+template<typename T>
 struct TriangPrecond {
-    PCGDeviceBuffer<double> d_M_vals;    // in-place IC0 or ILU0 factored values
-    PCGDeviceBuffer<char>   d_factor_buf; // scratch for csric02 / csrilu02
+    PCGDeviceBuffer<T>    d_M_vals;     // in-place IC0 or ILU0 factored values
+    PCGDeviceBuffer<char> d_factor_buf; // scratch for csric02 / csrilu02
 
-    // Sparse matrix descriptors for triangular factors.
-    // IC0:  mat_L only (FILL_MODE_LOWER); backward solve uses TRANSPOSE.
-    // ILU0: mat_L (FILL_MODE_LOWER, unit-diag) + mat_U (FILL_MODE_UPPER).
     cusparseSpMatDescr_t mat_L = nullptr;
-    cusparseSpMatDescr_t mat_U = nullptr;  // ILU0 only; null for IC0
+    cusparseSpMatDescr_t mat_U = nullptr; // ILU0 only; null for IC0
 
-    // Triangular-solve descriptors.  sv_L = forward solve, sv_UT = backward.
     cusparseSpSVDescr_t sv_L  = nullptr;
     cusparseSpSVDescr_t sv_UT = nullptr;
     PCGDeviceBuffer<char> d_sv_L_buf;
     PCGDeviceBuffer<char> d_sv_UT_buf;
 
-    // Intermediate buffer: tmp = L^{-1}r, then z = U^{-1}tmp.
-    PCGDeviceBuffer<double> d_tmp;
+    PCGDeviceBuffer<T> d_tmp; // intermediate: tmp = L^{-1}r
 
-    // Dense vector descriptors.  MUST be the same handles passed to both
-    // cusparseSpSV_analysis() and cusparseSpSV_solve().
-    cusparseDnVecDescr_t vec_r   = nullptr;  // points to PCG d_r
-    cusparseDnVecDescr_t vec_tmp = nullptr;  // points to d_tmp
-    cusparseDnVecDescr_t vec_z   = nullptr;  // points to PCG d_z
+    // Dense vector descriptors held for the lifetime of this object.
+    cusparseDnVecDescr_t vec_r   = nullptr; // points to PCG d_r
+    cusparseDnVecDescr_t vec_tmp = nullptr; // points to d_tmp
+    cusparseDnVecDescr_t vec_z   = nullptr; // points to PCG d_z
 
     ~TriangPrecond() {
         if (vec_r)   cusparseDestroyDnVec(vec_r);
@@ -190,24 +306,26 @@ struct TriangPrecond {
 };
 
 // ── IC0 factorization and SpSV setup ─────────────────────────────────────────
-// Returns false on structural/numerical zero pivots so the caller can retry.
+// Returns false on zero pivots so the caller can retry with ILU0.
+template<typename T>
 static bool setup_ic0(
     cusparseHandle_t cusparse,
     int n, int nnz,
-    const int* d_row_ptr, const int* d_col_ind, const double* d_values,
-    double* d_r, double* d_z,
-    TriangPrecond& tp)
+    const int* d_row_ptr, const int* d_col_ind, const T* d_values,
+    T* d_r, T* d_z,
+    TriangPrecond<T>& tp)
 {
-    // Working copy of K values (IC0 factorizes lower triangle in-place).
-    tp.d_M_vals = PCGDeviceBuffer<double>(nnz);
-    tp.d_tmp    = PCGDeviceBuffer<double>(n);
+    using Tr = ScalarTraits<T>;
+    constexpr double kMiB = 1024.0 * 1024.0;
+
+    tp.d_M_vals = PCGDeviceBuffer<T>(nnz);
+    tp.d_tmp    = PCGDeviceBuffer<T>(n);
 
     cudaMemcpy(tp.d_M_vals.ptr, d_values,
-               static_cast<std::size_t>(nnz) * sizeof(double),
+               static_cast<std::size_t>(nnz) * sizeof(T),
                cudaMemcpyDeviceToDevice);
 
     // GENERAL + FILL_MODE_LOWER: csric02 reads only the lower triangle.
-    // SYMMETRIC type is not supported for csric02 in CUDA 12.x.
     cusparseMatDescr_t descr = nullptr;
     cusparseCreateMatDescr(&descr);
     cusparseSetMatType(descr, CUSPARSE_MATRIX_TYPE_GENERAL);
@@ -219,7 +337,7 @@ static bool setup_ic0(
     cusparseCreateCsric02Info(&info);
 
     int buf_size = 0;
-    cusparseStatus_t cs = cusparseDcsric02_bufferSize(
+    cusparseStatus_t cs = Tr::csric02_buffer_size(
         cusparse, n, nnz, descr,
         tp.d_M_vals.ptr, d_row_ptr, d_col_ind, info, &buf_size);
     if (cs != CUSPARSE_STATUS_SUCCESS) {
@@ -229,31 +347,31 @@ static bool setup_ic0(
                           std::to_string(static_cast<int>(cs)));
     }
 
-    // factored copy of K values + intermediate tmp vector + factor scratch
-    const std::size_t precond_bytes = static_cast<std::size_t>(nnz) * sizeof(double)
-                                    + static_cast<std::size_t>(n) * sizeof(double)
-                                    + static_cast<std::size_t>(buf_size > 0 ? buf_size : 1);
+    const std::size_t precond_bytes =
+        static_cast<std::size_t>(nnz) * sizeof(T)   // d_M_vals
+      + static_cast<std::size_t>(n)   * sizeof(T)   // d_tmp
+      + static_cast<std::size_t>(buf_size > 0 ? buf_size : 1);
     log_mem("IC0 factor alloc", precond_bytes);
-    std::clog << "[cuda-pcg] IC0 factor scratch=" << buf_size / (1024.0 * 1024.0)
-              << " MiB\n";
+    std::clog << "[cuda-pcg] IC0 factor scratch="
+              << buf_size / kMiB << " MiB\n";
 
     tp.d_factor_buf = PCGDeviceBuffer<char>(buf_size > 0 ? buf_size : 1);
 
-    cusparseDcsric02_analysis(cusparse, n, nnz, descr,
+    Tr::csric02_analysis(cusparse, n, nnz, descr,
         tp.d_M_vals.ptr, d_row_ptr, d_col_ind, info,
         CUSPARSE_SOLVE_POLICY_NO_LEVEL, tp.d_factor_buf.ptr);
 
     int structural_zero = -1;
     cusparseXcsric02_zeroPivot(cusparse, info, &structural_zero);
     if (structural_zero >= 0 || cs != CUSPARSE_STATUS_SUCCESS) {
-        std::clog << "[cuda-pcg] IC0: structural zero at row " << structural_zero
-                  << " -- retrying with ILU0\n";
+        std::clog << "[cuda-pcg] IC0: structural zero at row "
+                  << structural_zero << " -- retrying with ILU0\n";
         cusparseDestroyCsric02Info(info);
         cusparseDestroyMatDescr(descr);
         return false;
     }
 
-    cs = cusparseDcsric02(cusparse, n, nnz, descr,
+    cs = Tr::csric02(cusparse, n, nnz, descr,
         tp.d_M_vals.ptr, d_row_ptr, d_col_ind, info,
         CUSPARSE_SOLVE_POLICY_NO_LEVEL, tp.d_factor_buf.ptr);
 
@@ -263,22 +381,19 @@ static bool setup_ic0(
     cusparseDestroyMatDescr(descr);
 
     if (numerical_zero >= 0 || cs != CUSPARSE_STATUS_SUCCESS) {
-        std::clog << "[cuda-pcg] IC0: numerical zero at row " << numerical_zero
-                  << " -- retrying with ILU0\n";
+        std::clog << "[cuda-pcg] IC0: numerical zero at row "
+                  << numerical_zero << " -- retrying with ILU0\n";
         return false;
     }
 
     // ── SpSV setup ────────────────────────────────────────────────────────────
-    // mat_L = lower triangle of d_M_vals (contains L after IC0).
-    // Forward solve: L * tmp = r  (NON_TRANSPOSE).
-    // Backward solve: L^T * z = tmp  (TRANSPOSE on mat_L).
     cusparseCreateCsr(&tp.mat_L,
         static_cast<int64_t>(n), static_cast<int64_t>(n),
         static_cast<int64_t>(nnz),
         const_cast<int*>(d_row_ptr), const_cast<int*>(d_col_ind),
         tp.d_M_vals.ptr,
         CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F);
+        CUSPARSE_INDEX_BASE_ZERO, Tr::cuda_dtype);
     {
         cusparseFillMode_t fill_L  = CUSPARSE_FILL_MODE_LOWER;
         cusparseDiagType_t diag_nu = CUSPARSE_DIAG_TYPE_NON_UNIT;
@@ -287,41 +402,36 @@ static bool setup_ic0(
         cusparseSpMatSetAttribute(tp.mat_L, CUSPARSE_SPMAT_DIAG_TYPE,
                                   &diag_nu, sizeof(diag_nu));
     }
-    tp.mat_U = nullptr; // IC0 uses transpose of mat_L, not a separate descriptor
+    tp.mat_U = nullptr;
 
-    // Create dense vector descriptors that persist for the lifetime of TriangPrecond.
-    cusparseCreateDnVec(&tp.vec_r,   n, d_r,          CUDA_R_64F);
-    cusparseCreateDnVec(&tp.vec_tmp, n, tp.d_tmp.ptr, CUDA_R_64F);
-    cusparseCreateDnVec(&tp.vec_z,   n, d_z,          CUDA_R_64F);
+    cusparseCreateDnVec(&tp.vec_r,   n, d_r,          Tr::cuda_dtype);
+    cusparseCreateDnVec(&tp.vec_tmp, n, tp.d_tmp.ptr, Tr::cuda_dtype);
+    cusparseCreateDnVec(&tp.vec_z,   n, d_z,          Tr::cuda_dtype);
 
     cusparseSpSV_createDescr(&tp.sv_L);
     cusparseSpSV_createDescr(&tp.sv_UT);
 
-    const double one = 1.0;
+    const T one{1};
 
-    // Forward: L * tmp = r
     std::size_t sz = 0;
     cusparseSpSV_bufferSize(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
         tp.mat_L, tp.vec_r, tp.vec_tmp,
-        CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_L, &sz);
+        Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_L, &sz);
+    std::clog << "[cuda-pcg] IC0 SpSV forward scratch=" << sz / kMiB << " MiB\n";
     tp.d_sv_L_buf = PCGDeviceBuffer<char>(sz > 0 ? sz : 1);
-    std::clog << "[cuda-pcg] IC0 SpSV forward scratch=" << sz / (1024.0 * 1024.0)
-              << " MiB\n";
     cusparseSpSV_analysis(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
         tp.mat_L, tp.vec_r, tp.vec_tmp,
-        CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_L, tp.d_sv_L_buf.ptr);
+        Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_L, tp.d_sv_L_buf.ptr);
 
-    // Backward: L^T * z = tmp
     sz = 0;
     cusparseSpSV_bufferSize(cusparse, CUSPARSE_OPERATION_TRANSPOSE, &one,
         tp.mat_L, tp.vec_tmp, tp.vec_z,
-        CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, &sz);
+        Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, &sz);
+    std::clog << "[cuda-pcg] IC0 SpSV backward scratch=" << sz / kMiB << " MiB\n";
     tp.d_sv_UT_buf = PCGDeviceBuffer<char>(sz > 0 ? sz : 1);
-    std::clog << "[cuda-pcg] IC0 SpSV backward scratch=" << sz / (1024.0 * 1024.0)
-              << " MiB\n";
     cusparseSpSV_analysis(cusparse, CUSPARSE_OPERATION_TRANSPOSE, &one,
         tp.mat_L, tp.vec_tmp, tp.vec_z,
-        CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, tp.d_sv_UT_buf.ptr);
+        Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, tp.d_sv_UT_buf.ptr);
 
     log_mem("after IC0 setup");
     std::clog << "[cuda-pcg] IC0 preconditioner setup successful\n";
@@ -329,19 +439,22 @@ static bool setup_ic0(
 }
 
 // ── ILU0 factorization and SpSV setup ────────────────────────────────────────
-// Returns false on zero pivot so the caller can fall back to Jacobi.
+template<typename T>
 static bool setup_ilu0(
     cusparseHandle_t cusparse,
     int n, int nnz,
-    const int* d_row_ptr, const int* d_col_ind, const double* d_values,
-    double* d_r, double* d_z,
-    TriangPrecond& tp)
+    const int* d_row_ptr, const int* d_col_ind, const T* d_values,
+    T* d_r, T* d_z,
+    TriangPrecond<T>& tp)
 {
-    tp.d_M_vals = PCGDeviceBuffer<double>(nnz);
-    tp.d_tmp    = PCGDeviceBuffer<double>(n);
+    using Tr = ScalarTraits<T>;
+    constexpr double kMiB = 1024.0 * 1024.0;
+
+    tp.d_M_vals = PCGDeviceBuffer<T>(nnz);
+    tp.d_tmp    = PCGDeviceBuffer<T>(n);
 
     cudaMemcpy(tp.d_M_vals.ptr, d_values,
-               static_cast<std::size_t>(nnz) * sizeof(double),
+               static_cast<std::size_t>(nnz) * sizeof(T),
                cudaMemcpyDeviceToDevice);
 
     cusparseMatDescr_t descr = nullptr;
@@ -353,7 +466,7 @@ static bool setup_ilu0(
     cusparseCreateCsrilu02Info(&info);
 
     int buf_size = 0;
-    cusparseStatus_t cs = cusparseDcsrilu02_bufferSize(
+    cusparseStatus_t cs = Tr::csrilu02_buffer_size(
         cusparse, n, nnz, descr,
         tp.d_M_vals.ptr, d_row_ptr, d_col_ind, info, &buf_size);
     if (cs != CUSPARSE_STATUS_SUCCESS) {
@@ -363,30 +476,31 @@ static bool setup_ilu0(
                           std::to_string(static_cast<int>(cs)));
     }
 
-    const std::size_t precond_bytes_ilu = static_cast<std::size_t>(nnz) * sizeof(double)
-                                        + static_cast<std::size_t>(n) * sizeof(double)
-                                        + static_cast<std::size_t>(buf_size > 0 ? buf_size : 1);
-    log_mem("ILU0 factor alloc", precond_bytes_ilu);
-    std::clog << "[cuda-pcg] ILU0 factor scratch=" << buf_size / (1024.0 * 1024.0)
-              << " MiB\n";
+    const std::size_t precond_bytes =
+        static_cast<std::size_t>(nnz) * sizeof(T)
+      + static_cast<std::size_t>(n)   * sizeof(T)
+      + static_cast<std::size_t>(buf_size > 0 ? buf_size : 1);
+    log_mem("ILU0 factor alloc", precond_bytes);
+    std::clog << "[cuda-pcg] ILU0 factor scratch="
+              << buf_size / kMiB << " MiB\n";
 
     tp.d_factor_buf = PCGDeviceBuffer<char>(buf_size > 0 ? buf_size : 1);
 
-    cusparseDcsrilu02_analysis(cusparse, n, nnz, descr,
+    Tr::csrilu02_analysis(cusparse, n, nnz, descr,
         tp.d_M_vals.ptr, d_row_ptr, d_col_ind, info,
         CUSPARSE_SOLVE_POLICY_NO_LEVEL, tp.d_factor_buf.ptr);
 
     int structural_zero = -1;
     cusparseXcsrilu02_zeroPivot(cusparse, info, &structural_zero);
     if (structural_zero >= 0) {
-        std::clog << "[cuda-pcg] ILU0: structural zero at row " << structural_zero
-                  << " -- falling back to Jacobi\n";
+        std::clog << "[cuda-pcg] ILU0: structural zero at row "
+                  << structural_zero << " -- falling back to Jacobi\n";
         cusparseDestroyCsrilu02Info(info);
         cusparseDestroyMatDescr(descr);
         return false;
     }
 
-    cs = cusparseDcsrilu02(cusparse, n, nnz, descr,
+    cs = Tr::csrilu02(cusparse, n, nnz, descr,
         tp.d_M_vals.ptr, d_row_ptr, d_col_ind, info,
         CUSPARSE_SOLVE_POLICY_NO_LEVEL, tp.d_factor_buf.ptr);
 
@@ -396,22 +510,19 @@ static bool setup_ilu0(
     cusparseDestroyMatDescr(descr);
 
     if (numerical_zero >= 0 || cs != CUSPARSE_STATUS_SUCCESS) {
-        std::clog << "[cuda-pcg] ILU0: numerical zero at row " << numerical_zero
-                  << " -- falling back to Jacobi\n";
+        std::clog << "[cuda-pcg] ILU0: numerical zero at row "
+                  << numerical_zero << " -- falling back to Jacobi\n";
         return false;
     }
 
     // ── SpSV setup ────────────────────────────────────────────────────────────
-    // After ILU0: lower triangle = L (unit-diagonal), upper triangle = U.
-    // Forward: L * tmp = r  (NON_TRANSPOSE, LOWER, unit-diagonal).
-    // Backward: U * z = tmp (NON_TRANSPOSE, UPPER, non-unit-diagonal).
     cusparseCreateCsr(&tp.mat_L,
         static_cast<int64_t>(n), static_cast<int64_t>(n),
         static_cast<int64_t>(nnz),
         const_cast<int*>(d_row_ptr), const_cast<int*>(d_col_ind),
         tp.d_M_vals.ptr,
         CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F);
+        CUSPARSE_INDEX_BASE_ZERO, Tr::cuda_dtype);
     {
         cusparseFillMode_t fill_L = CUSPARSE_FILL_MODE_LOWER;
         cusparseDiagType_t diag_u = CUSPARSE_DIAG_TYPE_UNIT;
@@ -427,7 +538,7 @@ static bool setup_ilu0(
         const_cast<int*>(d_row_ptr), const_cast<int*>(d_col_ind),
         tp.d_M_vals.ptr,
         CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F);
+        CUSPARSE_INDEX_BASE_ZERO, Tr::cuda_dtype);
     {
         cusparseFillMode_t fill_U  = CUSPARSE_FILL_MODE_UPPER;
         cusparseDiagType_t diag_nu = CUSPARSE_DIAG_TYPE_NON_UNIT;
@@ -437,42 +548,293 @@ static bool setup_ilu0(
                                   &diag_nu, sizeof(diag_nu));
     }
 
-    cusparseCreateDnVec(&tp.vec_r,   n, d_r,          CUDA_R_64F);
-    cusparseCreateDnVec(&tp.vec_tmp, n, tp.d_tmp.ptr, CUDA_R_64F);
-    cusparseCreateDnVec(&tp.vec_z,   n, d_z,          CUDA_R_64F);
+    cusparseCreateDnVec(&tp.vec_r,   n, d_r,          Tr::cuda_dtype);
+    cusparseCreateDnVec(&tp.vec_tmp, n, tp.d_tmp.ptr, Tr::cuda_dtype);
+    cusparseCreateDnVec(&tp.vec_z,   n, d_z,          Tr::cuda_dtype);
 
     cusparseSpSV_createDescr(&tp.sv_L);
     cusparseSpSV_createDescr(&tp.sv_UT);
 
-    const double one = 1.0;
+    const T one{1};
 
-    // Forward: L * tmp = r
     std::size_t sz = 0;
     cusparseSpSV_bufferSize(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
         tp.mat_L, tp.vec_r, tp.vec_tmp,
-        CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_L, &sz);
+        Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_L, &sz);
+    std::clog << "[cuda-pcg] ILU0 SpSV forward scratch=" << sz / kMiB << " MiB\n";
     tp.d_sv_L_buf = PCGDeviceBuffer<char>(sz > 0 ? sz : 1);
-    std::clog << "[cuda-pcg] ILU0 SpSV forward scratch=" << sz / (1024.0 * 1024.0)
-              << " MiB\n";
     cusparseSpSV_analysis(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
         tp.mat_L, tp.vec_r, tp.vec_tmp,
-        CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_L, tp.d_sv_L_buf.ptr);
+        Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_L, tp.d_sv_L_buf.ptr);
 
-    // Backward: U * z = tmp
     sz = 0;
     cusparseSpSV_bufferSize(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
         tp.mat_U, tp.vec_tmp, tp.vec_z,
-        CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, &sz);
+        Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, &sz);
+    std::clog << "[cuda-pcg] ILU0 SpSV backward scratch=" << sz / kMiB << " MiB\n";
     tp.d_sv_UT_buf = PCGDeviceBuffer<char>(sz > 0 ? sz : 1);
-    std::clog << "[cuda-pcg] ILU0 SpSV backward scratch=" << sz / (1024.0 * 1024.0)
-              << " MiB\n";
     cusparseSpSV_analysis(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
         tp.mat_U, tp.vec_tmp, tp.vec_z,
-        CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, tp.d_sv_UT_buf.ptr);
+        Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, tp.d_sv_UT_buf.ptr);
 
     log_mem("after ILU0 setup");
     std::clog << "[cuda-pcg] ILU0 preconditioner setup successful\n";
     return true;
+}
+
+// ── Typed PCG solve ───────────────────────────────────────────────────────────
+// Performs the full PCG iteration in scalar type T.  K values and F must
+// already be on the host in type T (caller handles downcasting for float32).
+// Returns the solution as std::vector<double> (upcasting from T if needed).
+template<typename T>
+static std::vector<double> solve_pcg(
+    cublasHandle_t   cublas,
+    cusparseHandle_t cusparse,
+    const std::string& device_name,
+    int n, int nnz,
+    const std::vector<T>& h_values,
+    const std::vector<int>& h_row_ptr,
+    const std::vector<int>& h_col_ind,
+    const std::vector<T>& h_F,
+    const std::vector<T>& h_diag_inv,
+    double tolerance,
+    int max_iters,
+    int& out_iters,
+    double& out_rel_res)
+{
+    using Tr = ScalarTraits<T>;
+    constexpr double kMiB = 1024.0 * 1024.0;
+
+    // ── Device allocation and upload ─────────────────────────────────────────
+    const std::size_t bytes_matrix  = static_cast<std::size_t>(nnz) * sizeof(T)
+                                    + static_cast<std::size_t>(n + 1) * sizeof(int)
+                                    + static_cast<std::size_t>(nnz) * sizeof(int);
+    const std::size_t bytes_vectors = 7UL * static_cast<std::size_t>(n) * sizeof(T);
+    const std::size_t bytes_precond = static_cast<std::size_t>(nnz) * sizeof(T)
+                                    + static_cast<std::size_t>(n) * sizeof(T);
+    const std::size_t bytes_estimate = bytes_matrix + bytes_vectors + bytes_precond;
+
+    {
+        std::size_t free_bytes = 0, total_bytes = 0;
+        cudaMemGetInfo(&free_bytes, &total_bytes);
+        std::clog << "[cuda-pcg] VRAM estimate (lower bound, " << Tr::name() << "): "
+                  << bytes_estimate / kMiB << " MiB"
+                  << "  (matrix=" << bytes_matrix / kMiB << " MiB"
+                  << ", vectors=" << bytes_vectors / kMiB << " MiB"
+                  << ", precond=" << bytes_precond / kMiB << " MiB)\n"
+                  << "[cuda-pcg] device: free=" << free_bytes / kMiB << " MiB"
+                  << ", total=" << total_bytes / kMiB << " MiB"
+                  << ", n=" << n << ", nnz=" << nnz << "\n";
+        if (bytes_estimate > free_bytes)
+            std::clog << "[cuda-pcg] WARNING: estimate exceeds available VRAM ("
+                      << free_bytes / kMiB << " MiB free) -- solve may fail\n";
+    }
+
+    log_mem("before PCG alloc", bytes_matrix + bytes_vectors);
+    std::clog << "[cuda-pcg] matrix=" << bytes_matrix / kMiB << " MiB"
+              << ", vectors=" << bytes_vectors / kMiB << " MiB\n";
+
+    PCGDeviceBuffer<T>   d_values(nnz);
+    PCGDeviceBuffer<int> d_row_ptr(n + 1);
+    PCGDeviceBuffer<int> d_col_ind(nnz);
+    PCGDeviceBuffer<T>   d_F(n);
+    PCGDeviceBuffer<T>   d_u(n);
+    PCGDeviceBuffer<T>   d_r(n);
+    PCGDeviceBuffer<T>   d_z(n);
+    PCGDeviceBuffer<T>   d_p(n);
+    PCGDeviceBuffer<T>   d_Ap(n);
+
+    d_values.upload(h_values.data(),   nnz);
+    d_row_ptr.upload(h_row_ptr.data(), n + 1);
+    d_col_ind.upload(h_col_ind.data(), nnz);
+    d_F.upload(h_F.data(), n);
+    d_u.zero(n);
+
+    PCGDeviceBuffer<T> d_diag_inv(n);
+    d_diag_inv.upload(h_diag_inv.data(), n);
+
+    // ── Preconditioner setup (IC0 → ILU0 → Jacobi) ───────────────────────────
+    PrecondKind precond_kind = PrecondKind::Jacobi;
+    std::unique_ptr<TriangPrecond<T>> tp;
+
+    {
+        auto try_tp = std::make_unique<TriangPrecond<T>>();
+        if (setup_ic0<T>(cusparse, n, nnz,
+                         d_row_ptr.ptr, d_col_ind.ptr, d_values.ptr,
+                         d_r.ptr, d_z.ptr, *try_tp)) {
+            precond_kind = PrecondKind::IC0;
+            tp = std::move(try_tp);
+        } else {
+            auto try_ilu = std::make_unique<TriangPrecond<T>>();
+            if (setup_ilu0<T>(cusparse, n, nnz,
+                              d_row_ptr.ptr, d_col_ind.ptr, d_values.ptr,
+                              d_r.ptr, d_z.ptr, *try_ilu)) {
+                precond_kind = PrecondKind::ILU0;
+                tp = std::move(try_ilu);
+            } else {
+                std::clog << "[cuda-pcg] Using Jacobi preconditioner\n";
+            }
+        }
+    }
+
+    const char* precond_name =
+        precond_kind == PrecondKind::IC0   ? "IC0"   :
+        precond_kind == PrecondKind::ILU0  ? "ILU0"  : "Jacobi";
+
+    // ── cuSPARSE SpMV setup ───────────────────────────────────────────────────
+    cusparseSpMatDescr_t mat_K = nullptr;
+    cusparseCreateCsr(&mat_K,
+        static_cast<int64_t>(n), static_cast<int64_t>(n),
+        static_cast<int64_t>(nnz),
+        d_row_ptr.ptr, d_col_ind.ptr, d_values.ptr,
+        CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+        CUSPARSE_INDEX_BASE_ZERO, Tr::cuda_dtype);
+    struct MatKGuard {
+        cusparseSpMatDescr_t h;
+        ~MatKGuard() { if (h) cusparseDestroySpMat(h); }
+    } mat_K_guard{mat_K};
+
+    cusparseDnVecDescr_t vec_p  = nullptr;
+    cusparseDnVecDescr_t vec_Ap = nullptr;
+    cusparseCreateDnVec(&vec_p,  n, d_p.ptr,  Tr::cuda_dtype);
+    cusparseCreateDnVec(&vec_Ap, n, d_Ap.ptr, Tr::cuda_dtype);
+    struct DnVecGuard {
+        cusparseDnVecDescr_t h;
+        ~DnVecGuard() { if (h) cusparseDestroyDnVec(h); }
+    } vp_guard{vec_p}, vap_guard{vec_Ap};
+
+    const T one{1};
+    const T zero{0};
+
+    std::size_t spmv_sz = 0;
+    cusparseSpMV_bufferSize(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE,
+        &one, mat_K, vec_p, &zero, vec_Ap,
+        Tr::cuda_dtype, CUSPARSE_SPMV_ALG_DEFAULT, &spmv_sz);
+    std::clog << "[cuda-pcg] SpMV scratch=" << spmv_sz / kMiB << " MiB\n";
+    log_mem("after all PCG allocs");
+    PCGDeviceBuffer<char> d_spmv_buf(spmv_sz > 0 ? spmv_sz : 1);
+
+    // ── Apply-preconditioner helper ───────────────────────────────────────────
+    auto apply_precond = [&]() {
+        if (precond_kind != PrecondKind::Jacobi) {
+            cusparseSpSV_solve(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                &one, tp->mat_L, tp->vec_r, tp->vec_tmp,
+                Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp->sv_L);
+            if (precond_kind == PrecondKind::IC0) {
+                cusparseSpSV_solve(cusparse, CUSPARSE_OPERATION_TRANSPOSE,
+                    &one, tp->mat_L, tp->vec_tmp, tp->vec_z,
+                    Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp->sv_UT);
+            } else {
+                cusparseSpSV_solve(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                    &one, tp->mat_U, tp->vec_tmp, tp->vec_z,
+                    Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp->sv_UT);
+            }
+        } else {
+            launch_jacobi<T>(d_r.ptr, d_diag_inv.ptr, d_z.ptr, n);
+        }
+    };
+
+    // ── PCG initialisation ────────────────────────────────────────────────────
+    cudaMemcpy(d_r.ptr, d_F.ptr,
+               static_cast<std::size_t>(n) * sizeof(T),
+               cudaMemcpyDeviceToDevice);
+
+    apply_precond();
+
+    cudaMemcpy(d_p.ptr, d_z.ptr,
+               static_cast<std::size_t>(n) * sizeof(T),
+               cudaMemcpyDeviceToDevice);
+
+    T rz_T{0};
+    Tr::dot(cublas, n, d_r.ptr, d_z.ptr, &rz_T);
+    double rz  = static_cast<double>(rz_T);
+    const double rz0 = rz;
+
+    if (rz0 == 0.0) {
+        out_iters   = 0;
+        out_rel_res = 0.0;
+        return std::vector<double>(n, 0.0);
+    }
+
+    // ── PCG iteration ─────────────────────────────────────────────────────────
+    int iter = 0;
+    for (; iter < max_iters; ++iter) {
+        cusparseDnVecSetValues(vec_p,  d_p.ptr);
+        cusparseDnVecSetValues(vec_Ap, d_Ap.ptr);
+
+        cusparseStatus_t cs = cusparseSpMV(
+            cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE,
+            &one, mat_K, vec_p, &zero, vec_Ap,
+            Tr::cuda_dtype, CUSPARSE_SPMV_ALG_DEFAULT, d_spmv_buf.ptr);
+        if (cs != CUSPARSE_STATUS_SUCCESS)
+            throw SolverError("CUDA PCG: cusparseSpMV failed at iteration " +
+                              std::to_string(iter));
+
+        T pAp_T{0};
+        Tr::dot(cublas, n, d_p.ptr, d_Ap.ptr, &pAp_T);
+        const double pAp = static_cast<double>(pAp_T);
+
+        if (pAp <= 0.0)
+            throw SolverError(
+                "CUDA PCG: non-positive p·Ap=" + std::to_string(pAp) +
+                " at iteration " + std::to_string(iter) +
+                " -- matrix may not be positive definite. "
+                "Check boundary conditions (SPCs).");
+
+        const T alpha     = static_cast<T>(rz / pAp);
+        const T neg_alpha = -alpha;
+
+        Tr::axpy(cublas, n, &alpha,     d_p.ptr,  d_u.ptr);
+        Tr::axpy(cublas, n, &neg_alpha, d_Ap.ptr, d_r.ptr);
+
+        apply_precond();
+
+        T rz_new_T{0};
+        Tr::dot(cublas, n, d_r.ptr, d_z.ptr, &rz_new_T);
+        const double rz_new = static_cast<double>(rz_new_T);
+
+        const double rel = std::sqrt(std::abs(rz_new) / rz0);
+        if (rel < tolerance) {
+            rz = rz_new;
+            ++iter;
+            break;
+        }
+
+        const T beta = static_cast<T>(rz_new / rz);
+        rz = rz_new;
+
+        launch_axpby<T>(d_z.ptr, T{1}, beta, d_p.ptr, n);
+    }
+
+    cudaDeviceSynchronize();
+
+    out_iters   = iter;
+    out_rel_res = std::sqrt(std::abs(rz) / rz0);
+
+    if (iter >= max_iters)
+        throw SolverError(
+            "CUDA PCG: did not converge after " + std::to_string(max_iters) +
+            " iterations (relative residual " +
+            std::to_string(out_rel_res) + " > tolerance " +
+            std::to_string(tolerance) +
+            "). Consider increasing max iterations or using a direct solver.");
+
+    std::clog << "[cuda-pcg] " << precond_name
+              << " (" << Tr::name() << ") converged in " << out_iters
+              << " iterations, rel_res=" << out_rel_res
+              << ", n=" << n << ", nnz=" << nnz
+              << ", device='" << device_name << "'\n";
+
+    std::vector<double> u(n);
+    if constexpr (std::is_same_v<T, double>) {
+        d_u.download(u.data(), n);
+    } else {
+        std::vector<T> u_T(n);
+        d_u.download(u_T.data(), n);
+        for (int i = 0; i < n; ++i)
+            u[i] = static_cast<double>(u_T[i]);
+    }
+    return u;
 }
 
 // ── Context ───────────────────────────────────────────────────────────────────
@@ -481,8 +843,9 @@ struct CudaPCGContext {
     cublasHandle_t   cublas   = nullptr;
     cusparseHandle_t cusparse = nullptr;
     std::string      device_name;
-    double           tolerance = 1e-8;
-    int              max_iters = 10000;
+    double           tolerance          = 1e-8;
+    int              max_iters          = 10000;
+    bool             use_single_precision = false;
 
     int    last_iters   = 0;
     double last_rel_res = 0.0;
@@ -505,7 +868,9 @@ CudaPCGSolverBackend& CudaPCGSolverBackend::operator=(CudaPCGSolverBackend&&) no
 // ── Factory ───────────────────────────────────────────────────────────────────
 
 std::optional<CudaPCGSolverBackend>
-CudaPCGSolverBackend::try_create(double tolerance, int max_iters) noexcept {
+CudaPCGSolverBackend::try_create(bool use_single_precision,
+                                  double tolerance,
+                                  int max_iters) noexcept {
     int device_count = 0;
     if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0)
         return std::nullopt;
@@ -518,6 +883,7 @@ CudaPCGSolverBackend::try_create(double tolerance, int max_iters) noexcept {
     if (cudaGetDeviceProperties(&props, 0) == cudaSuccess)
         ctx->device_name = props.name;
 
+    ctx->use_single_precision = use_single_precision;
     ctx->tolerance = tolerance;
     ctx->max_iters = (max_iters > 0) ? max_iters : 10000;
 
@@ -534,7 +900,9 @@ CudaPCGSolverBackend::try_create(double tolerance, int max_iters) noexcept {
 // ── Accessors ─────────────────────────────────────────────────────────────────
 
 std::string_view CudaPCGSolverBackend::name() const noexcept {
-    return "CUDA PCG + IC0/ILU0 (GPU)";
+    return ctx_->use_single_precision
+        ? "CUDA PCG + IC0/ILU0 float32 (GPU)"
+        : "CUDA PCG + IC0/ILU0 float64 (GPU)";
 }
 
 int CudaPCGSolverBackend::last_iteration_count() const noexcept {
@@ -547,6 +915,10 @@ double CudaPCGSolverBackend::last_relative_residual() const noexcept {
 
 std::string_view CudaPCGSolverBackend::device_name() const noexcept {
     return ctx_->device_name;
+}
+
+bool CudaPCGSolverBackend::uses_single_precision() const noexcept {
+    return ctx_->use_single_precision;
 }
 
 // ── solve ─────────────────────────────────────────────────────────────────────
@@ -564,65 +936,8 @@ CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
                           std::to_string(F.size()) + " != matrix size " +
                           std::to_string(n));
 
-    // ── VRAM estimate ─────────────────────────────────────────────────────────
-    // Compute a conservative lower-bound estimate of total device memory before
-    // allocating anything.  The SpSV scratch buffers are runtime-determined (we
-    // can't query them without allocating the matrix first), so they are omitted
-    // from the estimate; in practice they are small (<< preconditioner copy).
-    //
-    // Components:
-    //   Matrix CSR:      nnz*8 (values) + (n+1)*4 (row_ptr) + nnz*4 (col_ind)
-    //   PCG vectors:     7 * n*8  (F, u, r, z, p, Ap, diag_inv)
-    //   Preconditioner:  nnz*8 (factored copy) + n*8 (tmp vector)
-    //                    [Jacobi path has no extra cost beyond diag_inv above]
-    const std::size_t bytes_matrix  = static_cast<std::size_t>(nnz) * sizeof(double)
-                                    + static_cast<std::size_t>(n + 1) * sizeof(int)
-                                    + static_cast<std::size_t>(nnz) * sizeof(int);
-    const std::size_t bytes_vectors = 7UL * static_cast<std::size_t>(n) * sizeof(double);
-    const std::size_t bytes_precond = static_cast<std::size_t>(nnz) * sizeof(double)
-                                    + static_cast<std::size_t>(n) * sizeof(double);
-    const std::size_t bytes_estimate = bytes_matrix + bytes_vectors + bytes_precond;
-
-    {
-        std::size_t free_bytes = 0, total_bytes = 0;
-        cudaMemGetInfo(&free_bytes, &total_bytes);
-        constexpr double kMiB = 1024.0 * 1024.0;
-        std::clog << "[cuda-pcg] VRAM estimate (lower bound): "
-                  << bytes_estimate / kMiB << " MiB"
-                  << "  (matrix=" << bytes_matrix / kMiB << " MiB"
-                  << ", vectors=" << bytes_vectors / kMiB << " MiB"
-                  << ", precond=" << bytes_precond / kMiB << " MiB)\n"
-                  << "[cuda-pcg] device: free=" << free_bytes / kMiB << " MiB"
-                  << ", total=" << total_bytes / kMiB << " MiB"
-                  << ", n=" << n << ", nnz=" << nnz << "\n";
-        if (bytes_estimate > free_bytes)
-            std::clog << "[cuda-pcg] WARNING: estimate exceeds available VRAM ("
-                      << free_bytes / kMiB << " MiB free) -- solve may fail\n";
-    }
-
-    log_mem("before PCG alloc", bytes_matrix + bytes_vectors);
-    std::clog << "[cuda-pcg] problem: n=" << n << ", nnz=" << nnz
-              << ", matrix=" << bytes_matrix / (1024.0 * 1024.0) << " MiB"
-              << ", vectors=" << bytes_vectors / (1024.0 * 1024.0) << " MiB\n";
-
-    PCGDeviceBuffer<double> d_values(nnz);
-    PCGDeviceBuffer<int>    d_row_ptr(n + 1);
-    PCGDeviceBuffer<int>    d_col_ind(nnz);
-    PCGDeviceBuffer<double> d_F(n);
-    PCGDeviceBuffer<double> d_u(n);
-    PCGDeviceBuffer<double> d_r(n);
-    PCGDeviceBuffer<double> d_z(n);
-    PCGDeviceBuffer<double> d_p(n);
-    PCGDeviceBuffer<double> d_Ap(n);
-
-    d_values.upload(K.values.data(),   nnz);
-    d_row_ptr.upload(K.row_ptr.data(), n + 1);
-    d_col_ind.upload(K.col_ind.data(), nnz);
-    d_F.upload(F.data(), n);
-    d_u.zero(n);
-
-    // ── Jacobi diagonal (fallback preconditioner and zero-pivot detection) ────
-    std::vector<double> diag_inv(n, 1.0);
+    // Build Jacobi diagonal (host, for fallback preconditioner and zero detection).
+    std::vector<double> diag_inv_d(n, 1.0);
     for (int i = 0; i < n; ++i) {
         for (int j = K.row_ptr[i]; j < K.row_ptr[i + 1]; ++j) {
             if (K.col_ind[j] == i) {
@@ -631,201 +946,30 @@ CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
                     throw SolverError(
                         "CUDA PCG: zero diagonal at row " + std::to_string(i) +
                         " -- matrix is singular. Check boundary conditions.");
-                diag_inv[i] = 1.0 / kii;
+                diag_inv_d[i] = 1.0 / kii;
                 break;
             }
         }
     }
-    PCGDeviceBuffer<double> d_diag_inv(n);
-    d_diag_inv.upload(diag_inv.data(), n);
 
-    // ── Preconditioner setup (IC0 → ILU0 → Jacobi) ───────────────────────────
-    PrecondKind precond_kind = PrecondKind::Jacobi;
-    std::unique_ptr<TriangPrecond> tp;
+    if (ctx_->use_single_precision) {
+        std::vector<float> vals_f(nnz), F_f(n), diag_inv_f(n);
+        for (int i = 0; i < nnz; ++i) vals_f[i]     = static_cast<float>(K.values[i]);
+        for (int i = 0; i < n;   ++i) F_f[i]         = static_cast<float>(F[i]);
+        for (int i = 0; i < n;   ++i) diag_inv_f[i]  = static_cast<float>(diag_inv_d[i]);
 
-    {
-        auto try_tp = std::make_unique<TriangPrecond>();
-        if (setup_ic0(ctx_->cusparse, n, nnz,
-                      d_row_ptr.ptr, d_col_ind.ptr, d_values.ptr,
-                      d_r.ptr, d_z.ptr, *try_tp)) {
-            precond_kind = PrecondKind::IC0;
-            tp = std::move(try_tp);
-        } else {
-            auto try_ilu = std::make_unique<TriangPrecond>();
-            if (setup_ilu0(ctx_->cusparse, n, nnz,
-                           d_row_ptr.ptr, d_col_ind.ptr, d_values.ptr,
-                           d_r.ptr, d_z.ptr, *try_ilu)) {
-                precond_kind = PrecondKind::ILU0;
-                tp = std::move(try_ilu);
-            } else {
-                std::clog << "[cuda-pcg] Using Jacobi preconditioner\n";
-            }
-        }
+        return solve_pcg<float>(
+            ctx_->cublas, ctx_->cusparse, ctx_->device_name,
+            n, nnz, vals_f, K.row_ptr, K.col_ind, F_f, diag_inv_f,
+            ctx_->tolerance, ctx_->max_iters,
+            ctx_->last_iters, ctx_->last_rel_res);
     }
 
-    const char* precond_name =
-        precond_kind == PrecondKind::IC0   ? "IC0"   :
-        precond_kind == PrecondKind::ILU0  ? "ILU0"  : "Jacobi";
-
-    // ── cuSPARSE SpMV setup ───────────────────────────────────────────────────
-    cusparseSpMatDescr_t mat_K = nullptr;
-    cusparseCreateCsr(&mat_K,
-        static_cast<int64_t>(n), static_cast<int64_t>(n),
-        static_cast<int64_t>(nnz),
-        d_row_ptr.ptr, d_col_ind.ptr, d_values.ptr,
-        CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F);
-    struct MatKGuard {
-        cusparseSpMatDescr_t h;
-        ~MatKGuard() { if (h) cusparseDestroySpMat(h); }
-    } mat_K_guard{mat_K};
-
-    cusparseDnVecDescr_t vec_p  = nullptr;
-    cusparseDnVecDescr_t vec_Ap = nullptr;
-    cusparseCreateDnVec(&vec_p,  n, d_p.ptr,  CUDA_R_64F);
-    cusparseCreateDnVec(&vec_Ap, n, d_Ap.ptr, CUDA_R_64F);
-    struct DnVecGuard {
-        cusparseDnVecDescr_t h;
-        ~DnVecGuard() { if (h) cusparseDestroyDnVec(h); }
-    } vp_guard{vec_p}, vap_guard{vec_Ap};
-
-    const double one  = 1.0;
-    const double zero = 0.0;
-
-    std::size_t spmv_sz = 0;
-    cusparseSpMV_bufferSize(ctx_->cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE,
-        &one, mat_K, vec_p, &zero, vec_Ap,
-        CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &spmv_sz);
-    std::clog << "[cuda-pcg] SpMV scratch=" << spmv_sz / (1024.0 * 1024.0) << " MiB\n";
-    log_mem("after all PCG allocs");
-    PCGDeviceBuffer<char> d_spmv_buf(spmv_sz > 0 ? spmv_sz : 1);
-
-    // ── Apply-preconditioner helper ───────────────────────────────────────────
-    // Computes z = M^{-1} r using the stored dense-vector descriptors.
-    // The descriptors tp->vec_r and tp->vec_z point to d_r.ptr and d_z.ptr
-    // respectively, so they always reflect the current residual and output.
-    auto apply_precond = [&]() {
-        if (precond_kind != PrecondKind::Jacobi) {
-            // Forward: L * tmp = r
-            cusparseSpSV_solve(ctx_->cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                &one, tp->mat_L, tp->vec_r, tp->vec_tmp,
-                CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp->sv_L);
-
-            // Backward: L^T * z = tmp (IC0) or U * z = tmp (ILU0)
-            if (precond_kind == PrecondKind::IC0) {
-                cusparseSpSV_solve(ctx_->cusparse, CUSPARSE_OPERATION_TRANSPOSE,
-                    &one, tp->mat_L, tp->vec_tmp, tp->vec_z,
-                    CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp->sv_UT);
-            } else {
-                cusparseSpSV_solve(ctx_->cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                    &one, tp->mat_U, tp->vec_tmp, tp->vec_z,
-                    CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp->sv_UT);
-            }
-        } else {
-            launch_jacobi(d_r.ptr, d_diag_inv.ptr, d_z.ptr, n);
-        }
-    };
-
-    // ── PCG initialisation ────────────────────────────────────────────────────
-    // r = F  (u0 = 0)
-    cudaMemcpy(d_r.ptr, d_F.ptr,
-               static_cast<std::size_t>(n) * sizeof(double),
-               cudaMemcpyDeviceToDevice);
-
-    apply_precond(); // z = M^{-1} r
-
-    // p = z
-    cudaMemcpy(d_p.ptr, d_z.ptr,
-               static_cast<std::size_t>(n) * sizeof(double),
-               cudaMemcpyDeviceToDevice);
-
-    double rz = 0.0;
-    cublasDdot(ctx_->cublas, n, d_r.ptr, 1, d_z.ptr, 1, &rz);
-
-    const double rz0 = rz;
-    if (rz0 == 0.0) {
-        ctx_->last_iters   = 0;
-        ctx_->last_rel_res = 0.0;
-        return std::vector<double>(n, 0.0);
-    }
-
-    // ── PCG iteration ─────────────────────────────────────────────────────────
-    const double tol       = ctx_->tolerance;
-    const int    max_iters = ctx_->max_iters;
-
-    int iter = 0;
-    for (; iter < max_iters; ++iter) {
-        // Update vec_p to point to current d_p (handles are fixed).
-        cusparseDnVecSetValues(vec_p,  d_p.ptr);
-        cusparseDnVecSetValues(vec_Ap, d_Ap.ptr);
-
-        // Ap = K * p
-        cusparseStatus_t cs = cusparseSpMV(
-            ctx_->cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE,
-            &one, mat_K, vec_p, &zero, vec_Ap,
-            CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, d_spmv_buf.ptr);
-        if (cs != CUSPARSE_STATUS_SUCCESS)
-            throw SolverError("CUDA PCG: cusparseSpMV failed at iteration " +
-                              std::to_string(iter));
-
-        // pAp = p · Ap
-        double pAp = 0.0;
-        cublasDdot(ctx_->cublas, n, d_p.ptr, 1, d_Ap.ptr, 1, &pAp);
-
-        if (pAp <= 0.0)
-            throw SolverError(
-                "CUDA PCG: non-positive p·Ap=" + std::to_string(pAp) +
-                " at iteration " + std::to_string(iter) +
-                " -- matrix may not be positive definite. "
-                "Check boundary conditions (SPCs).");
-
-        const double alpha     =  rz / pAp;
-        const double neg_alpha = -alpha;
-
-        cublasDaxpy(ctx_->cublas, n, &alpha,     d_p.ptr,  1, d_u.ptr, 1);
-        cublasDaxpy(ctx_->cublas, n, &neg_alpha, d_Ap.ptr, 1, d_r.ptr, 1);
-
-        apply_precond(); // z = M^{-1} r
-
-        double rz_new = 0.0;
-        cublasDdot(ctx_->cublas, n, d_r.ptr, 1, d_z.ptr, 1, &rz_new);
-
-        const double rel = std::sqrt(std::abs(rz_new) / rz0);
-        if (rel < tol) {
-            rz = rz_new;
-            ++iter;
-            break;
-        }
-
-        const double beta = rz_new / rz;
-        rz = rz_new;
-
-        // p = z + beta * p
-        launch_axpby(d_z.ptr, 1.0, beta, d_p.ptr, n);
-    }
-
-    cudaDeviceSynchronize();
-
-    ctx_->last_iters   = iter;
-    ctx_->last_rel_res = std::sqrt(std::abs(rz) / rz0);
-
-    if (iter >= max_iters)
-        throw SolverError(
-            "CUDA PCG: did not converge after " + std::to_string(max_iters) +
-            " iterations (relative residual " +
-            std::to_string(ctx_->last_rel_res) + " > tolerance " +
-            std::to_string(tol) +
-            "). Consider increasing max iterations or using a direct solver.");
-
-    std::clog << "[cuda-pcg] " << precond_name
-              << " converged in " << ctx_->last_iters
-              << " iterations, rel_res=" << ctx_->last_rel_res
-              << ", n=" << n << ", nnz=" << nnz
-              << ", device='" << ctx_->device_name << "'\n";
-
-    std::vector<double> u(n);
-    d_u.download(u.data(), n);
-    return u;
+    return solve_pcg<double>(
+        ctx_->cublas, ctx_->cusparse, ctx_->device_name,
+        n, nnz, K.values, K.row_ptr, K.col_ind, F, diag_inv_d,
+        ctx_->tolerance, ctx_->max_iters,
+        ctx_->last_iters, ctx_->last_rel_res);
 }
 
 } // namespace nastran

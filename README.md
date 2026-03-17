@@ -48,19 +48,29 @@ Optional backends are detected automatically at configure time.
 ## Usage
 
 ```
-nastran_solver [--backend=<cpu|vulkan|cuda>] [--cuda-single-precision] <input.bdf> [output.f06]
+nastran_solver [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg>] [--cuda-single-precision] <input.bdf> [output.f06]
 ```
 
 If no output path is given, it defaults to `<input>.f06`.
 
 ## Solver Backends
 
-### CPU (default)
+### CPU — Cholesky (default)
 
 Eigen sparse Cholesky. Always available, no extra dependencies.
 
 ```bash
 nastran_solver --backend=cpu model.bdf
+```
+
+### CPU — PCG
+
+Eigen Preconditioned Conjugate Gradient with Incomplete Cholesky preconditioning.
+Iterative solver with O(nnz) memory — suitable for very large systems where the
+direct Cholesky fill-in would exhaust RAM.
+
+```bash
+nastran_solver --backend=cpu-pcg model.bdf
 ```
 
 ### CUDA — cuDSS (recommended for large models)
@@ -84,7 +94,7 @@ nastran_solver --backend=cuda model.bdf
 
 **Single-precision mode** halves GPU memory usage by downcasting to float32 before the
 solve and upcasting the result. Useful for very large models that exhaust device memory
-even with hybrid mode:
+even with hybrid mode. Applies to both `--backend=cuda` and `--backend=cuda-pcg`:
 
 ```bash
 nastran_solver --backend=cuda --cuda-single-precision model.bdf
@@ -98,6 +108,25 @@ sudo dpkg -i cudss-local-repo-ubuntu2404-*.deb
 sudo apt update
 sudo apt install libcudss0-cuda-12 libcudss0-dev-cuda-12
 ```
+
+### CUDA — PCG
+
+GPU Preconditioned Conjugate Gradient with IC0 → ILU0 → Jacobi fallback preconditioning,
+using cuSPARSE SpSV for triangular solves and cuBLAS for vector operations.
+O(nnz) device memory — no factorization fill-in — making it suitable for systems too large
+for cuDSS even with hybrid host/device memory mode.
+
+```bash
+nastran_solver --backend=cuda-pcg model.bdf
+```
+
+**Single-precision mode** halves VRAM usage by performing the entire PCG solve in float32:
+
+```bash
+nastran_solver --backend=cuda-pcg --cuda-single-precision model.bdf
+```
+
+Requires CUDA toolkit ≥ 11 with cuBLAS and cuSPARSE (both included in the standard toolkit).
 
 ### Vulkan
 
