@@ -42,6 +42,23 @@
 #include <string>
 #include <vector>
 
+namespace {
+
+// Log free/total device memory alongside a label.
+static void log_mem(const char* label, std::size_t extra_bytes = 0) {
+    std::size_t free_bytes = 0, total_bytes = 0;
+    cudaMemGetInfo(&free_bytes, &total_bytes);
+    constexpr double kMiB = 1024.0 * 1024.0;
+    std::clog << "[cuda-pcg] " << label
+              << ": free=" << free_bytes / kMiB << " MiB"
+              << ", total=" << total_bytes / kMiB << " MiB";
+    if (extra_bytes > 0)
+        std::clog << ", allocating=" << extra_bytes / kMiB << " MiB";
+    std::clog << "\n";
+}
+
+} // anonymous namespace
+
 namespace nastran {
 
 // ── RAII device buffer ────────────────────────────────────────────────────────
@@ -212,6 +229,14 @@ static bool setup_ic0(
                           std::to_string(static_cast<int>(cs)));
     }
 
+    // factored copy of K values + intermediate tmp vector + factor scratch
+    const std::size_t precond_bytes = static_cast<std::size_t>(nnz) * sizeof(double)
+                                    + static_cast<std::size_t>(n) * sizeof(double)
+                                    + static_cast<std::size_t>(buf_size > 0 ? buf_size : 1);
+    log_mem("IC0 factor alloc", precond_bytes);
+    std::clog << "[cuda-pcg] IC0 factor scratch=" << buf_size / (1024.0 * 1024.0)
+              << " MiB\n";
+
     tp.d_factor_buf = PCGDeviceBuffer<char>(buf_size > 0 ? buf_size : 1);
 
     cusparseDcsric02_analysis(cusparse, n, nnz, descr,
@@ -280,6 +305,8 @@ static bool setup_ic0(
         tp.mat_L, tp.vec_r, tp.vec_tmp,
         CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_L, &sz);
     tp.d_sv_L_buf = PCGDeviceBuffer<char>(sz > 0 ? sz : 1);
+    std::clog << "[cuda-pcg] IC0 SpSV forward scratch=" << sz / (1024.0 * 1024.0)
+              << " MiB\n";
     cusparseSpSV_analysis(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
         tp.mat_L, tp.vec_r, tp.vec_tmp,
         CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_L, tp.d_sv_L_buf.ptr);
@@ -290,10 +317,13 @@ static bool setup_ic0(
         tp.mat_L, tp.vec_tmp, tp.vec_z,
         CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, &sz);
     tp.d_sv_UT_buf = PCGDeviceBuffer<char>(sz > 0 ? sz : 1);
+    std::clog << "[cuda-pcg] IC0 SpSV backward scratch=" << sz / (1024.0 * 1024.0)
+              << " MiB\n";
     cusparseSpSV_analysis(cusparse, CUSPARSE_OPERATION_TRANSPOSE, &one,
         tp.mat_L, tp.vec_tmp, tp.vec_z,
         CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, tp.d_sv_UT_buf.ptr);
 
+    log_mem("after IC0 setup");
     std::clog << "[cuda-pcg] IC0 preconditioner setup successful\n";
     return true;
 }
@@ -332,6 +362,13 @@ static bool setup_ilu0(
         throw SolverError("CUDA PCG: ILU0 bufferSize failed, status=" +
                           std::to_string(static_cast<int>(cs)));
     }
+
+    const std::size_t precond_bytes_ilu = static_cast<std::size_t>(nnz) * sizeof(double)
+                                        + static_cast<std::size_t>(n) * sizeof(double)
+                                        + static_cast<std::size_t>(buf_size > 0 ? buf_size : 1);
+    log_mem("ILU0 factor alloc", precond_bytes_ilu);
+    std::clog << "[cuda-pcg] ILU0 factor scratch=" << buf_size / (1024.0 * 1024.0)
+              << " MiB\n";
 
     tp.d_factor_buf = PCGDeviceBuffer<char>(buf_size > 0 ? buf_size : 1);
 
@@ -415,6 +452,8 @@ static bool setup_ilu0(
         tp.mat_L, tp.vec_r, tp.vec_tmp,
         CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_L, &sz);
     tp.d_sv_L_buf = PCGDeviceBuffer<char>(sz > 0 ? sz : 1);
+    std::clog << "[cuda-pcg] ILU0 SpSV forward scratch=" << sz / (1024.0 * 1024.0)
+              << " MiB\n";
     cusparseSpSV_analysis(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
         tp.mat_L, tp.vec_r, tp.vec_tmp,
         CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_L, tp.d_sv_L_buf.ptr);
@@ -425,10 +464,13 @@ static bool setup_ilu0(
         tp.mat_U, tp.vec_tmp, tp.vec_z,
         CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, &sz);
     tp.d_sv_UT_buf = PCGDeviceBuffer<char>(sz > 0 ? sz : 1);
+    std::clog << "[cuda-pcg] ILU0 SpSV backward scratch=" << sz / (1024.0 * 1024.0)
+              << " MiB\n";
     cusparseSpSV_analysis(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
         tp.mat_U, tp.vec_tmp, tp.vec_z,
         CUDA_R_64F, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, tp.d_sv_UT_buf.ptr);
 
+    log_mem("after ILU0 setup");
     std::clog << "[cuda-pcg] ILU0 preconditioner setup successful\n";
     return true;
 }
@@ -522,7 +564,47 @@ CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
                           std::to_string(F.size()) + " != matrix size " +
                           std::to_string(n));
 
-    // ── Device allocation and upload ─────────────────────────────────────────
+    // ── VRAM estimate ─────────────────────────────────────────────────────────
+    // Compute a conservative lower-bound estimate of total device memory before
+    // allocating anything.  The SpSV scratch buffers are runtime-determined (we
+    // can't query them without allocating the matrix first), so they are omitted
+    // from the estimate; in practice they are small (<< preconditioner copy).
+    //
+    // Components:
+    //   Matrix CSR:      nnz*8 (values) + (n+1)*4 (row_ptr) + nnz*4 (col_ind)
+    //   PCG vectors:     7 * n*8  (F, u, r, z, p, Ap, diag_inv)
+    //   Preconditioner:  nnz*8 (factored copy) + n*8 (tmp vector)
+    //                    [Jacobi path has no extra cost beyond diag_inv above]
+    const std::size_t bytes_matrix  = static_cast<std::size_t>(nnz) * sizeof(double)
+                                    + static_cast<std::size_t>(n + 1) * sizeof(int)
+                                    + static_cast<std::size_t>(nnz) * sizeof(int);
+    const std::size_t bytes_vectors = 7UL * static_cast<std::size_t>(n) * sizeof(double);
+    const std::size_t bytes_precond = static_cast<std::size_t>(nnz) * sizeof(double)
+                                    + static_cast<std::size_t>(n) * sizeof(double);
+    const std::size_t bytes_estimate = bytes_matrix + bytes_vectors + bytes_precond;
+
+    {
+        std::size_t free_bytes = 0, total_bytes = 0;
+        cudaMemGetInfo(&free_bytes, &total_bytes);
+        constexpr double kMiB = 1024.0 * 1024.0;
+        std::clog << "[cuda-pcg] VRAM estimate (lower bound): "
+                  << bytes_estimate / kMiB << " MiB"
+                  << "  (matrix=" << bytes_matrix / kMiB << " MiB"
+                  << ", vectors=" << bytes_vectors / kMiB << " MiB"
+                  << ", precond=" << bytes_precond / kMiB << " MiB)\n"
+                  << "[cuda-pcg] device: free=" << free_bytes / kMiB << " MiB"
+                  << ", total=" << total_bytes / kMiB << " MiB"
+                  << ", n=" << n << ", nnz=" << nnz << "\n";
+        if (bytes_estimate > free_bytes)
+            std::clog << "[cuda-pcg] WARNING: estimate exceeds available VRAM ("
+                      << free_bytes / kMiB << " MiB free) -- solve may fail\n";
+    }
+
+    log_mem("before PCG alloc", bytes_matrix + bytes_vectors);
+    std::clog << "[cuda-pcg] problem: n=" << n << ", nnz=" << nnz
+              << ", matrix=" << bytes_matrix / (1024.0 * 1024.0) << " MiB"
+              << ", vectors=" << bytes_vectors / (1024.0 * 1024.0) << " MiB\n";
+
     PCGDeviceBuffer<double> d_values(nnz);
     PCGDeviceBuffer<int>    d_row_ptr(n + 1);
     PCGDeviceBuffer<int>    d_col_ind(nnz);
@@ -614,6 +696,8 @@ CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
     cusparseSpMV_bufferSize(ctx_->cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE,
         &one, mat_K, vec_p, &zero, vec_Ap,
         CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &spmv_sz);
+    std::clog << "[cuda-pcg] SpMV scratch=" << spmv_sz / (1024.0 * 1024.0) << " MiB\n";
+    log_mem("after all PCG allocs");
     PCGDeviceBuffer<char> d_spmv_buf(spmv_sz > 0 ? spmv_sz : 1);
 
     // ── Apply-preconditioner helper ───────────────────────────────────────────
