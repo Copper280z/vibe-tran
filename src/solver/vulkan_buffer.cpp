@@ -178,6 +178,18 @@ std::vector<std::byte> VulkanBuffer::download_raw(const VulkanContext& ctx, VkDe
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &begin);
+
+    // Ensure any preceding compute/transfer writes to this buffer (from a
+    // prior submission) are visible before the copy reads from it.
+    VkMemoryBarrier mb{};
+    mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 1, &mb, 0, nullptr, 0, nullptr);
+
     VkBufferCopy region{0, 0, size};
     vkCmdCopyBuffer(cmd, buffer_, stg.buffer, 1, &region);
     vkEndCommandBuffer(cmd);

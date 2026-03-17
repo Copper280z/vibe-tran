@@ -160,10 +160,25 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
         last_full_gpu_ = true;
         auto t_solve = std::chrono::steady_clock::now();
         std::vector<double> result;
-        if (cfg_.use_double)
+        if (cfg_.use_double) {
             result = solve_full_gpu_double(ctx_, *pl, K, F, cfg_, last_iters_, last_residual_);
-        else
-            result = solve_full_gpu(ctx_, *pl, K, F, cfg_, last_iters_, last_residual_);
+        } else {
+            // Attempt float32.  If it diverges/stagnates and the device supports
+            // float64 (and the matrix fits in VRAM at float64 size), transparently
+            // retry with the double-precision path rather than propagating an error.
+            try {
+                result = solve_full_gpu(ctx_, *pl, K, F, cfg_, last_iters_, last_residual_);
+            } catch (const SolverError& e) {
+                if (ctx_.device_info().supports_float64 &&
+                    vram_needed_f64(K) <= available) {
+                    std::clog << std::format(
+                        "[vulkan] float32 failed ({}), retrying with float64\n", e.what());
+                    result = solve_full_gpu_double(ctx_, *pl, K, F, cfg_, last_iters_, last_residual_);
+                } else {
+                    throw;
+                }
+            }
+        }
 
         std::clog << std::format(
             "[vulkan] converged: {} iterations, residual = {:.2e}, solve = {:.3f} ms\n",

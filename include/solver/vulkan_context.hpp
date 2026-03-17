@@ -21,6 +21,7 @@ struct VulkanDeviceInfo {
     uint64_t    vram_bytes;       // Largest device-local memory heap
     std::string device_name;      // Human-readable GPU name
     bool        supports_float64; // shaderFloat64 feature available
+    uint32_t    max_workgroup_count_x; // maxComputeWorkGroupCount[0]
 };
 
 /// Owns all global Vulkan objects needed for compute:

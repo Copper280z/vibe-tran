@@ -157,10 +157,17 @@ std::optional<VulkanContext> VulkanContext::create() noexcept {
     q_ci.queueCount       = 1;
     q_ci.pQueuePriorities = &priority;
 
+    // Enable shaderFloat64 when the physical device supports it.
+    // Without this, using double-precision shaders is a spec violation
+    // (undefined behaviour — silently zeroes or corrupts results at scale).
+    VkPhysicalDeviceFeatures enabled_features{};
+    enabled_features.shaderFloat64 = best.float64 ? VK_TRUE : VK_FALSE;
+
     VkDeviceCreateInfo dev_ci{};
     dev_ci.sType                = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     dev_ci.queueCreateInfoCount = 1;
     dev_ci.pQueueCreateInfos    = &q_ci;
+    dev_ci.pEnabledFeatures     = &enabled_features;
 
     if (vkCreateDevice(ctx.phys_dev_, &dev_ci, nullptr, &ctx.device_) != VK_SUCCESS) {
         vkDestroyInstance(ctx.instance_, nullptr);
@@ -183,9 +190,10 @@ std::optional<VulkanContext> VulkanContext::create() noexcept {
 
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(ctx.phys_dev_, &props);
-    ctx.device_info_.device_name      = props.deviceName;
-    ctx.device_info_.vram_bytes       = best.vram_bytes;
-    ctx.device_info_.supports_float64 = best.float64;
+    ctx.device_info_.device_name           = props.deviceName;
+    ctx.device_info_.vram_bytes            = best.vram_bytes;
+    ctx.device_info_.supports_float64      = best.float64;
+    ctx.device_info_.max_workgroup_count_x = props.limits.maxComputeWorkGroupCount[0];
 
     return ctx;
 }

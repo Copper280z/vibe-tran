@@ -4,13 +4,13 @@
 // Using strong types prevents accidental mix-ups between node IDs, DOF indices,
 // etc.
 
+#include "core/exceptions.hpp"
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <format>
 #include <numbers>
 #include <span>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -181,15 +181,9 @@ enum class SolutionType {
 // ── Solver error
 // ──────────────────────────────────────────────────────────────
 
-class SolverError : public std::runtime_error {
-public:
-  explicit SolverError(const std::string &msg) : std::runtime_error(msg) {}
-};
-
-class ParseError : public std::runtime_error {
-public:
-  explicit ParseError(const std::string &msg) : std::runtime_error(msg) {}
-};
+// SolverError and ParseError are defined in exceptions.hpp (included above).
+// They are re-exported from this header so existing code that includes
+// types.hpp continues to work without changes.
 
 } // namespace nastran
 

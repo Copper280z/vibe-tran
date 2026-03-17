@@ -3,16 +3,20 @@
 
 Geometry
 --------
-Rectangular prismatic bar aligned along the X-axis:
-  - Cross-section W x H in the Y-Z plane  (default 0.1 m x 0.1 m)
-  - Cross-section mesh: NY x NZ elements  (default 2 x 2)
-  - Axial mesh: nx = ceil(n_target / (NY * NZ)) elements
-  - Element side length d = W/NY  (elements are cubic when W=H and NY=NZ)
-  - Total bar length  L = nx * d
+Rectangular prismatic bar aligned along the X-axis with fixed physical dimensions:
+  - Length  L = 1.0 m  (X extent)
+  - Width   W = 0.2 m  (Y extent)
+  - Height  H = 0.2 m  (Z extent)
 
-The 2x2 cross-section mesh is the minimum needed for solid elements to
-represent bending correctly (avoids single-element-wide locking artifacts).
-Elements are cubic, which maximises accuracy for CHEXA8.
+The cross-section mesh (NY x NZ elements) scales with the target element count
+so that elements remain approximately cubic:
+  - Since W = H, NY = NZ = max(2, round((n_target / 5)^(1/3)))
+  - Element side length d = W / NY
+  - Axial count nx = round(L / d)  (≈ 5 * NY for L/W = 5)
+  - Actual element count = nx * NY * NZ
+
+The minimum cross-section mesh is 2x2, which is required for solid elements
+to represent bending correctly (avoids single-element-wide locking artifacts).
 
 Material (steel defaults)
 -------------------------
@@ -52,9 +56,7 @@ bending
     delta_z_tip   = F * L^3 / (3 * E * I)
     sigma_xx_max  = F * L * (H/2) / I      (at fixed-end top/bottom surface)
 
-  Note: agreement improves as L/H increases.  For the default mesh the ratio
-  is L/H = nx * d / H = nx * (W/NY) / H.  With many elements the bar is
-  long and slender, so beam theory is a good reference.
+  Note: agreement improves as L/H increases.
 
 Usage
 -----
@@ -76,13 +78,10 @@ E_DEFAULT     = 2.0e11   # Pa  Young's modulus (steel)
 NU_DEFAULT    = 0.3      # Poisson's ratio
 ALPHA_DEFAULT = 1.2e-5   # /°C  coefficient of thermal expansion
 
-# ── Cross-section mesh (fixed) ───────────────────────────────────────────────
-NY = 2   # elements in Y (cross-section width direction)
-NZ = 2   # elements in Z (cross-section height direction)
-
-# ── Geometry ─────────────────────────────────────────────────────────────────
-W_DEFAULT = 0.1   # m  cross-section width  (Y extent)
-H_DEFAULT = 0.1   # m  cross-section height (Z extent)
+# ── Fixed bar geometry ───────────────────────────────────────────────────────
+L_DEFAULT = 1.0   # m  bar length   (X extent)
+W_DEFAULT = 0.2   # m  cross-section width  (Y extent)
+H_DEFAULT = 0.2   # m  cross-section height (Z extent)
 
 # ── Load magnitudes ──────────────────────────────────────────────────────────
 F_TOTAL = 1000.0  # N    total applied force (axial and bending cases)
@@ -91,12 +90,12 @@ DT      = 100.0   # °C   temperature rise    (thermal case)
 
 # ── Mesh helpers ─────────────────────────────────────────────────────────────
 
-def node_id(i: int, j: int, k: int) -> int:
+def node_id(i: int, j: int, k: int, ny: int, nz: int) -> int:
     """Return 1-based node ID for mesh indices (i along X, j along Y, k along Z)."""
-    return i * (NY + 1) * (NZ + 1) + j * (NZ + 1) + k + 1
+    return i * (ny + 1) * (nz + 1) + j * (nz + 1) + k + 1
 
 
-def element_nodes(ie: int, je: int, ke: int) -> list[int]:
+def element_nodes(ie: int, je: int, ke: int, ny: int, nz: int) -> list[int]:
     """
     Return the 8 node IDs for the CHEXA8 element at grid position (ie, je, ke).
 
@@ -112,7 +111,7 @@ def element_nodes(ie: int, je: int, ke: int) -> list[int]:
       n4 -> (-1,+1,-1)   n8 -> (-1,+1,+1)
     """
     def n(di: int, dj: int, dk: int) -> int:
-        return node_id(ie + di, je + dj, ke + dk)
+        return node_id(ie + di, je + dj, ke + dk, ny, nz)
 
     return [
         n(0, 0, 0),  # 1: x_min, y_min, z_min
@@ -151,12 +150,19 @@ def fmt_float(v: float) -> str:
 # ── Main generator ────────────────────────────────────────────────────────────
 
 def generate(n_target: int, load_case: str, out_path: str) -> None:
-    # ── Mesh dimensions ──────────────────────────────────────────────────────
+    # ── Fixed bar geometry ────────────────────────────────────────────────────
+    L = L_DEFAULT
     W = W_DEFAULT
     H = H_DEFAULT
-    d = W / NY       # element side length (cubic: d = W/NY = H/NZ)
-    nx = max(1, math.ceil(n_target / (NY * NZ)))
-    L  = nx * d
+
+    # ── Mesh dimensions ───────────────────────────────────────────────────────
+    # Keep elements approximately cubic: d = W/NY = H/NZ = L/nx.
+    # Since W = H, NY = NZ.  With L/W = 5, nx ≈ 5*NY, so n ≈ 5*NY^3.
+    # Solve for NY, enforce minimum of 2 (needed to avoid locking artifacts).
+    NY = max(2, round((n_target / (L / W)) ** (1.0 / 3.0)))
+    NZ = NY  # W = H so same count in both cross-section directions
+    d  = W / NY
+    nx = max(1, round(L / d))
 
     n_nodes    = (nx + 1) * (NY + 1) * (NZ + 1)
     n_elements = nx * NY * NZ
@@ -194,8 +200,8 @@ def generate(n_target: int, load_case: str, out_path: str) -> None:
     wr(f"$ Target elements : {n_target}")
     wr(f"$ Actual elements : {n_elements}  ({nx} x {NY} x {NZ})")
     wr(f"$ Total nodes     : {n_nodes}")
-    wr(f"$ Geometry        : L = {L:.4g} m,  W = {W:.4g} m,  H = {H:.4g} m")
-    wr(f"$ Element size    : d = {d:.4g} m  (cubic CHEXA8)")
+    wr(f"$ Geometry        : L = {L:.4g} m,  W = {W:.4g} m,  H = {H:.4g} m  (fixed)")
+    wr(f"$ Element size    : d = {d:.4g} m  (cubic CHEXA8, d = W/NY = H/NZ ≈ L/nx)")
     wr(f"$ Material        : E = {E:.4g} Pa,  nu = {nu},  alpha = {alpha:.4g} /deg")
     wr("$")
     wr("$ ── Analytical reference values ─────────────────────────────────────────")
@@ -245,13 +251,16 @@ def generate(n_target: int, load_case: str, out_path: str) -> None:
     # ── Nodes ────────────────────────────────────────────────────────────────
     wr("$")
     wr("$ ── Nodes ──────────────────────────────────────────────────────────────")
+    dy = W / NY
+    dz = H / NZ
+    dx = L / nx
     for i in range(nx + 1):
-        x = i * d
+        x = i * dx
         for j in range(NY + 1):
-            y = j * d
+            y = j * dy
             for k in range(NZ + 1):
-                z = k * d
-                nid = node_id(i, j, k)
+                z = k * dz
+                nid = node_id(i, j, k, NY, NZ)
                 wr(f"GRID,{nid},,{fmt_float(x)},{fmt_float(y)},{fmt_float(z)}")
 
     # ── Elements ─────────────────────────────────────────────────────────────
@@ -261,7 +270,7 @@ def generate(n_target: int, load_case: str, out_path: str) -> None:
     for ie in range(nx):
         for je in range(NY):
             for ke in range(NZ):
-                write_chexa(out, eid, 1, element_nodes(ie, je, ke))
+                write_chexa(out, eid, 1, element_nodes(ie, je, ke, NY, NZ))
                 eid += 1
 
     # ── Boundary conditions ───────────────────────────────────────────────────
@@ -269,8 +278,8 @@ def generate(n_target: int, load_case: str, out_path: str) -> None:
     wr("$ ── Boundary Conditions ────────────────────────────────────────────────")
 
     # Nodes at x=0 face (i=0): node IDs 1 .. (NY+1)*(NZ+1), which are contiguous.
-    fixed_face_first = node_id(0, 0, 0)
-    fixed_face_last  = node_id(0, NY, NZ)
+    fixed_face_first = node_id(0, 0, 0, NY, NZ)
+    fixed_face_last  = node_id(0, NY, NZ, NY, NZ)
 
     if load_case == "thermal":
         # Uniaxial constraint: lock T1 at BOTH faces so the bar cannot expand
@@ -281,9 +290,9 @@ def generate(n_target: int, load_case: str, out_path: str) -> None:
         # face (T2=0, T3=0) rather than clamping the entire face, so that the
         # Poisson contraction is unrestrained at x=0 just as it is everywhere
         # else along the bar.
-        free_face_first  = node_id(nx, 0,    0)
-        free_face_last   = node_id(nx, NY,   NZ)
-        center_node_x0   = node_id(0,  NY//2, NZ//2)  # centre of x=0 face
+        free_face_first  = node_id(nx, 0,    0,      NY, NZ)
+        free_face_last   = node_id(nx, NY,   NZ,     NY, NZ)
+        center_node_x0   = node_id(0,  NY//2, NZ//2, NY, NZ)  # centre of x=0 face
         wr(f"$ x=0 face: lock T1 on all face nodes (no axial motion at this end).")
         wr(f"SPC1,1,1,{fixed_face_first},THRU,{fixed_face_last}")
         wr(f"$ x=L face: lock T1 on all face nodes (no axial expansion allowed).")
@@ -315,8 +324,8 @@ def generate(n_target: int, load_case: str, out_path: str) -> None:
 
     else:
         # Free end nodes (i=nx): also contiguous — IDs from nx*(NY+1)*(NZ+1)+1 onward.
-        free_face_first = node_id(nx, 0,  0)
-        free_face_last  = node_id(nx, NY, NZ)
+        free_face_first = node_id(nx, 0,  0,  NY, NZ)
+        free_face_last  = node_id(nx, NY, NZ, NY, NZ)
         n_free_nodes    = (NY + 1) * (NZ + 1)
         f_per_node      = F_TOTAL / n_free_nodes
 
@@ -373,7 +382,8 @@ def main() -> None:
     parser.add_argument(
         "n_elements",
         type=int,
-        help="Target number of CHEXA8 elements (actual count rounded up to fill the 2x2 cross-section).",
+        help="Target number of CHEXA8 elements. NY=NZ is chosen so elements are "
+             "approximately cubic; nx is set to keep L=1m, W=H=0.2m fixed.",
     )
     parser.add_argument(
         "--load-case",

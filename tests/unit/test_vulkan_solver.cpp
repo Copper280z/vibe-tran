@@ -263,47 +263,50 @@ TEST_F(VulkanTest, NameContainsVulkan) {
         << "Backend name should contain 'Vulkan' for meaningful log output";
 }
 
-// ── Test 9: Float32 precision floor causes early exit ─────────────────────────
-// Set tolerance=1e-30 (far below float32 floor ~1e-7) with a large max_iterations.
-// The solver must detect that it cannot make further progress — either via
-// stagnation detection (residual not improving) or via pAp breakdown (float32
-// rounding makes the search direction numerically degenerate) — and throw
-// SolverError well before exhausting max_iterations.
-// This validates that the GPU backend fails fast rather than burning all 5000
-// iterations when float32 arithmetic prevents convergence to the requested tolerance.
+// ── Test 9: Float32→float64 auto-promotion for stiff large system ─────────────
+// For a large diagonal system with K_ii >> ||F||_2 / sqrt(n), the float32 path
+// can fail (stagnation or wrong convergence).  With use_double=false the solver
+// automatically retries with float64 when float32 fails.
+// Requires shaderFloat64 device support; skips gracefully otherwise.
+//
+// Note: stagnation-at-precision-floor is NOT tested here because for
+// well-conditioned SPD systems in float64, PCG reaches exact-zero residual via
+// Krylov cancellation after at most n iterations, making the test unreliable.
+// Stagnation detection is exercised implicitly by StiffSystemDoesNotFalseConverge
+// (float32 stagnates → triggers float64 fallback).
 
-TEST_F(VulkanTest, Float32PrecisionFloorCausesEarlyExit) {
+TEST_F(VulkanTest, LargeStiffDiagonalSucceedsWithDefaultConfig) {
+    auto tmp_ctx = nastran::VulkanContext::create();
+    if (!tmp_ctx || !tmp_ctx->device_info().supports_float64)
+        GTEST_SKIP() << "GPU lacks shaderFloat64; float32→float64 fallback unavailable";
+
+    // Default config (use_double=false) with min_dofs_for_gpu=0 to force GPU path.
     VulkanSolverConfig cfg = gpu_test_cfg();
-    cfg.use_double        = false; // must use float32 to hit the precision floor
-    cfg.tolerance         = 1e-30; // impossible in float32
-    cfg.stagnation_window = 5;
-    cfg.max_iterations    = 5000;
+    cfg.use_double = false; // start with float32; fallback to float64 on stagnation
 
-    auto stag_backend = VulkanSolverBackend::try_create(cfg);
-    if (!stag_backend.has_value())
+    auto f32_backend = VulkanSolverBackend::try_create(cfg);
+    if (!f32_backend.has_value())
         GTEST_SKIP() << "Vulkan unavailable";
 
-    // n=50 tridiagonal — converges in float32 around residual ~1e-7, then stalls
-    const int n = 50;
+    // n=10000 diagonal system with K_ii=1.3e9 (same stiffness as bar_10000_bending).
+    // Float32 PCG stagnates or diverges; auto-retry with float64 produces correct result.
+    const int    n      = 10000;
+    const double K_diag = 1.3e9;
     SparseMatrixBuilder builder(n);
+    std::vector<double> F(n, 0.0);
     for (int i = 0; i < n; ++i) {
-        builder.add(i, i, 3.0);
-        if (i > 0)     builder.add(i, i - 1, -1.0);
-        if (i < n - 1) builder.add(i, i + 1, -1.0);
+        builder.add(i, i, K_diag);
+        F[i] = static_cast<double>(i % 7 + 1); // varied non-zero loads
     }
     auto csr = builder.build_csr();
 
-    try {
-        std::vector<double> F(n, 1.0);
-        (void)stag_backend->solve(csr, F);
-        FAIL() << "Expected SolverError (tolerance unachievable in float32), "
-                  "but solve() returned normally";
-    } catch (const SolverError&) {
-        // Must have thrown well before max_iterations — float32 breakdown/stagnation
-        // should be detected within tens of iterations, not 5000.
-        EXPECT_LT(stag_backend->last_iteration_count(), cfg.max_iterations / 10)
-            << "Solver should have exited early due to float32 precision limit, "
-               "not run to max_iterations";
+    auto u = f32_backend->solve(csr, F); // must succeed via float64 fallback if float32 fails
+
+    ASSERT_EQ(static_cast<int>(u.size()), n);
+    for (int i = 0; i < n; ++i) {
+        const double expected = F[i] / K_diag;
+        EXPECT_NEAR(u[i], expected, expected * 1e-6)
+            << "Stiff diagonal: component " << i << " wrong; float32→float64 fallback may have failed";
     }
 }
 
@@ -392,9 +395,60 @@ TEST_F(VulkanTest, Float64PathAgreesWithEigenToDoublePrecision) {
         << "n=50 with min_dofs_for_gpu=0 should use full-GPU path";
 }
 
-// ── Test 12: VulkanContext accessors return valid handles ─────────────────────
-// Exercises physical_device() and compute_queue_family() which are declared
-// but only used in tests (per CLAUDE.md policy).
+// ── Test 12: Stiff system (large K_ii / small ||F||) must not false-converge ──
+// Regression test for the mixed-norm convergence criterion bug.
+//
+// Root cause: using sqrt(r^T M^{-1} r) / ||b||_2 as the convergence ratio
+// produces a near-zero initial value when K_ii is large (e.g. structural
+// stiffness ~1e9) but ||F||_2 is small (~hundreds).  The solver sees the ratio
+// already below tolerance before doing any work and returns a near-zero solution.
+//
+// Fix: denominator must be the M^{-1}-norm of b, i.e. sqrt(b^T M^{-1} b),
+// which equals sqrt(rz_old) at iteration 0 (since x=0 => r=b).  This makes
+// the initial ratio exactly 1.0 and ensures the solver always iterates at least
+// once before checking convergence.
+//
+// The test constructs a 2×2 stiff diagonal system that triggered the bug:
+//   K = diag(1.3e9, 1.3e9),  F = [333, 0]
+// True solution: u = [333/1.3e9, 0] ≈ [2.56e-7, 0].
+// With the bug the solver would return [0, 0] in 1 iteration; with the fix it
+// converges to the true solution.
+
+TEST_F(VulkanTest, StiffSystemDoesNotFalseConverge) {
+    // K_ii ≈ 1.3e9, ||F||_2 = 333.  With the old mixed-norm criterion,
+    // sqrt(rz_old) / ||F||_2 = sqrt(F_i^2 / K_ii) / ||F||_2
+    //   = sqrt(333^2 / 1.3e9) / 333 ≈ 2.76e-5 < 5e-5 (default tolerance).
+    // The solver would declare convergence with 0 iterations, returning zeros.
+    const double K_diag = 1.3e9;
+    const double F0     = 333.0;
+
+    SparseMatrixBuilder builder(2);
+    builder.add(0, 0, K_diag);
+    builder.add(1, 1, K_diag);
+    auto csr = builder.build_csr();
+    std::vector<double> F = {F0, 0.0};
+
+    auto u = backend_->solve(csr, F);
+
+    ASSERT_EQ(static_cast<int>(u.size()), 2);
+
+    const double expected_u0 = F0 / K_diag; // ~2.56e-7
+    EXPECT_NEAR(u[0], expected_u0, expected_u0 * 1e-4)
+        << "Stiff system: u[0] should be F/K = " << expected_u0
+        << " but got " << u[0]
+        << ".  A near-zero result indicates false convergence from mixed-norm criterion.";
+    EXPECT_NEAR(u[1], 0.0, 1e-15)
+        << "Stiff system: u[1] should be exactly 0";
+
+    // The solver must have iterated at least once.  With the old bug, it exited
+    // immediately with 0 iterations; the fix guarantees at least 1 iteration.
+    EXPECT_GE(backend_->last_iteration_count(), 1)
+        << "Solver must iterate at least once for a stiff system; "
+           "zero iterations indicates false convergence from mixed-norm criterion";
+}
+
+// ── Test 13: VulkanContext accessors return valid handles ─────────────────────
+// Exercises physical_device() and compute_queue_family() which are only used in tests.
 
 TEST_F(VulkanTest, VulkanContextHandlesAreValid) {
     // Reach into the context via try_create to verify handle accessors
@@ -406,4 +460,62 @@ TEST_F(VulkanTest, VulkanContextHandlesAreValid) {
     // compute_queue_family() must be a valid queue family index (< UINT32_MAX)
     EXPECT_LT(ctx->compute_queue_family(), UINT32_MAX)
         << "compute_queue_family() must return a valid queue family index";
+}
+
+// ── Test 14: Ill-conditioned tridiagonal converges (stagnation regression) ────
+// Regression test for false stagnation detection.
+//
+// Root cause: the stagnation detector monitored the 2-norm residual ||r||/||b||
+// or the preconditioned residual sqrt(r^T M^{-1} r), both of which oscillate in
+// PCG for ill-conditioned systems.  A stagnation window of 50 iterations would
+// false-trigger even though the A-norm error was decreasing monotonically.
+//
+// Fix: stagnation detection now tracks the A-norm error decrease per window,
+// which is guaranteed monotonic in CG for SPD systems.
+//
+// This test constructs a tridiagonal system with κ ≈ n² = 250000 (n=500),
+// requiring ~500 Jacobi-PCG iterations.  With the old residual-based stagnation
+// detector (window=50), this would throw SolverError.  With A-norm stagnation
+// detection it converges correctly.
+
+TEST_F(VulkanTest, IllConditionedTridiagonalConverges) {
+    const int n = 500;
+    SparseMatrixBuilder builder(n);
+    for (int i = 0; i < n; ++i) {
+        builder.add(i, i, 2.0);
+        if (i > 0)     builder.add(i, i - 1, -1.0);
+        if (i < n - 1) builder.add(i, i + 1, -1.0);
+    }
+    auto csr = builder.build_csr();
+    // F chosen to excite multiple eigenmodes — maximizes residual oscillation.
+    std::vector<double> F(n);
+    for (int i = 0; i < n; ++i)
+        F[i] = (i % 2 == 0) ? 1.0 : -1.0;
+
+    EigenSolverBackend eigen_backend;
+    auto u_eigen = eigen_backend.solve(csr, F);
+
+    // Use float64 to avoid float32 precision issues on this ill-conditioned system.
+    auto ctx = nastran::VulkanContext::create();
+    if (!ctx || !ctx->device_info().supports_float64)
+        GTEST_SKIP() << "GPU lacks shaderFloat64";
+
+    VulkanSolverConfig cfg = gpu_test_cfg();
+    cfg.use_double = true;
+    cfg.tolerance  = 1e-6;
+
+    auto dbl_backend = VulkanSolverBackend::try_create(cfg);
+    if (!dbl_backend.has_value())
+        GTEST_SKIP() << "Vulkan unavailable";
+
+    auto u_vulkan = dbl_backend->solve(csr, F);
+
+    ASSERT_EQ(static_cast<int>(u_vulkan.size()), n);
+    for (int i = 0; i < n; i += 50)
+        EXPECT_NEAR(u_vulkan[i], u_eigen[i], 1e-5)
+            << "Ill-conditioned tridiagonal: component " << i << " differs from Eigen";
+
+    // Must have taken many iterations (κ ≈ 250000, expect ~100-500 CG iterations).
+    EXPECT_GT(dbl_backend->last_iteration_count(), 10)
+        << "Ill-conditioned tridiagonal should require many iterations";
 }

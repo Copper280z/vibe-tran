@@ -56,8 +56,9 @@ else
   message('Using system Eigen3')
 endif
 
-# ── Thread support (for future parallel assembly) ────────────────────────────
+# ── Thread / parallel execution support ──────────────────────────────────────
 thread_dep = dependency('threads')
+tbb_dep    = dependency('tbb')
 
 # ── Vulkan compute backend (optional) ────────────────────────────────────────
 vulkan_dep = dependency('vulkan', required : false)
@@ -100,6 +101,58 @@ else
   message('Vulkan compute backend: disabled (need vulkan, glslc, and xxd)')
 endif
 
+# ── CUDA sparse solver backend (optional) ────────────────────────────────────
+# Requires: CUDA toolkit >= 11.0 with cuDSS >= 0.7.
+# The CUDA compiler (nvcc) is registered via add_languages(); when it is absent
+# the entire block is skipped and the build proceeds without CUDA support.
+have_cuda_compiler = add_languages('cuda', required: false, native: false)
+cuda_sources       = []
+cuda_compile_args  = []
+cuda_lib_deps      = []
+have_cuda_backend  = false
+
+if have_cuda_compiler
+  # nvcc's bundled host compiler (g++-12) supports C++20 except for <format>.
+  # The .cu file uses only exceptions.hpp (no <format>) to stay within g++-12
+  # compatibility.  Set --std=c++20 so other C++20 features (span, optional,
+  # string_view) are available in host code.
+  add_project_arguments('--std=c++20', language: 'cuda')
+endif
+
+if have_cuda_compiler
+  # Meson's 'dependency(cuda, modules:[...])' requires a canonical toolkit root
+  # layout (/usr/local/cuda).  On systems where the CUDA toolkit is installed as
+  # system packages (headers in /usr/include, libs in /usr/lib), the module-based
+  # detection fails.  Use find_library() + declare_dependency() instead so we
+  # work with both installation styles.
+  #
+  # cuDSS installs its library and headers into versioned subdirectories:
+  #   headers: /usr/include/libcudss/12/
+  #   library: /usr/lib/x86_64-linux-gnu/libcudss/12/
+  _cudart_lib = cxx.find_library('cudart', required: false)
+  _cudss_lib  = cxx.find_library('cudss',
+    required: false,
+    dirs: ['/usr/lib/x86_64-linux-gnu/libcudss/12'],
+  )
+  _cudss_inc  = include_directories('/usr/include/libcudss/12')
+
+  if _cudart_lib.found() and _cudss_lib.found()
+    cuda_dep = declare_dependency(
+      dependencies:        [_cudart_lib, _cudss_lib],
+      include_directories: _cudss_inc,
+    )
+    cuda_sources      = files('src/solver/cuda_solver_backend.cu')
+    cuda_compile_args = ['-DHAVE_CUDA=1']
+    cuda_lib_deps     = [cuda_dep]
+    have_cuda_backend = true
+    message('CUDA sparse solver backend: enabled (cuDSS)')
+  else
+    message('CUDA sparse solver backend: disabled (cudart/cudss not found)')
+  endif
+else
+  message('CUDA sparse solver backend: disabled (no CUDA compiler / nvcc not in PATH)')
+endif
+
 # ── cppcheck ─────────────────────────────────────────────────────────────────
 cppcheck = find_program('cppcheck', required: false)
 if cppcheck.found()
@@ -140,17 +193,21 @@ solver_sources = files(
   'src/solver/linear_static.cpp',
 )
 
-# Append Vulkan sources when available
+# Append Vulkan and CUDA sources when available
 solver_sources += vulkan_sources
+solver_sources += cuda_sources
 
 # Include directories
 inc     = include_directories('include')
 src_inc = include_directories('src/solver') # for internal vulkan_pipelines.hpp
 
 # ── Library (solver logic, no main) ──────────────────────────────────────────
-solver_lib_deps = [eigen_dep, thread_dep]
+solver_lib_deps = [eigen_dep, thread_dep, tbb_dep]
 if have_vulkan_backend
   solver_lib_deps += vulkan_dep
+endif
+if have_cuda_backend
+  solver_lib_deps += cuda_lib_deps
 endif
 
 solver_lib = static_library(
@@ -158,7 +215,7 @@ solver_lib = static_library(
   [solver_sources, spirv_hdrs],
   include_directories : [inc, src_inc],
   dependencies        : solver_lib_deps,
-  cpp_args            : vulkan_compile_args,
+  cpp_args            : vulkan_compile_args + cuda_compile_args,
   install             : false,
 )
 
@@ -166,7 +223,7 @@ solver_lib_dep = declare_dependency(
   link_with           : solver_lib,
   include_directories : [inc, src_inc],
   dependencies        : solver_lib_deps,
-  compile_args        : vulkan_compile_args,
+  compile_args        : vulkan_compile_args + cuda_compile_args,
 )
 
 # ── Executable ───────────────────────────────────────────────────────────────
@@ -235,12 +292,27 @@ if have_vulkan_backend
   )
 endif
 
+# ── CUDA unit tests (built only when CUDA backend is available) ───────────────
+if have_cuda_backend
+  cuda_tests = executable(
+    'cuda_tests',
+    files('tests/unit/test_cuda_solver.cpp'),
+    dependencies        : [solver_lib_dep, gtest_dep],
+    include_directories : inc,
+  )
+  test('cuda_tests', cuda_tests,
+    timeout : 120,
+    suite   : 'unit',
+  )
+endif
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 summary({
   'Build type'     : get_option('buildtype'),
   'C++ std'        : 'C++20',
   'Eigen'          : eigen_dep.found(),
   'Vulkan backend' : have_vulkan_backend,
+  'CUDA backend'   : have_cuda_backend,
   'Solver lib'     : solver_lib.name(),
   'Executable'     : nastran_exe.name(),
 }, section : 'NastranSolver')
