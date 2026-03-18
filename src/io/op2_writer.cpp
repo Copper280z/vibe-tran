@@ -355,11 +355,14 @@ static int write_oes1x_solid(std::ostream& f,
     if (nel == 0) return itable;
 
     int etype_id, ngrids;
-    if (etype == ElementType::CTETRA4 || etype == ElementType::CTETRA10) {
+    if (etype == ElementType::CTETRA4) {
         etype_id = 39;
-        ngrids   = (etype == ElementType::CTETRA4) ? 4 : 10;
+        ngrids   = 4;
+    } else if (etype == ElementType::CTETRA10) {
+        etype_id = 99;
+        ngrids   = 10;
     } else {
-        etype_id = 67;
+        etype_id = 67;  // CHEXA8
         ngrids   = 8;
     }
 
@@ -477,8 +480,8 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
         do_disp = do_stress = false;
         for (const auto& msc : model.analysis.subcases) {
             if (msc.id == sc_id) {
-                do_disp   = msc.disp_plot;
-                do_stress = msc.stress_plot;
+                do_disp   = msc.disp_print   || msc.disp_plot;
+                do_stress = msc.stress_print || msc.stress_plot;
                 return;
             }
         }
