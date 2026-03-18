@@ -1,0 +1,54 @@
+$ ctria3_constrained_thermal.bdf
+$ Two CTRIA3 — uniaxial constrained thermal stress (x-direction)
+$
+$ Geometry: 1 m × 1 m square (split by diagonal 1-3), t = 0.1 m
+$ Material: E = 1e6 Pa, nu = 0.3, alpha = 1e-5 /°C
+$ Load:     uniform T = 100 °C (ΔT = 100 °C, T_ref = 0)
+$ BCs:      fix T1 (x) of all four nodes — plate cannot expand in x
+$           fix T2 of nodes 1 and 2 — y rigid-body and rotation
+$           fix T3 of nodes 1, 2, 4 — out-of-plane stability
+$           Plate is free to contract/expand in y (Poisson effect)
+$
+$ Hand calculation (plane stress, x constrained, y free → σ_y = 0):
+$   σ_x = -E*α*ΔT = -1000 Pa
+$   σ_y = 0
+$   von Mises = 1000 Pa
+$
+SOL 101
+CEND
+SUBCASE 1
+  LABEL = CTRIA3 CONSTRAINED THERMAL
+  LOAD = 1
+  SPC = 1
+  DISPLACEMENT = ALL
+  STRESS = ALL
+BEGIN BULK
+PARAM,CSVOUT,YES
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,1.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+MAT1,1,1.0E6,,0.3,0.0,1.0E-5,0.0
+PSHELL,1,1,0.1
+CTRIA3,1,1,1,2,3
+CTRIA3,2,1,1,3,4
+$ Fix T1 of all nodes — x-constraint to produce predictable thermal stress
+SPC1,1,1,1
+SPC1,1,1,2
+SPC1,1,1,3
+SPC1,1,1,4
+$ Fix T2 of nodes 1 and 2 — y rigid-body and rotation suppression
+SPC1,1,2,1
+SPC1,1,2,2
+$ Out-of-plane: fix T3, R1, R2 (DOFs 3,4,5) of all nodes.
+$ Thermal expansion is purely in-plane; bending DOFs are zero by symmetry.
+SPC1,1,345,1
+SPC1,1,345,2
+SPC1,1,345,3
+SPC1,1,345,4
+$ Uniform temperature T = 100 °C
+TEMP,1,1,100.0
+TEMP,1,2,100.0
+TEMP,1,3,100.0
+TEMP,1,4,100.0
+ENDDATA

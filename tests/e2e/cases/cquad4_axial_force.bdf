@@ -1,0 +1,43 @@
+$ cquad4_axial_force.bdf
+$ Single CQUAD4 axial extension — plane stress
+$
+$ Geometry: 1 m × 1 m square plate, t = 0.1 m
+$ Material: E = 1e6 Pa, nu = 0.3
+$ Load:     1000 N total in +x, applied as 500 N at each right-edge node
+$ BCs:      minimal — fix T1 of left-edge nodes (no T1 rigid body),
+$           fix T2 of node 1 (no T2 rigid body / rotation)
+$
+$ Hand calculation (exact for bilinear CQUAD4):
+$   A = h * t = 1 * 0.1 = 0.1 m²
+$   δ = F*L / (E*A) = 1000*1 / (1e6*0.1) = 0.01 m
+$   σ_x = F / A = 10000 Pa  (with σ_y = 0, free Poisson contraction)
+$
+SOL 101
+CEND
+SUBCASE 1
+  LABEL = AXIAL FORCE
+  LOAD = 1
+  SPC = 1
+  DISPLACEMENT = ALL
+  STRESS = ALL
+BEGIN BULK
+PARAM,CSVOUT,YES
+$ Nodes: corners of 1x1 plate in the xy-plane
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,1.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+$ Material
+MAT1,1,1.0E6,,0.3
+$ Shell property: t = 0.1 m
+PSHELL,1,1,0.1
+$ Single CQUAD4 element (CCW node order viewed from +z)
+CQUAD4,1,1,1,2,3,4
+$ BCs: fix T1 of nodes 1 and 4 (left edge); fix T2 of node 1
+SPC1,1,1,1
+SPC1,1,1,4
+SPC1,1,2,1
+$ Loads: 500 N in +x at each right-edge node
+FORCE,1,2,0,500.0,1.0,0.0,0.0
+FORCE,1,3,0,500.0,1.0,0.0,0.0
+ENDDATA

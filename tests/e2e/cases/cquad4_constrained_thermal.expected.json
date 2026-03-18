@@ -1,0 +1,43 @@
+{
+  "description": "CQUAD4 uniaxial constrained thermal: σ_x = -E*α*ΔT = -1000 Pa, σ_y ≈ 0",
+  "checks": [
+    {
+      "comment": "All nodes fixed in x — zero x-displacement",
+      "type": "node_displacement", "subcase": 1, "node_id": 1, "dof": "T1",
+      "expected": 0.0, "abs_tol": 1e-12
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 3, "dof": "T1",
+      "expected": 0.0, "abs_tol": 1e-12
+    },
+    {
+      "comment": "Nodes 3,4 free in y — Poisson expansion v = -nu*(-1000/E)*1 + alpha*dT*1 = 1.3e-3 m",
+      "type": "node_displacement", "subcase": 1, "node_id": 3, "dof": "T2",
+      "expected": 1.3e-3, "rel_tol": 0.01
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 4, "dof": "T2",
+      "expected": 1.3e-3, "rel_tol": 0.01
+    },
+    {
+      "comment": "σ_x = -E*α*ΔT = -1000 Pa (x-expansion constrained)",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sx",
+      "expected": -1000.0, "rel_tol": 0.01
+    },
+    {
+      "comment": "σ_y = 0 (free lateral surface, plane stress)",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sy",
+      "expected": 0.0, "abs_tol": 10.0
+    },
+    {
+      "comment": "σ_xy = 0 (no shear)",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sxy",
+      "expected": 0.0, "abs_tol": 10.0
+    },
+    {
+      "comment": "von Mises = |σ_x| = 1000 Pa",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "von_mises",
+      "expected": 1000.0, "rel_tol": 0.01
+    }
+  ]
+}

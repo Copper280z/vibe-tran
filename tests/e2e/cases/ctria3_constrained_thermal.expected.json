@@ -1,0 +1,53 @@
+{
+  "description": "CTRIA3 uniaxial constrained thermal: σ_x = -E*α*ΔT = -1000 Pa, σ_y ≈ 0 in both triangles",
+  "checks": [
+    {
+      "comment": "All nodes fixed in x — zero x-displacement",
+      "type": "node_displacement", "subcase": 1, "node_id": 1, "dof": "T1",
+      "expected": 0.0, "abs_tol": 1e-12
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 3, "dof": "T1",
+      "expected": 0.0, "abs_tol": 1e-12
+    },
+    {
+      "comment": "Nodes free in y — Poisson + thermal expansion: v = (nu*1000/E + alpha*dT)*y = 1.3e-3 m at y=1",
+      "type": "node_displacement", "subcase": 1, "node_id": 3, "dof": "T2",
+      "expected": 1.3e-3, "rel_tol": 0.01
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 4, "dof": "T2",
+      "expected": 1.3e-3, "rel_tol": 0.01
+    },
+    {
+      "comment": "Tri 1: σ_x = -1000 Pa",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sx",
+      "expected": -1000.0, "rel_tol": 0.01
+    },
+    {
+      "comment": "Tri 1: σ_y ≈ 0",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sy",
+      "expected": 0.0, "abs_tol": 10.0
+    },
+    {
+      "comment": "Tri 1: von Mises = 1000 Pa",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "von_mises",
+      "expected": 1000.0, "rel_tol": 0.01
+    },
+    {
+      "comment": "Tri 2: σ_x = -1000 Pa",
+      "type": "element_stress", "subcase": 1, "elem_id": 2, "component": "sx",
+      "expected": -1000.0, "rel_tol": 0.01
+    },
+    {
+      "comment": "Tri 2: σ_y ≈ 0",
+      "type": "element_stress", "subcase": 1, "elem_id": 2, "component": "sy",
+      "expected": 0.0, "abs_tol": 10.0
+    },
+    {
+      "comment": "Tri 2: von Mises = 1000 Pa",
+      "type": "element_stress", "subcase": 1, "elem_id": 2, "component": "von_mises",
+      "expected": 1000.0, "rel_tol": 0.01
+    }
+  ]
+}

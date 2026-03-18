@@ -1,0 +1,43 @@
+{
+  "description": "CTRIA3 axial extension (2-element mesh): δ = F*L/(E*A) = 0.01 m, σ_x = 10000 Pa (CST exact)",
+  "checks": [
+    {
+      "comment": "Right-edge nodes: 0.01 m in +x. CST represents the linear field exactly.",
+      "type": "node_displacement", "subcase": 1, "node_id": 2, "dof": "T1",
+      "expected": 0.01, "rel_tol": 1e-6
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 3, "dof": "T1",
+      "expected": 0.01, "rel_tol": 1e-6
+    },
+    {
+      "comment": "Left-edge nodes fixed in x",
+      "type": "node_displacement", "subcase": 1, "node_id": 1, "dof": "T1",
+      "expected": 0.0, "abs_tol": 1e-12
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 4, "dof": "T1",
+      "expected": 0.0, "abs_tol": 1e-12
+    },
+    {
+      "comment": "Tri 1 membrane σ_x = 10000 Pa",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sx",
+      "expected": 10000.0, "rel_tol": 1e-6
+    },
+    {
+      "comment": "Tri 1 σ_y = 0 (free Poisson)",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sy",
+      "expected": 0.0, "abs_tol": 1.0
+    },
+    {
+      "comment": "Tri 2 membrane σ_x = 10000 Pa (same loading)",
+      "type": "element_stress", "subcase": 1, "elem_id": 2, "component": "sx",
+      "expected": 10000.0, "rel_tol": 1e-6
+    },
+    {
+      "comment": "Tri 2 σ_y = 0",
+      "type": "element_stress", "subcase": 1, "elem_id": 2, "component": "sy",
+      "expected": 0.0, "abs_tol": 1.0
+    }
+  ]
+}

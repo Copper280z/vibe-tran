@@ -1,0 +1,39 @@
+{
+  "description": "CHEXA8 uniaxial constrained thermal: σ_z = -E*α*ΔT = -1000 Pa, σ_x=σ_y ≈ 0",
+  "checks": [
+    {
+      "comment": "All nodes fixed in z — zero z-displacement",
+      "type": "node_displacement", "subcase": 1, "node_id": 1, "dof": "T3",
+      "expected": 0.0, "abs_tol": 1e-12
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 7, "dof": "T3",
+      "expected": 0.0, "abs_tol": 1e-12
+    },
+    {
+      "comment": "Node 6 at (1,0,1) free in x: u = ε_x*1 = (nu*1000/E + alpha*dT)*1 = 1.3e-3 m",
+      "type": "node_displacement", "subcase": 1, "node_id": 6, "dof": "T1",
+      "expected": 1.3e-3, "rel_tol": 0.01
+    },
+    {
+      "comment": "σ_z = -E*α*ΔT = -1000 Pa (z-expansion constrained)",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sz",
+      "expected": -1000.0, "rel_tol": 0.01
+    },
+    {
+      "comment": "σ_x = 0 (free lateral surface)",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sx",
+      "expected": 0.0, "abs_tol": 10.0
+    },
+    {
+      "comment": "σ_y = 0 (free lateral surface)",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sy",
+      "expected": 0.0, "abs_tol": 10.0
+    },
+    {
+      "comment": "von Mises = |σ_z| = 1000 Pa",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "von_mises",
+      "expected": 1000.0, "rel_tol": 0.01
+    }
+  ]
+}

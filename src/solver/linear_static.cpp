@@ -368,7 +368,18 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         Eigen::Matrix3d Dm_;
         Dm_ << c_, c_ * nu_, 0, c_ * nu_, c_, 0, 0, 0, c_ * (1 - nu_) / 2;
 
-        Eigen::Vector3d sigma = Dm_ * Bm * u_mem;
+        // Thermal correction: σ = D*(B*u - ε_th),  ε_th = α*ΔT*[1,1,0]ᵀ (plane stress)
+        double T_avg4 = 0.0;
+        for (int n = 0; n < 4; ++n) {
+          auto it = nodal_temps_rec.find(elem_data.nodes[n]);
+          T_avg4 += (it != nodal_temps_rec.end()) ? it->second : sc.t_ref;
+        }
+        T_avg4 /= 4.0;
+        double dT4 = T_avg4 - sc.t_ref;
+        double alpha4 = mat_.A;
+        Eigen::Vector3d eps_th4{alpha4 * dT4, alpha4 * dT4, 0.0};
+
+        Eigen::Vector3d sigma = Dm_ * (Bm * u_mem - eps_th4);
         ps.sx = sigma(0);
         ps.sy = sigma(1);
         ps.sxy = sigma(2);
@@ -416,7 +427,18 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
           u_mem(2 * n) = ue(6 * n);
           u_mem(2 * n + 1) = ue(6 * n + 1);
         }
-        Eigen::Vector3d sigma = Dm_ * Bm * u_mem;
+        // Thermal correction: σ = D*(B*u - ε_th),  ε_th = α*ΔT*[1,1,0]ᵀ (plane stress)
+        double T_avg3 = 0.0;
+        for (int n = 0; n < 3; ++n) {
+          auto it = nodal_temps_rec.find(elem_data.nodes[n]);
+          T_avg3 += (it != nodal_temps_rec.end()) ? it->second : sc.t_ref;
+        }
+        T_avg3 /= 3.0;
+        double dT3 = T_avg3 - sc.t_ref;
+        double alpha3 = mat_.A;
+        Eigen::Vector3d eps_th3{alpha3 * dT3, alpha3 * dT3, 0.0};
+
+        Eigen::Vector3d sigma = Dm_ * (Bm * u_mem - eps_th3);
         ps.sx = sigma(0);
         ps.sy = sigma(1);
         ps.sxy = sigma(2);

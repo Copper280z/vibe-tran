@@ -1,0 +1,54 @@
+{
+  "description": "CHEXA8 free thermal: δ = alpha*ΔT*L = 1e-3 m in each axis, stress ≈ 0",
+  "checks": [
+    {
+      "comment": "Top-face axial displacement (z-dir): alpha*dT*1 = 1e-3 m",
+      "type": "node_displacement", "subcase": 1, "node_id": 5, "dof": "T3",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 6, "dof": "T3",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 7, "dof": "T3",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 8, "dof": "T3",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "comment": "Node 6 at (1,0,1): lateral expansion in x = alpha*dT*1 = 1e-3 m",
+      "type": "node_displacement", "subcase": 1, "node_id": 6, "dof": "T1",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "comment": "Node 7 at (1,1,1): lateral expansion in x and y = 1e-3 m",
+      "type": "node_displacement", "subcase": 1, "node_id": 7, "dof": "T1",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 7, "dof": "T2",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "comment": "Bottom-face fixed in z",
+      "type": "node_displacement", "subcase": 1, "node_id": 1, "dof": "T3",
+      "expected": 0.0, "abs_tol": 1e-12
+    },
+    {
+      "comment": "Free thermal → zero stress",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sx",
+      "expected": 0.0, "abs_tol": 1.0
+    },
+    {
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sy",
+      "expected": 0.0, "abs_tol": 1.0
+    },
+    {
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sz",
+      "expected": 0.0, "abs_tol": 1.0
+    }
+  ]
+}

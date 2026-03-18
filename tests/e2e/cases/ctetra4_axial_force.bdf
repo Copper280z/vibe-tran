@@ -1,0 +1,64 @@
+$ ctetra4_axial_force.bdf
+$ Six CTETRA4 (Kuhn decomposition of unit cube) — axial extension in z
+$
+$ Geometry: 1 m × 1 m × 1 m cube, 6 tetrahedra (all positive volume)
+$ Material: E = 1e6 Pa, nu = 0.3
+$ Load:     1000 N total in +z on top face, applied as consistent nodal forces
+$           Top face triangles: 5-6-7 and 5-7-8 (diagonal 5-7)
+$           Each triangle area = 0.5 m², consistent load per node = 500/3 N
+$           Nodes 5 and 7 appear in both triangles: F = 2*(500/3) = 333.333... N
+$           Nodes 6 and 8 appear in one triangle each: F = 500/3 = 166.667... N
+$ BCs:      fix T3 of all bottom-face nodes, fix T1+T2 of node 1, fix T2 of node 2
+$
+$ Hand calculation (CST is exact for linear axial field):
+$   δ = F*L / (E*A) = 1000*1 / (1e6*1) = 1e-3 m
+$   σ_z = F / A = 1000 Pa in every element
+$
+SOL 101
+CEND
+SUBCASE 1
+  LABEL = CTETRA4 AXIAL FORCE
+  LOAD = 1
+  SPC = 1
+  DISPLACEMENT = ALL
+  STRESS = ALL
+BEGIN BULK
+PARAM,CSVOUT,YES
+$ Nodes: unit cube
+$ Bottom face (z=0): nodes 1-4
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,1.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+$ Top face (z=1): nodes 5-8
+GRID,5,,0.0,0.0,1.0
+GRID,6,,1.0,0.0,1.0
+GRID,7,,1.0,1.0,1.0
+GRID,8,,0.0,1.0,1.0
+$ Material
+MAT1,1,1.0E6,,0.3
+$ Solid property
+PSOLID,1,1
+$ 6-tet Kuhn decomposition of unit cube (all positive determinant, V=1/6 each)
+$ Main diagonal connects nodes 1 and 7
+CTETRA,1,1,1,2,3,7
+CTETRA,2,1,1,5,6,7
+CTETRA,3,1,1,4,8,7
+CTETRA,4,1,2,1,6,7
+CTETRA,5,1,5,1,8,7
+CTETRA,6,1,4,1,3,7
+$ BCs: fix T3 of all bottom-face nodes (z=0)
+SPC1,1,3,1
+SPC1,1,3,2
+SPC1,1,3,3
+SPC1,1,3,4
+$ Prevent lateral rigid body motion
+SPC1,1,12,1
+SPC1,1,2,2
+$ Consistent nodal loads for uniform σ_z = 1000 Pa traction on top face
+$ Top-face triangles: 5-6-7 (area=0.5) and 5-7-8 (area=0.5)
+FORCE,1,5,0,333.3333333333333,0.0,0.0,1.0
+FORCE,1,6,0,166.6666666666667,0.0,0.0,1.0
+FORCE,1,7,0,333.3333333333333,0.0,0.0,1.0
+FORCE,1,8,0,166.6666666666667,0.0,0.0,1.0
+ENDDATA

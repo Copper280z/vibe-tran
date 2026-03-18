@@ -1,0 +1,38 @@
+{
+  "description": "CQUAD4 free thermal: δ = alpha*ΔT*L = 1e-5*100*1 = 1e-3 m, stress ≈ 0",
+  "checks": [
+    {
+      "comment": "Node 2 at (1,0): u = alpha*dT*1 = 1e-3",
+      "type": "node_displacement", "subcase": 1, "node_id": 2, "dof": "T1",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "comment": "Node 3 at (1,1): u = 1e-3",
+      "type": "node_displacement", "subcase": 1, "node_id": 3, "dof": "T1",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "comment": "Node 3 at (1,1): v = alpha*dT*1 = 1e-3",
+      "type": "node_displacement", "subcase": 1, "node_id": 3, "dof": "T2",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "comment": "Node 4 at (0,1): v = 1e-3",
+      "type": "node_displacement", "subcase": 1, "node_id": 4, "dof": "T2",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "comment": "Free thermal → zero membrane stress",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sx",
+      "expected": 0.0, "abs_tol": 1.0
+    },
+    {
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sy",
+      "expected": 0.0, "abs_tol": 1.0
+    },
+    {
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sxy",
+      "expected": 0.0, "abs_tol": 1.0
+    }
+  ]
+}

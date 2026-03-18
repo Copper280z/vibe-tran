@@ -1,0 +1,60 @@
+$ chexa8_free_thermal.bdf
+$ Single CHEXA8 unit cube — free thermal expansion with zero stress
+$
+$ Material: E = 1e6 Pa, nu = 0.3, alpha = 1e-5 /°C
+$ Load:     uniform T = 100 °C (ΔT = 100 °C, T_ref = 0)
+$ BCs:      minimal — all compatible with free-expansion field
+$           u = alpha*dT*x,  v = alpha*dT*y,  w = alpha*dT*z
+$   fix T3 of all bottom-face nodes (w=0 at z=0 ✓)
+$   fix T1+T2 of node 1 (at origin, u=v=0 ✓)
+$   fix T2 of node 2 (at (1,0,0), v=0 ✓)
+$
+$ Expected (alpha*dT = 1e-5 * 100 = 1e-3):
+$   Top-face z-displacement = 1e-3 m
+$   Node 6 at (1,0,1): u = 1e-3 m, w = 1e-3 m
+$   Node 7 at (1,1,1): u = 1e-3 m, v = 1e-3 m, w = 1e-3 m
+$   Stress ≈ 0 (trilinear element represents linear field exactly)
+$
+SOL 101
+CEND
+SUBCASE 1
+  LABEL = CHEXA8 FREE THERMAL
+  LOAD = 1
+  SPC = 1
+  DISPLACEMENT = ALL
+  STRESS = ALL
+BEGIN BULK
+PARAM,CSVOUT,YES
+$ Nodes: unit cube
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,1.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+GRID,5,,0.0,0.0,1.0
+GRID,6,,1.0,0.0,1.0
+GRID,7,,1.0,1.0,1.0
+GRID,8,,0.0,1.0,1.0
+$ Material: alpha = 1e-5 /°C
+MAT1,1,1.0E6,,0.3,0.0,1.0E-5,0.0
+$ Solid property
+PSOLID,1,1
+$ Single CHEXA8
+CHEXA,1,1,1,2,3,4,5,6,+
++,7,8
+$ Minimal BCs (all compatible with free-expansion field)
+SPC1,1,3,1
+SPC1,1,3,2
+SPC1,1,3,3
+SPC1,1,3,4
+SPC1,1,12,1
+SPC1,1,2,2
+$ Uniform temperature T = 100 °C on all nodes
+TEMP,1,1,100.0
+TEMP,1,2,100.0
+TEMP,1,3,100.0
+TEMP,1,4,100.0
+TEMP,1,5,100.0
+TEMP,1,6,100.0
+TEMP,1,7,100.0
+TEMP,1,8,100.0
+ENDDATA

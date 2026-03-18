@@ -1,0 +1,66 @@
+$ chexa8_constrained_thermal.bdf
+$ Single CHEXA8 unit cube — uniaxial constrained thermal stress (z-direction)
+$
+$ Geometry: 1 m × 1 m × 1 m cube
+$ Material: E = 1e6 Pa, nu = 0.3, alpha = 1e-5 /°C
+$ Load:     uniform T = 100 °C (ΔT = 100 °C, T_ref = 0)
+$ BCs:      fix T3 of ALL eight nodes — cube cannot expand in z
+$           fix T1+T2 of node 1 and T2 of node 2 — lateral rigid-body prevention
+$           Cube is free to contract/expand in x and y (Poisson effect)
+$
+$ Hand calculation (3D, z constrained, x and y free → σ_x = σ_y = 0):
+$   ε_z = 0 (kinematically enforced)
+$   σ_x = σ_y = 0 (free lateral surfaces)
+$   From 3D Hooke with thermal strain:
+$     ε_z = [σ_z - ν*(σ_x + σ_y)] / E + α*ΔT = 0
+$     σ_z = -E*α*ΔT = -1e6 * 1e-5 * 100 = -1000 Pa  (compressive)
+$
+$   von Mises = |σ_z| = 1000 Pa  (σ_x = σ_y = 0)
+$
+$   Lateral Poisson + thermal: ε_x = ε_y = -ν*σ_z/E + α*ΔT = 0.3e-3 + 1e-3 = 1.3e-3
+$   Node 6 at (1,0,1): u = 1.3e-3 m  (free to move)
+$
+SOL 101
+CEND
+SUBCASE 1
+  LABEL = CHEXA8 CONSTRAINED THERMAL
+  LOAD = 1
+  SPC = 1
+  DISPLACEMENT = ALL
+  STRESS = ALL
+BEGIN BULK
+PARAM,CSVOUT,YES
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,1.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+GRID,5,,0.0,0.0,1.0
+GRID,6,,1.0,0.0,1.0
+GRID,7,,1.0,1.0,1.0
+GRID,8,,0.0,1.0,1.0
+MAT1,1,1.0E6,,0.3,0.0,1.0E-5,0.0
+PSOLID,1,1
+CHEXA,1,1,1,2,3,4,5,6,+
++,7,8
+$ Fix T3 (z) of all eight nodes — z-expansion is constrained
+SPC1,1,3,1
+SPC1,1,3,2
+SPC1,1,3,3
+SPC1,1,3,4
+SPC1,1,3,5
+SPC1,1,3,6
+SPC1,1,3,7
+SPC1,1,3,8
+$ Lateral rigid-body: fix T1+T2 of node 1, T2 of node 2
+SPC1,1,12,1
+SPC1,1,2,2
+$ Uniform temperature T = 100 °C on all nodes
+TEMP,1,1,100.0
+TEMP,1,2,100.0
+TEMP,1,3,100.0
+TEMP,1,4,100.0
+TEMP,1,5,100.0
+TEMP,1,6,100.0
+TEMP,1,7,100.0
+TEMP,1,8,100.0
+ENDDATA

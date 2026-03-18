@@ -1,0 +1,47 @@
+{
+  "description": "CHEXA8 unit cube axial extension: δ = F*L/(E*A) = 1e-3 m, Poisson contraction verified",
+  "checks": [
+    {
+      "comment": "Top-face nodes should rise 1e-3 m in z (trilinear element is exact)",
+      "type": "node_displacement", "subcase": 1, "node_id": 5, "dof": "T3",
+      "expected": 1e-3, "rel_tol": 1e-6
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 6, "dof": "T3",
+      "expected": 1e-3, "rel_tol": 1e-6
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 7, "dof": "T3",
+      "expected": 1e-3, "rel_tol": 1e-6
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 8, "dof": "T3",
+      "expected": 1e-3, "rel_tol": 1e-6
+    },
+    {
+      "comment": "Bottom-face nodes fixed in z",
+      "type": "node_displacement", "subcase": 1, "node_id": 1, "dof": "T3",
+      "expected": 0.0, "abs_tol": 1e-12
+    },
+    {
+      "comment": "Poisson contraction: node 6 at (1,0,1) — ε_x = -nu*ε_z = -3e-4",
+      "type": "node_displacement", "subcase": 1, "node_id": 6, "dof": "T1",
+      "expected": -3e-4, "rel_tol": 1e-6
+    },
+    {
+      "comment": "σ_z = F/A = 1000 Pa",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sz",
+      "expected": 1000.0, "rel_tol": 1e-6
+    },
+    {
+      "comment": "σ_x = 0 (free lateral surface)",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sx",
+      "expected": 0.0, "abs_tol": 1.0
+    },
+    {
+      "comment": "σ_y = 0 (free lateral surface)",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sy",
+      "expected": 0.0, "abs_tol": 1.0
+    }
+  ]
+}

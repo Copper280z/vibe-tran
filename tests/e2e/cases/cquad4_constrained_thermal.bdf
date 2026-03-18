@@ -1,0 +1,51 @@
+$ cquad4_constrained_thermal.bdf
+$ Single CQUAD4 — uniaxial constrained thermal stress (x-direction)
+$
+$ Geometry: 1 m × 1 m square plate, t = 0.1 m
+$ Material: E = 1e6 Pa, nu = 0.3, alpha = 1e-5 /°C
+$ Load:     uniform T = 100 °C (ΔT = 100 °C, T_ref = 0)
+$ BCs:      fix T1 of ALL four nodes — plate cannot expand in x
+$           fix T2 of node 1 — prevents y rigid-body translation and rotation
+$           Plate is free to contract/expand in y (Poisson effect)
+$
+$ Hand calculation (plane stress, x fully constrained, y free → σ_y = 0):
+$   ε_x = 0  (kinematically enforced)
+$   σ_y = 0  (free lateral surface)
+$   From plane-stress Hooke with thermal strain:
+$     ε_x = (σ_x - ν*σ_y) / E + α*ΔT = 0
+$     → σ_x = -E*α*ΔT = -1e6 * 1e-5 * 100 = -1000 Pa  (compressive)
+$
+$   von Mises = |σ_x| = 1000 Pa  (σ_y = σ_xy = 0)
+$
+SOL 101
+CEND
+SUBCASE 1
+  LABEL = CQUAD4 CONSTRAINED THERMAL
+  LOAD = 1
+  SPC = 1
+  DISPLACEMENT = ALL
+  STRESS = ALL
+BEGIN BULK
+PARAM,CSVOUT,YES
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,1.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+MAT1,1,1.0E6,,0.3,0.0,1.0E-5,0.0
+PSHELL,1,1,0.1
+CQUAD4,1,1,1,2,3,4
+$ Fix T1 (x) of all nodes — prevents x-expansion, creates thermal stress in x
+SPC1,1,1,1
+SPC1,1,1,2
+SPC1,1,1,3
+SPC1,1,1,4
+$ Fix T2 (y) of node 1 — prevents y rigid-body translation
+$ Fix T2 (y) of node 2 — prevents rotation about z
+SPC1,1,2,1
+SPC1,1,2,2
+$ Uniform temperature T = 100 °C
+TEMP,1,1,100.0
+TEMP,1,2,100.0
+TEMP,1,3,100.0
+TEMP,1,4,100.0
+ENDDATA

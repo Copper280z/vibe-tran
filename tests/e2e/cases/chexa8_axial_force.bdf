@@ -1,0 +1,59 @@
+$ chexa8_axial_force.bdf
+$ Single CHEXA8 unit cube — axial extension in z
+$
+$ Geometry: 1 m × 1 m × 1 m cube
+$ Material: E = 1e6 Pa, nu = 0.3
+$ Load:     1000 N total in +z, split evenly over 4 top-face corner nodes
+$ BCs:      minimal — fix T3 of all bottom-face nodes (z=0),
+$           fix T1+T2 of node 1, fix T2 of node 2
+$
+$ Hand calculation (trilinear element is exact for linear fields):
+$   A = 1 m², L = 1 m
+$   δ = F*L / (E*A) = 1000*1 / (1e6*1) = 1e-3 m
+$   σ_z = F / A = 1000 Pa
+$   Poisson: ε_x = ε_y = -nu * δ/L = -3e-4
+$            u at (1,0,1) = -nu * (F/EA) * x = -3e-4 m
+$
+SOL 101
+CEND
+SUBCASE 1
+  LABEL = CHEXA8 AXIAL FORCE
+  LOAD = 1
+  SPC = 1
+  DISPLACEMENT = ALL
+  STRESS = ALL
+BEGIN BULK
+PARAM,CSVOUT,YES
+$ Nodes: unit cube
+$ Bottom face (z=0): nodes 1-4
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,1.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+$ Top face (z=1): nodes 5-8
+GRID,5,,0.0,0.0,1.0
+GRID,6,,1.0,0.0,1.0
+GRID,7,,1.0,1.0,1.0
+GRID,8,,0.0,1.0,1.0
+$ Material
+MAT1,1,1.0E6,,0.3
+$ Solid property (SRI formulation)
+PSOLID,1,1
+$ Single CHEXA8 element
+CHEXA,1,1,1,2,3,4,5,6,+
++,7,8
+$ BCs: fix T3 of all bottom-face nodes (prevents z translation and tilt)
+$      fix T1+T2 of node 1 (prevents lateral RBM)
+$      fix T2 of node 2 (prevents rotation about z)
+SPC1,1,3,1
+SPC1,1,3,2
+SPC1,1,3,3
+SPC1,1,3,4
+SPC1,1,12,1
+SPC1,1,2,2
+$ Load: 250 N in +z at each top-face node = 1000 N total
+FORCE,1,5,0,250.0,0.0,0.0,1.0
+FORCE,1,6,0,250.0,0.0,0.0,1.0
+FORCE,1,7,0,250.0,0.0,0.0,1.0
+FORCE,1,8,0,250.0,0.0,0.0,1.0
+ENDDATA

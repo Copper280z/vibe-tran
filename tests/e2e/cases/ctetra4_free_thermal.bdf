@@ -1,0 +1,60 @@
+$ ctetra4_free_thermal.bdf
+$ Six CTETRA4 (Kuhn cube) — free thermal expansion with zero stress
+$
+$ Material: E = 1e6 Pa, nu = 0.3, alpha = 1e-5 /°C
+$ Load:     uniform T = 100 °C (ΔT = 100 °C, T_ref = 0)
+$ BCs:      same minimal set as chexa8_free_thermal — all compatible with
+$           the free-expansion field u = alpha*dT*x, v = alpha*dT*y, w = alpha*dT*z
+$
+$ Expected (alpha*dT = 1e-3):
+$   Top-face nodes (z=1): w = 1e-3 m
+$   Node 6 at (1,0,1): u = 1e-3 m
+$   Node 7 at (1,1,1): u = 1e-3 m, v = 1e-3 m
+$   Stress ≈ 0 in all six tetrahedra (CST is exact for linear fields)
+$
+SOL 101
+CEND
+SUBCASE 1
+  LABEL = CTETRA4 FREE THERMAL
+  LOAD = 1
+  SPC = 1
+  DISPLACEMENT = ALL
+  STRESS = ALL
+BEGIN BULK
+PARAM,CSVOUT,YES
+$ Nodes: unit cube
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,1.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+GRID,5,,0.0,0.0,1.0
+GRID,6,,1.0,0.0,1.0
+GRID,7,,1.0,1.0,1.0
+GRID,8,,0.0,1.0,1.0
+$ Material: alpha = 1e-5 /°C
+MAT1,1,1.0E6,,0.3,0.0,1.0E-5,0.0
+PSOLID,1,1
+$ 6-tet Kuhn decomposition
+CTETRA,1,1,1,2,3,7
+CTETRA,2,1,1,5,6,7
+CTETRA,3,1,1,4,8,7
+CTETRA,4,1,2,1,6,7
+CTETRA,5,1,5,1,8,7
+CTETRA,6,1,4,1,3,7
+$ Minimal BCs (compatible with free-expansion field)
+SPC1,1,3,1
+SPC1,1,3,2
+SPC1,1,3,3
+SPC1,1,3,4
+SPC1,1,12,1
+SPC1,1,2,2
+$ Uniform temperature T = 100 °C on all nodes
+TEMP,1,1,100.0
+TEMP,1,2,100.0
+TEMP,1,3,100.0
+TEMP,1,4,100.0
+TEMP,1,5,100.0
+TEMP,1,6,100.0
+TEMP,1,7,100.0
+TEMP,1,8,100.0
+ENDDATA

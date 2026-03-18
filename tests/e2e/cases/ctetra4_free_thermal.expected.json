@@ -1,0 +1,61 @@
+{
+  "description": "CTETRA4 Kuhn-cube free thermal: δ = 1e-3 m in each axis, stress ≈ 0 in all 6 elements",
+  "checks": [
+    {
+      "comment": "Top-face axial displacement: alpha*dT*1 = 1e-3 m",
+      "type": "node_displacement", "subcase": 1, "node_id": 5, "dof": "T3",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 6, "dof": "T3",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 7, "dof": "T3",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 8, "dof": "T3",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "comment": "Node 6 at (1,0,1): lateral x-expansion = 1e-3 m",
+      "type": "node_displacement", "subcase": 1, "node_id": 6, "dof": "T1",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "comment": "Node 7 at (1,1,1): x and y expansion = 1e-3 m each",
+      "type": "node_displacement", "subcase": 1, "node_id": 7, "dof": "T1",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 7, "dof": "T2",
+      "expected": 1e-3, "rel_tol": 1e-4
+    },
+    {
+      "comment": "Free thermal → zero stress in each tet",
+      "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "sz",
+      "expected": 0.0, "abs_tol": 1.0
+    },
+    {
+      "type": "element_stress", "subcase": 1, "elem_id": 2, "component": "sz",
+      "expected": 0.0, "abs_tol": 1.0
+    },
+    {
+      "type": "element_stress", "subcase": 1, "elem_id": 3, "component": "sz",
+      "expected": 0.0, "abs_tol": 1.0
+    },
+    {
+      "type": "element_stress", "subcase": 1, "elem_id": 4, "component": "sz",
+      "expected": 0.0, "abs_tol": 1.0
+    },
+    {
+      "type": "element_stress", "subcase": 1, "elem_id": 5, "component": "sz",
+      "expected": 0.0, "abs_tol": 1.0
+    },
+    {
+      "type": "element_stress", "subcase": 1, "elem_id": 6, "component": "sz",
+      "expected": 0.0, "abs_tol": 1.0
+    }
+  ]
+}
