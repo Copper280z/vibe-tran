@@ -54,7 +54,7 @@ struct PSolid {
   PropertyId pid{0};
   MaterialId mid{0};
   int cordm{0}; // material coordinate system
-  SolidFormulation isop{SolidFormulation::SRI};
+  SolidFormulation isop{SolidFormulation::EAS};
 };
 
 using Property = std::variant<PShell, PSolid>;

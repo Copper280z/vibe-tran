@@ -102,7 +102,9 @@ private:
 
 // ── CPENTA6 ──────────────────────────────────────────────────────────────────
 // 6-node linear pentahedral (wedge) element.
-// Uses 6-point Gauss quadrature (3 triangle × 2 axial).
+// Uses selectively reduced integration (SRI):
+//   - Deviatoric: 6-point Gauss quadrature (3 triangle × 2 axial)
+//   - Volumetric: 1-point centroidal integration
 
 class CPenta6 : public ElementBase {
 public:
@@ -135,6 +137,46 @@ public:
         std::array<double, 6> dNdzeta;
     };
     static ShapeData6 shape_functions(double L1, double L2, double zeta) noexcept;
+
+private:
+    ElementId   eid_;
+    PropertyId  pid_;
+    std::array<NodeId, NUM_NODES> nodes_;
+    const Model& model_;
+
+    std::array<Vec3, 6> node_coords() const;
+    Eigen::Matrix<double,6,6> constitutive_D() const;
+    const Mat1& material() const;
+    const PSolid& psolid() const;
+};
+
+// ── CPENTA6EAS ────────────────────────────────────────────────────────────────
+// 6-node wedge with Enhanced Assumed Strain (9-mode incompatible modes).
+// Identical interface to CPenta6; uses full 6-point Gauss + static
+// condensation to eliminate both volumetric and bending locking.
+
+class CPenta6Eas : public ElementBase {
+public:
+    static constexpr int NUM_NODES    = 6;
+    static constexpr int DOF_PER_NODE = 3;
+    static constexpr int NUM_DOFS     = NUM_NODES * DOF_PER_NODE; // 18
+
+    CPenta6Eas(ElementId eid,
+               PropertyId pid,
+               std::array<NodeId, NUM_NODES> node_ids,
+               const Model& model);
+
+    [[nodiscard]] ElementType type()     const noexcept override { return ElementType::CPENTA6; }
+    [[nodiscard]] ElementId   id()       const noexcept override { return eid_; }
+    [[nodiscard]] int         num_dofs() const noexcept override { return NUM_DOFS; }
+
+    [[nodiscard]] LocalKe stiffness_matrix() const override;
+    [[nodiscard]] LocalFe thermal_load(std::span<const double> temperatures,
+                                        double t_ref) const override;
+    [[nodiscard]] std::vector<EqIndex> global_dof_indices(const DofMap&) const override;
+    [[nodiscard]] std::span<const NodeId> node_ids() const noexcept override {
+        return std::span<const NodeId>{nodes_.data(), NUM_NODES};
+    }
 
 private:
     ElementId   eid_;

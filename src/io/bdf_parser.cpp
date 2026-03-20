@@ -619,11 +619,13 @@ void BdfParser::process_psolid(ParseContext &ctx,
   p.pid = PropertyId(parse_int(f[1], ctx.line_num));
   p.mid = MaterialId(parse_int(f[2], ctx.line_num));
   p.cordm = f[3].empty() ? 0 : parse_int(f[3], ctx.line_num);
-  // f[6] is ISOP: "EAS" selects Enhanced Assumed Strain formulation
+  // f[6] is ISOP: "EAS" (default) or "SRI" selects integration formulation
   if (f.size() > 6 && !f[6].empty()) {
     std::string isop = f[6];
     std::transform(isop.begin(), isop.end(), isop.begin(), ::toupper);
-    if (isop == "EAS")
+    if (isop == "SRI")
+      p.isop = SolidFormulation::SRI;
+    else if (isop == "EAS")
       p.isop = SolidFormulation::EAS;
   }
   ctx.model.properties[p.pid] = p;

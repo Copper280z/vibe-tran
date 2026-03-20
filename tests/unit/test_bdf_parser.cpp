@@ -440,8 +440,21 @@ ENDDATA
     EXPECT_EQ(ps.isop, SolidFormulation::EAS);
 }
 
-TEST(BdfParser, PsolidDefaultIsopSri) {
-    // PSOLID without ISOP field → default SolidFormulation::SRI
+TEST(BdfParser, PsolidIsopSri) {
+    // PSOLID field f[6] == "SRI" → SolidFormulation::SRI
+    const std::string bdf = R"(
+BEGIN BULK
+PSOLID,1,1,0,SMEAR,NO,SRI
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.properties.size(), 1u);
+    const PSolid& ps = std::get<PSolid>(m.properties.at(PropertyId{1}));
+    EXPECT_EQ(ps.isop, SolidFormulation::SRI);
+}
+
+TEST(BdfParser, PsolidDefaultIsopEas) {
+    // PSOLID without ISOP field → default SolidFormulation::EAS
     const std::string bdf = R"(
 BEGIN BULK
 PSOLID,1,1
@@ -450,7 +463,7 @@ ENDDATA
     Model m = BdfParser::parse_string(bdf);
     ASSERT_EQ(m.properties.size(), 1u);
     const PSolid& ps = std::get<PSolid>(m.properties.at(PropertyId{1}));
-    EXPECT_EQ(ps.isop, SolidFormulation::SRI);
+    EXPECT_EQ(ps.isop, SolidFormulation::EAS);
 }
 
 TEST(BdfParser, Ctetra10Nodes) {

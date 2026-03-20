@@ -32,13 +32,13 @@ std::unique_ptr<ElementBase> make_element(const ElementData& data, const Model& 
                 throw SolverError(std::format("CHEXA8 {} needs 8 nodes, got {}", data.id.value, data.nodes.size()));
             std::array<NodeId,8> nids{data.nodes[0],data.nodes[1],data.nodes[2],data.nodes[3],
                                        data.nodes[4],data.nodes[5],data.nodes[6],data.nodes[7]};
-            // Dispatch based on solid formulation
+            // Dispatch based on solid formulation (default: EAS)
             const auto& prop = model.property(data.pid);
             if (std::holds_alternative<PSolid>(prop)) {
-                if (std::get<PSolid>(prop).isop == SolidFormulation::EAS)
-                    return std::make_unique<CHexa8Eas>(data.id, data.pid, nids, model);
+                if (std::get<PSolid>(prop).isop == SolidFormulation::SRI)
+                    return std::make_unique<CHexa8>(data.id, data.pid, nids, model);
             }
-            return std::make_unique<CHexa8>(data.id, data.pid, nids, model);
+            return std::make_unique<CHexa8Eas>(data.id, data.pid, nids, model);
         }
         case ElementType::CTETRA4: {
             if (data.nodes.size() != 4)
@@ -51,7 +51,13 @@ std::unique_ptr<ElementBase> make_element(const ElementData& data, const Model& 
                 throw SolverError(std::format("CPENTA6 {} needs 6 nodes, got {}", data.id.value, data.nodes.size()));
             std::array<NodeId,6> nids{data.nodes[0],data.nodes[1],data.nodes[2],
                                        data.nodes[3],data.nodes[4],data.nodes[5]};
-            return std::make_unique<CPenta6>(data.id, data.pid, nids, model);
+            // Dispatch based on solid formulation (default: EAS)
+            const auto& prop = model.property(data.pid);
+            if (std::holds_alternative<PSolid>(prop)) {
+                if (std::get<PSolid>(prop).isop == SolidFormulation::SRI)
+                    return std::make_unique<CPenta6>(data.id, data.pid, nids, model);
+            }
+            return std::make_unique<CPenta6Eas>(data.id, data.pid, nids, model);
         }
         case ElementType::CTETRA10: {
             if (data.nodes.size() != 10)

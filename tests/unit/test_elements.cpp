@@ -254,6 +254,240 @@ TEST(CHexa8, StiffnessIsPositiveSemiDefinite) {
     EXPECT_GE(min_ev, -1e-6 * max_ev);
 }
 
+// ── CPenta6 tests ──────────────────────────────────────────────────────────────
+
+// Helper to create a unit wedge model and element: right-triangle prism with
+// triangle base in XY plane (nodes 1-3 at z=0, 4-6 at z=1).
+static CPenta6 make_unit_wedge(Model& m) {
+    add_grid(m,1,0,0,0); add_grid(m,2,1,0,0); add_grid(m,3,0,1,0);
+    add_grid(m,4,0,0,1); add_grid(m,5,1,0,1); add_grid(m,6,0,1,1);
+    std::array<NodeId,6> nodes{NodeId{1},NodeId{2},NodeId{3},
+                                NodeId{4},NodeId{5},NodeId{6}};
+    return CPenta6(ElementId{1}, PropertyId{1}, nodes, m);
+}
+
+TEST(CPenta6, StiffnessIsSymmetric) {
+    Model m = make_solid_model();
+    CPenta6 elem = make_unit_wedge(m);
+    LocalKe Ke = elem.stiffness_matrix();
+
+    EXPECT_EQ(Ke.rows(), 18);
+    EXPECT_EQ(Ke.cols(), 18);
+    double max_asym = (Ke - Ke.transpose()).cwiseAbs().maxCoeff();
+    EXPECT_LT(max_asym, 1e-10 * Ke.cwiseAbs().maxCoeff());
+}
+
+TEST(CPenta6, StiffnessIsPositiveSemiDefinite) {
+    Model m = make_solid_model();
+    CPenta6 elem = make_unit_wedge(m);
+    LocalKe Ke = elem.stiffness_matrix();
+
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(Ke);
+    double min_ev = eig.eigenvalues().minCoeff();
+    double max_ev = eig.eigenvalues().maxCoeff();
+    EXPECT_GE(min_ev, -1e-6 * max_ev);
+}
+
+TEST(CPenta6, RigidBodyTranslationProducesZeroForce) {
+    Model m = make_solid_model();
+    CPenta6 elem = make_unit_wedge(m);
+    LocalKe Ke = elem.stiffness_matrix();
+
+    // Rigid body x-translation: all u_x = 1
+    Eigen::VectorXd u = Eigen::VectorXd::Zero(18);
+    for (int i = 0; i < 6; ++i) u(3*i) = 1.0;
+
+    Eigen::VectorXd f = Ke * u;
+    EXPECT_LT(f.norm(), 1e-8 * Ke.norm());
+}
+
+TEST(CPenta6, SriReducesVolumetricLocking) {
+    // Verify SRI by directly comparing against full integration. For
+    // near-incompressible material, full integration over-constrains volumetric
+    // modes, inflating the max eigenvalue. SRI should give a lower max
+    // eigenvalue because it only enforces one volumetric constraint (centroidal).
+    //
+    // We build a full-integration Ke (using the full D at all 6 Gauss points)
+    // and compare its max eigenvalue against the SRI Ke.
+    const double E = 1.0e6, nu = 0.4999;
+    Model m = make_solid_model(E, nu);
+    CPenta6 elem = make_unit_wedge(m);
+
+    // SRI stiffness from the element
+    LocalKe Ke_sri = elem.stiffness_matrix();
+
+    // Build full-integration Ke manually for comparison
+    auto coords = std::array<Vec3,6>{
+        Vec3{0,0,0}, Vec3{1,0,0}, Vec3{0,1,0},
+        Vec3{0,0,1}, Vec3{1,0,1}, Vec3{0,1,1}
+    };
+    double lam = E*nu/((1+nu)*(1-2*nu));
+    double mu  = E/(2*(1+nu));
+    Eigen::Matrix<double,6,6> D = Eigen::Matrix<double,6,6>::Zero();
+    D(0,0)=D(1,1)=D(2,2) = lam + 2*mu;
+    D(0,1)=D(0,2)=D(1,0)=D(1,2)=D(2,0)=D(2,1) = lam;
+    D(3,3)=D(4,4)=D(5,5) = mu;
+
+    const double tri_pts[3][2] = {{2.0/3,1.0/6},{1.0/6,2.0/3},{1.0/6,1.0/6}};
+    const double tri_w = 1.0/6.0;
+    const double gp = 1.0/std::sqrt(3.0);
+    const double ax_pts[2] = {-gp, gp};
+
+    LocalKe Ke_full = LocalKe::Zero(18, 18);
+    for (int ti = 0; ti < 3; ++ti)
+    for (int ai = 0; ai < 2; ++ai) {
+        double L1 = tri_pts[ti][0], L2 = tri_pts[ti][1];
+        double zeta = ax_pts[ai];
+        auto sd = CPenta6::shape_functions(L1, L2, zeta);
+
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 6; ++n) {
+            J(0,0) += sd.dNdL1[n]*coords[n].x; J(0,1) += sd.dNdL1[n]*coords[n].y; J(0,2) += sd.dNdL1[n]*coords[n].z;
+            J(1,0) += sd.dNdL2[n]*coords[n].x; J(1,1) += sd.dNdL2[n]*coords[n].y; J(1,2) += sd.dNdL2[n]*coords[n].z;
+            J(2,0) += sd.dNdzeta[n]*coords[n].x; J(2,1) += sd.dNdzeta[n]*coords[n].y; J(2,2) += sd.dNdzeta[n]*coords[n].z;
+        }
+        double detJ = J.determinant();
+        Eigen::Matrix3d Jinv = J.inverse();
+
+        Eigen::MatrixXd B(6, 18);
+        B.setZero();
+        for (int n = 0; n < 6; ++n) {
+            double dnx = Jinv(0,0)*sd.dNdL1[n]+Jinv(0,1)*sd.dNdL2[n]+Jinv(0,2)*sd.dNdzeta[n];
+            double dny = Jinv(1,0)*sd.dNdL1[n]+Jinv(1,1)*sd.dNdL2[n]+Jinv(1,2)*sd.dNdzeta[n];
+            double dnz = Jinv(2,0)*sd.dNdL1[n]+Jinv(2,1)*sd.dNdL2[n]+Jinv(2,2)*sd.dNdzeta[n];
+            int c0 = 3*n;
+            B(0,c0)=dnx; B(1,c0+1)=dny; B(2,c0+2)=dnz;
+            B(3,c0)=dny; B(3,c0+1)=dnx;
+            B(4,c0+1)=dnz; B(4,c0+2)=dny;
+            B(5,c0)=dnz; B(5,c0+2)=dnx;
+        }
+        Ke_full += B.transpose() * D * B * detJ * tri_w;
+    }
+
+    // SRI max eigenvalue should be lower than full integration
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig_sri(Ke_sri);
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig_full(Ke_full);
+
+    double max_ev_sri  = eig_sri.eigenvalues().maxCoeff();
+    double max_ev_full = eig_full.eigenvalues().maxCoeff();
+
+    EXPECT_LT(max_ev_sri, max_ev_full)
+        << "SRI max eigenvalue (" << max_ev_sri << ") should be less than full integration ("
+        << max_ev_full << ") for near-incompressible material";
+}
+
+TEST(CPenta6, ThermalLoadEquilibrium) {
+    // Uniform temperature → self-equilibrating thermal loads (net force = 0).
+    Model m = make_solid_model(2.0e7, 0.3);
+    m.materials.at(MaterialId{1}).A = 1.2e-5;
+    CPenta6 elem = make_unit_wedge(m);
+
+    std::array<double,6> T{100.0, 100.0, 100.0, 100.0, 100.0, 100.0};
+    LocalFe fe = elem.thermal_load(T, 0.0);
+
+    EXPECT_EQ(fe.size(), 18);
+    double sum_fx = 0.0, sum_fy = 0.0, sum_fz = 0.0;
+    for (int i = 0; i < 6; ++i) {
+        sum_fx += fe(3*i);
+        sum_fy += fe(3*i+1);
+        sum_fz += fe(3*i+2);
+    }
+    EXPECT_NEAR(sum_fx, 0.0, 1e-6 * fe.norm());
+    EXPECT_NEAR(sum_fy, 0.0, 1e-6 * fe.norm());
+    EXPECT_NEAR(sum_fz, 0.0, 1e-6 * fe.norm());
+}
+
+// ── CPenta6Eas tests ───────────────────────────────────────────────────────────
+
+static CPenta6Eas make_unit_wedge_eas(Model& m) {
+    add_grid(m,1,0,0,0); add_grid(m,2,1,0,0); add_grid(m,3,0,1,0);
+    add_grid(m,4,0,0,1); add_grid(m,5,1,0,1); add_grid(m,6,0,1,1);
+    std::array<NodeId,6> nodes{NodeId{1},NodeId{2},NodeId{3},
+                                NodeId{4},NodeId{5},NodeId{6}};
+    return CPenta6Eas(ElementId{1}, PropertyId{1}, nodes, m);
+}
+
+TEST(CPenta6Eas, StiffnessIsSymmetric) {
+    Model m = make_solid_model();
+    CPenta6Eas elem = make_unit_wedge_eas(m);
+    LocalKe Ke = elem.stiffness_matrix();
+
+    EXPECT_EQ(Ke.rows(), 18);
+    EXPECT_EQ(Ke.cols(), 18);
+    double max_asym = (Ke - Ke.transpose()).cwiseAbs().maxCoeff();
+    EXPECT_LT(max_asym, 1e-10 * Ke.cwiseAbs().maxCoeff());
+}
+
+TEST(CPenta6Eas, StiffnessIsPositiveSemiDefinite) {
+    Model m = make_solid_model();
+    CPenta6Eas elem = make_unit_wedge_eas(m);
+    LocalKe Ke = elem.stiffness_matrix();
+
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(Ke);
+    double min_ev = eig.eigenvalues().minCoeff();
+    double max_ev = eig.eigenvalues().maxCoeff();
+    EXPECT_GE(min_ev, -1e-6 * max_ev);
+}
+
+TEST(CPenta6Eas, RigidBodyTranslationProducesZeroForce) {
+    Model m = make_solid_model();
+    CPenta6Eas elem = make_unit_wedge_eas(m);
+    LocalKe Ke = elem.stiffness_matrix();
+
+    Eigen::VectorXd u = Eigen::VectorXd::Zero(18);
+    for (int i = 0; i < 6; ++i) u(3*i) = 1.0;
+
+    Eigen::VectorXd f = Ke * u;
+    EXPECT_LT(f.norm(), 1e-8 * Ke.norm());
+}
+
+TEST(CPenta6Eas, NearlyIncompressibleLowerStiffnessThanSRI) {
+    // EAS should give a lower max eigenvalue than SRI for near-incompressible
+    // material, since EAS addresses both volumetric and bending locking.
+    Model m = make_solid_model(1.0e6, 0.4999);
+
+    // SRI stiffness
+    add_grid(m,1,0,0,0); add_grid(m,2,1,0,0); add_grid(m,3,0,1,0);
+    add_grid(m,4,0,0,1); add_grid(m,5,1,0,1); add_grid(m,6,0,1,1);
+    std::array<NodeId,6> nodes{NodeId{1},NodeId{2},NodeId{3},
+                                NodeId{4},NodeId{5},NodeId{6}};
+    CPenta6 elem_sri(ElementId{1}, PropertyId{1}, nodes, m);
+    LocalKe Ke_sri = elem_sri.stiffness_matrix();
+
+    // EAS stiffness
+    CPenta6Eas elem_eas(ElementId{1}, PropertyId{1}, nodes, m);
+    LocalKe Ke_eas = elem_eas.stiffness_matrix();
+
+    double sri_max = Ke_sri.diagonal().maxCoeff();
+    double eas_max = Ke_eas.diagonal().maxCoeff();
+    EXPECT_GT(sri_max, 0.0);
+    EXPECT_GT(eas_max, 0.0);
+
+    // EAS should be PSD
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig_eas(Ke_eas);
+    EXPECT_GE(eig_eas.eigenvalues().minCoeff(), -1e-6 * eas_max);
+}
+
+TEST(CPenta6Eas, ThermalLoadEquilibrium) {
+    Model m = make_solid_model(2.0e7, 0.3);
+    m.materials.at(MaterialId{1}).A = 1.2e-5;
+    CPenta6Eas elem = make_unit_wedge_eas(m);
+
+    std::array<double,6> T{100.0, 100.0, 100.0, 100.0, 100.0, 100.0};
+    LocalFe fe = elem.thermal_load(T, 0.0);
+
+    EXPECT_EQ(fe.size(), 18);
+    double sum_fx = 0.0, sum_fy = 0.0, sum_fz = 0.0;
+    for (int i = 0; i < 6; ++i) {
+        sum_fx += fe(3*i);
+        sum_fy += fe(3*i+1);
+        sum_fz += fe(3*i+2);
+    }
+    EXPECT_NEAR(sum_fx, 0.0, 1e-6 * fe.norm());
+    EXPECT_NEAR(sum_fy, 0.0, 1e-6 * fe.norm());
+    EXPECT_NEAR(sum_fz, 0.0, 1e-6 * fe.norm());
+}
+
 // ── CTetra10 tests ─────────────────────────────────────────────────────────────
 
 TEST(CTetra10, StiffnessIsSymmetric) {

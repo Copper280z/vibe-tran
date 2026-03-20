@@ -483,6 +483,16 @@ LocalKe CPenta6::stiffness_matrix() const {
     auto coords = node_coords();
     Eigen::Matrix<double,6,6> D = constitutive_D();
 
+    // Selective Reduced Integration (SRI) to eliminate volumetric locking:
+    // D = D_dev + D_vol, where D_vol = lam * e*e^T (e = [1,1,1,0,0,0]^T)
+    // D_dev uses full 6-point Gauss; D_vol uses 1-point centroidal integration.
+    double lam = D(0,1);
+    Eigen::Matrix<double,6,6> D_vol = Eigen::Matrix<double,6,6>::Zero();
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            D_vol(i,j) = lam;
+    Eigen::Matrix<double,6,6> D_dev = D - D_vol;
+
     // 6-point Gauss quadrature: 3 triangle points × 2 axial points
     // Triangle 3-point rule: weights = 1/6 each (includes reference triangle area 1/2)
     const double tri_pts[3][2] = {
@@ -495,28 +505,8 @@ LocalKe CPenta6::stiffness_matrix() const {
     // Axial 2-point Gauss: zeta = ±1/√3, weight = 1
     const double ax_pts[2] = {-1.0/std::sqrt(3.0), 1.0/std::sqrt(3.0)};
 
-    for (int ti = 0; ti < 3; ++ti)
-    for (int ai = 0; ai < 2; ++ai) {
-        double L1 = tri_pts[ti][0], L2 = tri_pts[ti][1];
-        double zeta = ax_pts[ai];
-        double w = tri_w; // axial weight is 1.0
-
-        auto sd = shape_functions(L1, L2, zeta);
-
-        // Jacobian [3x3]
-        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
-        for (int n = 0; n < 6; ++n) {
-            J(0,0) += sd.dNdL1[n]*coords[n].x; J(0,1) += sd.dNdL1[n]*coords[n].y; J(0,2) += sd.dNdL1[n]*coords[n].z;
-            J(1,0) += sd.dNdL2[n]*coords[n].x; J(1,1) += sd.dNdL2[n]*coords[n].y; J(1,2) += sd.dNdL2[n]*coords[n].z;
-            J(2,0) += sd.dNdzeta[n]*coords[n].x; J(2,1) += sd.dNdzeta[n]*coords[n].y; J(2,2) += sd.dNdzeta[n]*coords[n].z;
-        }
-        double detJ = J.determinant();
-        if (detJ <= 0)
-            throw SolverError(std::format("CPENTA6 {}: non-positive Jacobian det={:.6g}", eid_.value, detJ));
-        Eigen::Matrix3d Jinv = J.inverse();
-
-        // B matrix [6 x 18]
-        Eigen::MatrixXd B(6, NUM_DOFS);
+    auto build_B = [&](const ShapeData6& sd, const Eigen::Matrix3d& Jinv,
+                       Eigen::MatrixXd& B) {
         B.setZero();
         for (int n = 0; n < 6; ++n) {
             double dnx = Jinv(0,0)*sd.dNdL1[n] + Jinv(0,1)*sd.dNdL2[n] + Jinv(0,2)*sd.dNdzeta[n];
@@ -530,8 +520,53 @@ LocalKe CPenta6::stiffness_matrix() const {
             B(4,c0+1) = dnz; B(4,c0+2) = dny;
             B(5,c0+0) = dnz; B(5,c0+2) = dnx;
         }
+    };
 
-        Ke += B.transpose() * D * B * detJ * w;
+    // Deviatoric part: full 6-point quadrature
+    for (int ti = 0; ti < 3; ++ti)
+    for (int ai = 0; ai < 2; ++ai) {
+        double L1 = tri_pts[ti][0], L2 = tri_pts[ti][1];
+        double zeta = ax_pts[ai];
+        double w = tri_w; // axial weight is 1.0
+
+        auto sd = shape_functions(L1, L2, zeta);
+
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 6; ++n) {
+            J(0,0) += sd.dNdL1[n]*coords[n].x; J(0,1) += sd.dNdL1[n]*coords[n].y; J(0,2) += sd.dNdL1[n]*coords[n].z;
+            J(1,0) += sd.dNdL2[n]*coords[n].x; J(1,1) += sd.dNdL2[n]*coords[n].y; J(1,2) += sd.dNdL2[n]*coords[n].z;
+            J(2,0) += sd.dNdzeta[n]*coords[n].x; J(2,1) += sd.dNdzeta[n]*coords[n].y; J(2,2) += sd.dNdzeta[n]*coords[n].z;
+        }
+        double detJ = J.determinant();
+        if (detJ <= 0)
+            throw SolverError(std::format("CPENTA6 {}: non-positive Jacobian det={:.6g}", eid_.value, detJ));
+        Eigen::Matrix3d Jinv = J.inverse();
+
+        Eigen::MatrixXd B(6, NUM_DOFS);
+        build_B(sd, Jinv, B);
+
+        Ke += B.transpose() * D_dev * B * detJ * w;
+    }
+
+    // Volumetric part: 1-point centroidal integration
+    // Reference wedge volume = triangle_area(1/2) × axial_length(2) = 1.0
+    {
+        auto sd0 = shape_functions(1.0/3.0, 1.0/3.0, 0.0);
+        Eigen::Matrix3d J0 = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 6; ++n) {
+            J0(0,0) += sd0.dNdL1[n]*coords[n].x; J0(0,1) += sd0.dNdL1[n]*coords[n].y; J0(0,2) += sd0.dNdL1[n]*coords[n].z;
+            J0(1,0) += sd0.dNdL2[n]*coords[n].x; J0(1,1) += sd0.dNdL2[n]*coords[n].y; J0(1,2) += sd0.dNdL2[n]*coords[n].z;
+            J0(2,0) += sd0.dNdzeta[n]*coords[n].x; J0(2,1) += sd0.dNdzeta[n]*coords[n].y; J0(2,2) += sd0.dNdzeta[n]*coords[n].z;
+        }
+        double detJ0 = J0.determinant();
+        if (detJ0 <= 0)
+            throw SolverError(std::format("CPENTA6 {}: non-positive centroidal Jacobian det={:.6g}", eid_.value, detJ0));
+        Eigen::Matrix3d Jinv0 = J0.inverse();
+
+        Eigen::MatrixXd B0(6, NUM_DOFS);
+        build_B(sd0, Jinv0, B0);
+
+        Ke += B0.transpose() * D_vol * B0 * detJ0 * 1.0;
     }
 
     return Ke;
@@ -1071,6 +1106,242 @@ LocalFe CHexa8Eas::thermal_load(std::span<const double> temperatures, double t_r
 }
 
 std::vector<EqIndex> CHexa8Eas::global_dof_indices(const DofMap& dof_map) const {
+    std::vector<EqIndex> result;
+    result.reserve(NUM_DOFS);
+    static constexpr int solid_dofs[3] = {0,1,2};
+    for (NodeId nid : nodes_)
+        for (int d : solid_dofs)
+            result.push_back(dof_map.eq_index(nid, d));
+    return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CPENTA6EAS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+CPenta6Eas::CPenta6Eas(ElementId eid, PropertyId pid,
+                       std::array<NodeId, 6> node_ids,
+                       const Model& model)
+    : eid_(eid), pid_(pid), nodes_(node_ids), model_(model) {}
+
+const PSolid& CPenta6Eas::psolid() const {
+    const auto& prop = model_.property(pid_);
+    if (!std::holds_alternative<PSolid>(prop))
+        throw SolverError(std::format("CPENTA6EAS {}: property {} is not PSOLID", eid_.value, pid_.value));
+    return std::get<PSolid>(prop);
+}
+
+const Mat1& CPenta6Eas::material() const {
+    return model_.material(psolid().mid);
+}
+
+Eigen::Matrix<double,6,6> CPenta6Eas::constitutive_D() const {
+    const Mat1& m = material();
+    return isotropic_D(m.E, m.nu);
+}
+
+std::array<Vec3, 6> CPenta6Eas::node_coords() const {
+    std::array<Vec3, 6> c;
+    for (int i = 0; i < 6; ++i)
+        c[i] = model_.node(nodes_[i]).position;
+    return c;
+}
+
+LocalKe CPenta6Eas::stiffness_matrix() const {
+    // EAS with 9 internal enhancement modes (3 parametric × 3 spatial directions).
+    // Enhancement functions with zero mean over the reference wedge:
+    //   Triangular: (L1 - 1/3), (L2 - 1/3)  — zero mean over unit triangle
+    //   Axial:      zeta                      — zero mean over [-1, 1]
+    // Static condensation: Ke = Kuu - Kua * Kaa^{-1} * Kau
+
+    auto coords = node_coords();
+    Eigen::Matrix<double,6,6> D = constitutive_D();
+
+    // Centroidal Jacobian J0 (L1=1/3, L2=1/3, zeta=0)
+    auto sd0 = CPenta6::shape_functions(1.0/3.0, 1.0/3.0, 0.0);
+    Eigen::Matrix3d J0 = Eigen::Matrix3d::Zero();
+    for (int n = 0; n < 6; ++n) {
+        J0(0,0) += sd0.dNdL1[n]*coords[n].x; J0(0,1) += sd0.dNdL1[n]*coords[n].y; J0(0,2) += sd0.dNdL1[n]*coords[n].z;
+        J0(1,0) += sd0.dNdL2[n]*coords[n].x; J0(1,1) += sd0.dNdL2[n]*coords[n].y; J0(1,2) += sd0.dNdL2[n]*coords[n].z;
+        J0(2,0) += sd0.dNdzeta[n]*coords[n].x; J0(2,1) += sd0.dNdzeta[n]*coords[n].y; J0(2,2) += sd0.dNdzeta[n]*coords[n].z;
+    }
+    double detJ0 = J0.determinant();
+    if (detJ0 <= 0)
+        throw SolverError(std::format("CPENTA6EAS {}: non-positive centroidal Jacobian det={:.6g}", eid_.value, detJ0));
+    Eigen::Matrix3d J0inv = J0.inverse();
+
+    // Sub-matrices for static condensation
+    constexpr int N_EAS = 9;
+    Eigen::Matrix<double,18,18> Kuu = Eigen::Matrix<double,18,18>::Zero();
+    Eigen::Matrix<double,18,N_EAS> Kua = Eigen::Matrix<double,18,N_EAS>::Zero();
+    Eigen::Matrix<double,N_EAS,N_EAS> Kaa = Eigen::Matrix<double,N_EAS,N_EAS>::Zero();
+
+    auto build_B = [&](const CPenta6::ShapeData6& sd, const Eigen::Matrix3d& Jinv,
+                       Eigen::Matrix<double,6,18>& B) {
+        B.setZero();
+        for (int n = 0; n < 6; ++n) {
+            double dnx = Jinv(0,0)*sd.dNdL1[n] + Jinv(0,1)*sd.dNdL2[n] + Jinv(0,2)*sd.dNdzeta[n];
+            double dny = Jinv(1,0)*sd.dNdL1[n] + Jinv(1,1)*sd.dNdL2[n] + Jinv(1,2)*sd.dNdzeta[n];
+            double dnz = Jinv(2,0)*sd.dNdL1[n] + Jinv(2,1)*sd.dNdL2[n] + Jinv(2,2)*sd.dNdzeta[n];
+            int c0 = 3*n;
+            B(0,c0+0) = dnx; B(1,c0+1) = dny; B(2,c0+2) = dnz;
+            B(3,c0+0) = dny; B(3,c0+1) = dnx;
+            B(4,c0+1) = dnz; B(4,c0+2) = dny;
+            B(5,c0+0) = dnz; B(5,c0+2) = dnx;
+        }
+    };
+
+    // Enhancement mode matrix G [6×9] at a Gauss point.
+    // 9 modes: 3 parametric enhancement functions × 3 displacement directions.
+    // Parametric enhancement functions:
+    //   f0 = L1 - 1/3  (zero mean over triangle)
+    //   f1 = L2 - 1/3  (zero mean over triangle)
+    //   f2 = zeta       (zero mean over [-1,1])
+    // Physical gradient mapped via centroidal Jacobian for frame objectivity.
+    auto build_G = [&](double L1, double L2, double zeta,
+                       double detJ,
+                       Eigen::Matrix<double,6,N_EAS>& G) {
+        double scale = detJ0 / detJ;
+
+        // Parametric enhancement function values
+        double f[3] = { L1 - 1.0/3.0, L2 - 1.0/3.0, zeta };
+
+        // Physical gradient of each enhancement function via centroidal Jacobian:
+        // grad_phys(f_k) = J0^{-T} * grad_param(f_k)
+        // grad_param(f0) = [1, 0, 0]^T (wrt L1, L2, zeta)
+        // grad_param(f1) = [0, 1, 0]^T
+        // grad_param(f2) = [0, 0, 1]^T
+        // So grad_phys(f_k) = J0^{-T}.col(k) = J0inv.row(k)^T
+        // But the enhancement strain is the symmetric gradient of (f_k * e_alpha):
+        //   ε̃ = sym(e_alpha ⊗ grad_phys(f_k)) scaled by (detJ0/detJ)
+
+        G.setZero();
+        for (int k = 0; k < 3; ++k) {
+            // Physical gradient of enhancement function f_k
+            double gx = J0inv(0, k) * f[k];
+            double gy = J0inv(1, k) * f[k];
+            double gz = J0inv(2, k) * f[k];
+
+            // 3 columns per parametric mode (one per displacement direction)
+            int base = 3*k;
+            // alpha=0 (x-mode): u_enh = f_k * e_x
+            G(0, base+0) = gx; G(3, base+0) = gy; G(5, base+0) = gz;
+            // alpha=1 (y-mode): u_enh = f_k * e_y
+            G(3, base+1) = gx; G(1, base+1) = gy; G(4, base+1) = gz;
+            // alpha=2 (z-mode): u_enh = f_k * e_z
+            G(5, base+2) = gx; G(4, base+2) = gy; G(2, base+2) = gz;
+        }
+        G *= scale;
+    };
+
+    // 6-point Gauss quadrature: 3 triangle points × 2 axial points
+    const double tri_pts[3][2] = {
+        {2.0/3.0, 1.0/6.0},
+        {1.0/6.0, 2.0/3.0},
+        {1.0/6.0, 1.0/6.0}
+    };
+    const double tri_w = 1.0 / 6.0;
+    const double gp = 1.0/std::sqrt(3.0);
+    const double ax_pts[2] = {-gp, gp};
+
+    for (int ti = 0; ti < 3; ++ti)
+    for (int ai = 0; ai < 2; ++ai) {
+        double L1 = tri_pts[ti][0], L2 = tri_pts[ti][1];
+        double zeta = ax_pts[ai];
+
+        auto sd = CPenta6::shape_functions(L1, L2, zeta);
+
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 6; ++n) {
+            J(0,0) += sd.dNdL1[n]*coords[n].x; J(0,1) += sd.dNdL1[n]*coords[n].y; J(0,2) += sd.dNdL1[n]*coords[n].z;
+            J(1,0) += sd.dNdL2[n]*coords[n].x; J(1,1) += sd.dNdL2[n]*coords[n].y; J(1,2) += sd.dNdL2[n]*coords[n].z;
+            J(2,0) += sd.dNdzeta[n]*coords[n].x; J(2,1) += sd.dNdzeta[n]*coords[n].y; J(2,2) += sd.dNdzeta[n]*coords[n].z;
+        }
+        double detJ = J.determinant();
+        if (detJ <= 0)
+            throw SolverError(std::format("CPENTA6EAS {}: non-positive Jacobian det={:.6g}", eid_.value, detJ));
+        Eigen::Matrix3d Jinv = J.inverse();
+
+        Eigen::Matrix<double,6,18> B;
+        build_B(sd, Jinv, B);
+
+        Eigen::Matrix<double,6,N_EAS> G;
+        build_G(L1, L2, zeta, detJ, G);
+
+        double w = detJ * tri_w; // axial weight is 1.0
+        Kuu += B.transpose() * D * B * w;
+        Kua += B.transpose() * D * G * w;
+        Kaa += G.transpose() * D * G * w;
+    }
+
+    // Static condensation: Ke = Kuu - Kua * Kaa^{-1} * Kau
+    Eigen::LLT<Eigen::Matrix<double,N_EAS,N_EAS>> llt(Kaa);
+    if (llt.info() != Eigen::Success)
+        throw SolverError(std::format("CPENTA6EAS {}: Kaa factorization failed", eid_.value));
+
+    LocalKe Ke = Kuu - Kua * llt.solve(Kua.transpose());
+    return Ke;
+}
+
+LocalFe CPenta6Eas::thermal_load(std::span<const double> temperatures, double t_ref) const {
+    // EAS enhancement modes have zero mean strain, so thermal load is identical to CPenta6.
+    LocalFe fe = LocalFe::Zero(NUM_DOFS);
+    const double alpha = material().A;
+    if (alpha == 0.0) return fe;
+
+    auto coords = node_coords();
+    Eigen::Matrix<double,6,6> D = constitutive_D();
+
+    const double tri_pts[3][2] = {
+        {2.0/3.0, 1.0/6.0},
+        {1.0/6.0, 2.0/3.0},
+        {1.0/6.0, 1.0/6.0}
+    };
+    const double tri_w = 1.0 / 6.0;
+    const double ax_pts[2] = {-1.0/std::sqrt(3.0), 1.0/std::sqrt(3.0)};
+
+    for (int ti = 0; ti < 3; ++ti)
+    for (int ai = 0; ai < 2; ++ai) {
+        double L1 = tri_pts[ti][0], L2 = tri_pts[ti][1];
+        double zeta = ax_pts[ai];
+        double w = tri_w;
+
+        auto sd = CPenta6::shape_functions(L1, L2, zeta);
+
+        double T = 0;
+        for (int n = 0; n < 6; ++n) T += sd.N[n] * temperatures[n];
+        double dT = T - t_ref;
+        if (std::abs(dT) < 1e-15) continue;
+
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 6; ++n) {
+            J(0,0) += sd.dNdL1[n]*coords[n].x; J(0,1) += sd.dNdL1[n]*coords[n].y; J(0,2) += sd.dNdL1[n]*coords[n].z;
+            J(1,0) += sd.dNdL2[n]*coords[n].x; J(1,1) += sd.dNdL2[n]*coords[n].y; J(1,2) += sd.dNdL2[n]*coords[n].z;
+            J(2,0) += sd.dNdzeta[n]*coords[n].x; J(2,1) += sd.dNdzeta[n]*coords[n].y; J(2,2) += sd.dNdzeta[n]*coords[n].z;
+        }
+        double detJ = J.determinant();
+        Eigen::Matrix3d Jinv = J.inverse();
+
+        Eigen::Matrix<double,6,18> B;
+        B.setZero();
+        for (int n = 0; n < 6; ++n) {
+            double dnx = Jinv(0,0)*sd.dNdL1[n]+Jinv(0,1)*sd.dNdL2[n]+Jinv(0,2)*sd.dNdzeta[n];
+            double dny = Jinv(1,0)*sd.dNdL1[n]+Jinv(1,1)*sd.dNdL2[n]+Jinv(1,2)*sd.dNdzeta[n];
+            double dnz = Jinv(2,0)*sd.dNdL1[n]+Jinv(2,1)*sd.dNdL2[n]+Jinv(2,2)*sd.dNdzeta[n];
+            int c0 = 3*n;
+            B(0,c0+0)=dnx; B(1,c0+1)=dny; B(2,c0+2)=dnz;
+            B(3,c0+0)=dny; B(3,c0+1)=dnx;
+            B(4,c0+1)=dnz; B(4,c0+2)=dny;
+            B(5,c0+0)=dnz; B(5,c0+2)=dnx;
+        }
+        Eigen::Matrix<double,6,1> eps_th;
+        eps_th << alpha*dT, alpha*dT, alpha*dT, 0, 0, 0;
+        fe += B.transpose() * D * eps_th * detJ * w;
+    }
+    return fe;
+}
+
+std::vector<EqIndex> CPenta6Eas::global_dof_indices(const DofMap& dof_map) const {
     std::vector<EqIndex> result;
     result.reserve(NUM_DOFS);
     static constexpr int solid_dofs[3] = {0,1,2};
