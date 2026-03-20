@@ -311,6 +311,8 @@ inc     = include_directories('include')
 src_inc = include_directories('src/solver') # for internal vulkan_pipelines.hpp
 
 # ── Library (solver logic, no main) ──────────────────────────────────────────
+tbb_args = tbb_dep.found() ? ['-DHAVE_TBB=1'] : []
+
 solver_lib_deps = [eigen_dep, thread_dep]
 if tbb_dep.found()
   solver_lib_deps += tbb_dep
@@ -333,7 +335,7 @@ solver_lib = static_library(
   [solver_sources, spirv_hdrs],
   include_directories : [inc, src_inc],
   dependencies        : solver_lib_deps,
-  cpp_args            : vulkan_compile_args + cuda_compile_args + cholmod_args,
+  cpp_args            : vulkan_compile_args + cuda_compile_args + cholmod_args + tbb_args,
   install             : false,
 )
 

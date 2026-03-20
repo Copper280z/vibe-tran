@@ -2,8 +2,11 @@
 #include "core/sparse_matrix.hpp"
 #include "core/dof_map.hpp"
 #include <algorithm>
-#include <execution>
 #include <numeric>
+#ifdef HAVE_TBB
+#include <tbb/parallel_for.h>
+#include <tbb/blocked_range.h>
+#endif
 #include <stdexcept>
 
 namespace nastran {
@@ -67,18 +70,25 @@ SparseMatrixBuilder::CsrData SparseMatrixBuilder::build_csr() {
 
   // Pass 3: sort within each row by col.
   // Each row has O(elements_per_node²) entries (~85 for CHEXA8) — tiny arrays
-  // that fit in L1 cache. Parallel dispatch across rows via TBB.
-  std::vector<int> row_indices(static_cast<size_t>(size_));
-  std::iota(row_indices.begin(), row_indices.end(), 0);
-  std::for_each(std::execution::par_unseq,
-                row_indices.begin(), row_indices.end(),
-                [&](int row) {
-                  auto beg = staged.begin() + bucket_ptr[static_cast<size_t>(row)];
-                  auto end = staged.begin() + bucket_ptr[static_cast<size_t>(row + 1)];
-                  std::sort(beg, end, [](const Triplet &a, const Triplet &b) {
-                    return a.col < b.col;
-                  });
-                });
+  // that fit in L1 cache. Parallel dispatch across rows via TBB when available;
+  // std::execution::par_unseq is not supported by AppleClang.
+  auto sort_row = [&](int row) {
+    auto beg = staged.begin() + bucket_ptr[static_cast<size_t>(row)];
+    auto end = staged.begin() + bucket_ptr[static_cast<size_t>(row + 1)];
+    std::sort(beg, end, [](const Triplet &a, const Triplet &b) {
+      return a.col < b.col;
+    });
+  };
+#ifdef HAVE_TBB
+  tbb::parallel_for(tbb::blocked_range<int>(0, size_),
+                    [&](const tbb::blocked_range<int> &r) {
+                      for (int row = r.begin(); row != r.end(); ++row)
+                        sort_row(row);
+                    });
+#else
+  for (int row = 0; row < size_; ++row)
+    sort_row(row);
+#endif
 
   // Pass 4: dedup within each row (staged is now sorted by col within rows),
   // and write to final CSR arrays.
