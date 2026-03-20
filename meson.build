@@ -59,6 +59,25 @@ else
   message('Using system Eigen3')
 endif
 
+# ── Apple Accelerate sparse solver backend (optional, macOS only) ────────────
+# Accelerate.framework ships with every macOS install (10.13+) and provides
+# direct sparse Cholesky via Eigen's AccelerateSupport header — no Homebrew
+# packages required.  On macOS this replaces CHOLMOD as the fast direct solver.
+accelerate_dep  = []
+accelerate_args = []
+have_accelerate = false
+if host_machine.system() == 'darwin'
+  _accel = dependency('appleframeworks', modules : ['Accelerate'], required : false)
+  if _accel.found()
+    accelerate_dep  = [_accel]
+    accelerate_args = ['-DHAVE_ACCELERATE=1']
+    have_accelerate = true
+    message('Apple Accelerate sparse solver: enabled')
+  else
+    message('Apple Accelerate sparse solver: disabled')
+  endif
+endif
+
 # ── SuiteSparse CHOLMOD backend (optional) ───────────────────────────────────
 # When present, Eigen's CholmodDecomposition replaces SimplicialLLT, providing
 # multithreaded supernodal Cholesky and better AMD+METIS reordering.
@@ -329,13 +348,16 @@ endif
 if have_cholmod
   solver_lib_deps += cholmod_lib_deps
 endif
+if have_accelerate
+  solver_lib_deps += accelerate_dep
+endif
 
 solver_lib = static_library(
   'nastransolver',
   [solver_sources, spirv_hdrs],
   include_directories : [inc, src_inc],
   dependencies        : solver_lib_deps,
-  cpp_args            : vulkan_compile_args + cuda_compile_args + cholmod_args + tbb_args,
+  cpp_args            : vulkan_compile_args + cuda_compile_args + cholmod_args + tbb_args + accelerate_args,
   install             : false,
 )
 
@@ -437,6 +459,7 @@ summary({
   'C++ std'           : 'C++20',
   'Eigen'             : eigen_dep.found(),
   'CHOLMOD backend'   : have_cholmod,
+  'Accelerate backend': have_accelerate,
   'Vulkan backend'    : have_vulkan_backend,
   'CUDA backend'      : have_cuda_backend,
   'Solver lib'        : solver_lib.name(),

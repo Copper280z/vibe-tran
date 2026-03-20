@@ -31,7 +31,8 @@ public:
 
 };
 
-/// CPU backend using Eigen's sparse Cholesky (SimplicialLLT or CHOLMOD)
+/// CPU backend using Eigen's sparse Cholesky.
+/// Solver priority: Apple Accelerate > SuiteSparse CHOLMOD > SimplicialLLT.
 class EigenSolverBackend final : public SolverBackend {
 public:
     [[nodiscard]] std::vector<double> solve(
@@ -39,7 +40,9 @@ public:
         const std::vector<double>& F) override;
 
     [[nodiscard]] std::string_view name() const noexcept override {
-#ifdef EIGEN_CHOLMOD_SUPPORT
+#if defined(HAVE_ACCELERATE)
+        return "Apple Accelerate (CPU)";
+#elif defined(EIGEN_CHOLMOD_SUPPORT)
         return "SuiteSparse CHOLMOD (CPU)";
 #else
         return "Eigen SimplicialLLT (CPU)";

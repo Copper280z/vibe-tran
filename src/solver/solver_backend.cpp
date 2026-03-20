@@ -5,6 +5,9 @@
 #include <Eigen/Sparse>
 #include <Eigen/SparseCholesky>
 #include <Eigen/IterativeLinearSolvers>
+#ifdef HAVE_ACCELERATE
+#include <Eigen/AccelerateSupport>
+#endif
 #ifdef EIGEN_CHOLMOD_SUPPORT
 #include <Eigen/CholmodSupport>
 #endif
@@ -39,11 +42,27 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
   Eigen::Map<const Eigen::VectorXd> F_eigen(F.data(), n);
 
   // Factorize and solve.
-  // When SuiteSparse is available, use CholmodDecomposition: it employs
-  // supernodal Cholesky with OpenMP parallelism and better AMD+METIS
-  // reordering.  Otherwise fall back to SimplicialLLT, with an LDLT retry
-  // for near-singular systems.
-#ifdef EIGEN_CHOLMOD_SUPPORT
+  // Priority: Apple Accelerate (macOS) > SuiteSparse CHOLMOD (Linux) > SimplicialLLT.
+  // Each tier falls back to LDLT for near-singular / mildly indefinite systems.
+#if defined(HAVE_ACCELERATE)
+  Eigen::AccelerateLLT<ESM> solver;
+  solver.compute(K);
+  if (solver.info() != Eigen::Success) {
+    Eigen::AccelerateLDLT<ESM> ldlt;
+    ldlt.compute(K);
+    if (ldlt.info() != Eigen::Success)
+      throw SolverError(
+          "Stiffness matrix factorization failed (Accelerate + LDLT fallback) — "
+          "check boundary conditions (SPCs)");
+    Eigen::VectorXd u = ldlt.solve(F_eigen);
+    if (ldlt.info() != Eigen::Success)
+      throw SolverError("Back-substitution failed (Accelerate LDLT fallback)");
+    return std::vector<double>(u.data(), u.data() + n);
+  }
+  Eigen::VectorXd u = solver.solve(F_eigen);
+  if (solver.info() != Eigen::Success)
+    throw SolverError("Back-substitution failed (Accelerate)");
+#elif defined(EIGEN_CHOLMOD_SUPPORT)
   Eigen::CholmodDecomposition<ESM> solver;
   solver.compute(K);
   if (solver.info() != Eigen::Success) {
@@ -66,7 +85,6 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
 #else
   Eigen::SimplicialLLT<ESM> solver;
   solver.compute(K);
-
   if (solver.info() != Eigen::Success) {
     // Fall back to LDLT which is more robust for near-singular systems
     Eigen::SimplicialLDLT<ESM> ldlt;
@@ -79,7 +97,6 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
       throw SolverError("Back-substitution failed");
     return std::vector<double>(u.data(), u.data() + n);
   }
-
   Eigen::VectorXd u = solver.solve(F_eigen);
   if (solver.info() != Eigen::Success)
     throw SolverError("Back-substitution failed");
