@@ -1,0 +1,15 @@
+{
+  "description": "CQUAD4 simply-supported beam modal: 10-element mesh, first bending ~22.9 Hz",
+  "checks": [
+    {
+      "comment": "Mode 1: first bending. Analytical (SS beam): f1 = (pi/L)^2/(2*pi)*sqrt(EI/rhoA) ~= 22.9 Hz. FE: 23.2 Hz.",
+      "type": "eigenfrequency", "subcase": 1, "mode": 1,
+      "expected": 22.9, "rel_tol": 0.05
+    },
+    {
+      "comment": "Mode 2: second mode must be higher than mode 1 (ascending order check).",
+      "type": "eigenfrequency", "subcase": 1, "mode": 2,
+      "expected": 36.5, "rel_tol": 0.10
+    }
+  ]
+}

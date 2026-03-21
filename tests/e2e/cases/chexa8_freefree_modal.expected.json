@@ -1,0 +1,35 @@
+{
+  "description": "CHEXA8 free-free modal: 5x1x1 mesh, 6 rigid-body modes (f~0 Hz) + first elastic bending ~51.9 Hz",
+  "checks": [
+    {
+      "comment": "Rigid-body modes 1-6 must have near-zero frequency. abs_tol=0.1 Hz.",
+      "type": "eigenfrequency", "subcase": 1, "mode": 1,
+      "expected": 0.0, "abs_tol": 0.1
+    },
+    {
+      "type": "eigenfrequency", "subcase": 1, "mode": 2,
+      "expected": 0.0, "abs_tol": 0.1
+    },
+    {
+      "type": "eigenfrequency", "subcase": 1, "mode": 3,
+      "expected": 0.0, "abs_tol": 0.1
+    },
+    {
+      "type": "eigenfrequency", "subcase": 1, "mode": 4,
+      "expected": 0.0, "abs_tol": 0.1
+    },
+    {
+      "type": "eigenfrequency", "subcase": 1, "mode": 5,
+      "expected": 0.0, "abs_tol": 0.1
+    },
+    {
+      "type": "eigenfrequency", "subcase": 1, "mode": 6,
+      "expected": 0.0, "abs_tol": 0.1
+    },
+    {
+      "comment": "Mode 7: first elastic bending. Analytical (free-free beam): f = 4.730^2/(2*pi*L^2)*sqrt(EI/rhoA) ~= 51.9 Hz.",
+      "type": "eigenfrequency", "subcase": 1, "mode": 7,
+      "expected": 51.9, "rel_tol": 0.15
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "description": "CHEXA8 cantilever modal: 5x2x2 mesh, first bending degenerate pair ~8.15 Hz (Euler-Bernoulli)",
+  "checks": [
+    {
+      "comment": "Mode 1: first bending (Y-plane). Analytical f1 = 8.15 Hz. FE on 5-element mesh: 8.19 Hz (<1% error).",
+      "type": "eigenfrequency", "subcase": 1, "mode": 1,
+      "expected": 8.15, "rel_tol": 0.05
+    },
+    {
+      "comment": "Mode 2: degenerate first bending (Z-plane). Same frequency as mode 1 by symmetry.",
+      "type": "eigenfrequency", "subcase": 1, "mode": 2,
+      "expected": 8.15, "rel_tol": 0.05
+    },
+    {
+      "comment": "Mode 3: second bending or torsional mode — must be substantially higher than mode 2.",
+      "type": "eigenfrequency", "subcase": 1, "mode": 3,
+      "expected": 50.0, "rel_tol": 0.20
+    }
+  ]
+}

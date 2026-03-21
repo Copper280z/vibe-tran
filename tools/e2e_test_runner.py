@@ -44,11 +44,13 @@ If both rel_tol and abs_tol are given the check passes when *either* condition
 holds.  If neither is given abs_tol=1e-6 is used as a default.
 
 BDF files must include DISPLACEMENT=ALL and STRESS=ALL in the case control so
-the OP2 output contains all result data.
+the OP2 output contains all result data.  Modal BDFs (SOL 103) require
+EIGENVECTOR(PLOT)=ALL to write eigenvectors; the eigenvalue table (LAMA) is
+always written.
 
 OP2 result layout (via pyNastran)
 ----------------------------------
-Displacements:
+Displacements (SOL 101):
     op2.displacements[isubcase].node_gridtype[:, 0]  → node IDs
     op2.displacements[isubcase].data[0, :, :]         → shape (nnodes, 6): T1-R3
 
@@ -61,6 +63,30 @@ Solid stresses (CHEXA8 / CTETRA4 / CTETRA10):
     op2.chexa_stress[isubcase]  /  op2.ctetra_stress[isubcase]
     .element_node  → shape (nrows, 2): [elem_id, node_id] (0 = centroid)
     .data[0, :, :] → shape (nrows, 7): sx, sy, sz, sxy, syz, szx, vm
+
+Modal eigenvalues (SOL 103, LAMA block):
+    op2.eigenvalues['']   → RealEigenvalues
+    .mode                 → array of mode numbers (1-based)
+    .cycles               → array of frequencies in Hz
+    .eigenvalues          → array of eigenvalues (ω²)
+    .radians              → array of ω values
+    .generalized_mass     → array of generalised masses
+
+Modal eigenvectors (SOL 103, OUGV1 block — requires EIGENVECTOR(PLOT)=ALL):
+    op2.eigenvectors[isubcase]   → RealEigenvectorArray
+    .node_gridtype[:, 0]          → node IDs (shape: nnodes)
+    .data[imode, inode, idof]     → displacement component (T1=0..R3=5)
+
+Check types
+-----------
+eigenfrequency:
+    {
+      "type": "eigenfrequency",
+      "subcase": 1,      // used for multi-subcase lookup (informational only for LAMA)
+      "mode": 1,         // 1-based mode number
+      "expected": 8.15,  // Hz
+      "rel_tol": 0.05    // |actual-expected| <= rel_tol * |expected|
+    }
 """
 
 import argparse
@@ -93,12 +119,15 @@ _SOLID_COLS = {
 }
 
 
-def _load_op2(op2_path: Path) -> tuple[dict, dict]:
+def _load_op2(op2_path: Path) -> tuple[dict, dict, dict]:
     """
-    Load an OP2 file with pyNastran and return (node_data, elem_data).
+    Load an OP2 file with pyNastran and return (node_data, elem_data, modal_data).
 
-    node_data: {(node_id, subcase_id): {"T1": float, ...}}
-    elem_data: {(elem_id, subcase_id): {"sx": float, ..., "von_mises": float}}
+    node_data:  {(node_id, subcase_id): {"T1": float, ...}}
+    elem_data:  {(elem_id, subcase_id): {"sx": float, ..., "von_mises": float}}
+    modal_data: {mode_number: {"cycles": float, "eigenvalue": float,
+                               "radians": float, "gen_mass": float}}
+                (merged from all LAMA blocks; mode numbers are 1-based)
     """
     try:
         from pyNastran.op2.op2 import OP2
@@ -113,6 +142,7 @@ def _load_op2(op2_path: Path) -> tuple[dict, dict]:
 
     node_data: dict = {}
     elem_data: dict = {}
+    modal_data: dict = {}
 
     # ── Displacements ──────────────────────────────────────────────────────
     for isubcase, table in op2.displacements.items():
@@ -140,7 +170,22 @@ def _load_op2(op2_path: Path) -> tuple[dict, dict]:
     for isubcase, table in stress.ctetra_stress.items():
         _extract_solid_stress(table, int(isubcase), elem_data)
 
-    return node_data, elem_data
+    # ── Modal eigenvalues (LAMA block, SOL 103) ────────────────────────────
+    for table in op2.eigenvalues.values():
+        modes   = table.mode
+        cycles  = table.cycles
+        eigns   = table.eigenvalues
+        radians = table.radians
+        gen_mass = table.generalized_mass
+        for i, m in enumerate(modes):
+            modal_data[int(m)] = {
+                "cycles":     float(cycles[i]),
+                "eigenvalue": float(eigns[i]),
+                "radians":    float(radians[i]),
+                "gen_mass":   float(gen_mass[i]),
+            }
+
+    return node_data, elem_data, modal_data
 
 
 def _extract_plate_stress(table, isubcase: int, elem_data: dict) -> None:
@@ -234,7 +279,8 @@ class CheckResult:
     message: str
 
 
-def _evaluate_check(check: dict, node_data: dict, elem_data: dict) -> CheckResult:
+def _evaluate_check(check: dict, node_data: dict, elem_data: dict,
+                    modal_data: dict) -> CheckResult:
     subcase = check.get("subcase", 1)
     expected = check["expected"]
     rel_tol: Optional[float] = check.get("rel_tol")
@@ -281,6 +327,18 @@ def _evaluate_check(check: dict, node_data: dict, elem_data: dict) -> CheckResul
                 "(plates: sx sy sxy von_mises; solids: sx sy sz sxy syz szx von_mises)",
             )
         description = f"elem_stress elem={elem_id:>4}  comp={component}"
+
+    elif ctype == "eigenfrequency":
+        mode = check["mode"]
+        if mode not in modal_data:
+            return CheckResult(
+                False,
+                f"eigenfreq mode={mode}",
+                f"mode {mode} not found in LAMA block — "
+                "check BDF is SOL 103 and EIGRL ND >= mode number",
+            )
+        actual = modal_data[mode]["cycles"]
+        description = f"eigenfreq  mode={mode:>4}"
 
     else:
         return CheckResult(False, f"? {ctype}", f"unknown check type '{ctype}'")
@@ -360,7 +418,7 @@ def check_results(
         return False, [f"  ERROR: OP2 not found: {op2_path}"]
 
     try:
-        node_data, elem_data = _load_op2(op2_path)
+        node_data, elem_data, modal_data = _load_op2(op2_path)
     except Exception as exc:
         return False, [f"  ERROR loading OP2: {exc}"]
 
@@ -373,7 +431,7 @@ def check_results(
     for check in expected.get("checks", []):
         if "type" not in check:
             continue  # comment/note-only entries have no type
-        result = _evaluate_check(check, node_data, elem_data)
+        result = _evaluate_check(check, node_data, elem_data, modal_data)
         status = "PASS" if result.passed else "FAIL"
         messages.append(f"  {status}  {result.description:<40}  {result.message}")
         if not result.passed:
