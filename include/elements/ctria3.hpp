@@ -33,6 +33,7 @@ public:
     [[nodiscard]] int         num_dofs() const noexcept override { return NUM_DOFS; }
 
     [[nodiscard]] LocalKe stiffness_matrix() const override;
+    [[nodiscard]] LocalKe mass_matrix() const override;
     [[nodiscard]] LocalFe thermal_load(std::span<const double> temperatures,
                                         double t_ref) const override;
     [[nodiscard]] std::vector<EqIndex> global_dof_indices(const DofMap&) const override;

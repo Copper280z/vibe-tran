@@ -788,3 +788,225 @@ TEST(CQuad4Mitc4, RigidBodyTranslationProducesZeroForce) {
     Eigen::VectorXd f = Ke * u_rbm;
     EXPECT_LT(f.norm(), 1e-8 * Ke.norm());
 }
+
+// ── Mass matrix unit tests ────────────────────────────────────────────────────
+// Tests used exclusively for verifying mass_matrix() correctness.
+
+// Helper: make a shell model with density
+static Model make_shell_model_rho(double E=2.0e11, double nu=0.3,
+                                   double t=0.01, double rho=7850.0) {
+    Model m;
+    Mat1 mat;
+    mat.id=MaterialId{1}; mat.E=E; mat.nu=nu;
+    mat.G=E/(2*(1+nu)); mat.rho=rho; mat.A=0;
+    m.materials[mat.id] = mat;
+    PShell ps;
+    ps.pid=PropertyId{1}; ps.mid1=MaterialId{1}; ps.t=t; ps.tst=0.833333;
+    m.properties[ps.pid] = ps;
+    return m;
+}
+
+// Helper: make a solid model with density
+static Model make_solid_model_rho(double E=2.0e11, double nu=0.3,
+                                   double rho=7850.0) {
+    Model m;
+    Mat1 mat;
+    mat.id=MaterialId{1}; mat.E=E; mat.nu=nu;
+    mat.G=E/(2*(1+nu)); mat.rho=rho; mat.A=0;
+    m.materials[mat.id] = mat;
+    PSolid ps;
+    ps.pid=PropertyId{1}; ps.mid=MaterialId{1};
+    m.properties[ps.pid] = ps;
+    return m;
+}
+
+TEST(MassMatrix, CQuad4Symmetry) {
+    // Used only in MassMatrix tests.
+    Model m = make_shell_model_rho();
+    add_grid(m,1,0,0); add_grid(m,2,1,0); add_grid(m,3,1,1); add_grid(m,4,0,1);
+    std::array<NodeId,4> nodes{NodeId{1},NodeId{2},NodeId{3},NodeId{4}};
+    CQuad4 elem(ElementId{1}, PropertyId{1}, nodes, m);
+
+    LocalKe Me = elem.mass_matrix();
+    double asym = (Me - Me.transpose()).cwiseAbs().maxCoeff();
+    EXPECT_LT(asym, 1e-12 * Me.cwiseAbs().maxCoeff())
+        << "CQuad4 mass matrix is not symmetric";
+}
+
+TEST(MassMatrix, CQuad4PositiveSemiDefinite) {
+    Model m = make_shell_model_rho();
+    add_grid(m,1,0,0); add_grid(m,2,1,0); add_grid(m,3,1,1); add_grid(m,4,0,1);
+    std::array<NodeId,4> nodes{NodeId{1},NodeId{2},NodeId{3},NodeId{4}};
+    CQuad4 elem(ElementId{1}, PropertyId{1}, nodes, m);
+
+    LocalKe Me = elem.mass_matrix();
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(Me);
+    double min_ev = eig.eigenvalues().minCoeff();
+    double max_ev = eig.eigenvalues().maxCoeff();
+    EXPECT_GE(min_ev, -1e-10 * max_ev)
+        << "CQuad4 mass matrix has negative eigenvalue: " << min_ev;
+}
+
+TEST(MassMatrix, CQuad4TotalMass) {
+    // Translational mass sum = rho * t * A (for square 1x1 element)
+    // CQuad4 has 4 nodes × 3 translational DOFs (indices 0,1,2 per 6-DOF block)
+    // Sum of translational diagonal = rho * t * A (from consistent mass formula)
+    const double rho=7850, t=0.01, A=1.0;
+    Model m = make_shell_model_rho(2e11, 0.3, t, rho);
+    add_grid(m,1,0,0); add_grid(m,2,1,0); add_grid(m,3,1,1); add_grid(m,4,0,1);
+    std::array<NodeId,4> nodes{NodeId{1},NodeId{2},NodeId{3},NodeId{4}};
+    CQuad4 elem(ElementId{1}, PropertyId{1}, nodes, m);
+
+    LocalKe Me = elem.mass_matrix();
+    // Sum the T1 (dof 0) diagonal across nodes: Me(0,0)+Me(6,6)+Me(12,12)+Me(18,18)
+    // For a consistent shell mass matrix, each translational row sums to rho*t*A/4 (lumped equiv.)
+    // Total mass = rho * t * A, verified by u=[1,0,0,...] → u^T M u = rho*t*A
+    Eigen::VectorXd u_x = Eigen::VectorXd::Zero(24);
+    for (int i = 0; i < 4; ++i) u_x(6*i) = 1.0;  // unit x-translation
+    double mass_x = u_x.transpose() * Me * u_x;
+    EXPECT_NEAR(mass_x, rho * t * A, 0.01 * rho * t * A)
+        << "CQuad4 translational mass should equal rho*t*A";
+}
+
+TEST(MassMatrix, CTria3Symmetry) {
+    Model m = make_shell_model_rho();
+    add_grid(m,1,0,0); add_grid(m,2,1,0); add_grid(m,3,0,1);
+    std::array<NodeId,3> nodes{NodeId{1},NodeId{2},NodeId{3}};
+    CTria3 elem(ElementId{1}, PropertyId{1}, nodes, m);
+
+    LocalKe Me = elem.mass_matrix();
+    double asym = (Me - Me.transpose()).cwiseAbs().maxCoeff();
+    EXPECT_LT(asym, 1e-12 * Me.cwiseAbs().maxCoeff())
+        << "CTria3 mass matrix is not symmetric";
+}
+
+TEST(MassMatrix, CTria3TotalMass) {
+    // Area of right triangle with legs 1,1 = 0.5
+    const double rho=7850, t=0.01;
+    const double A=0.5;
+    Model m = make_shell_model_rho(2e11, 0.3, t, rho);
+    add_grid(m,1,0,0); add_grid(m,2,1,0); add_grid(m,3,0,1);
+    std::array<NodeId,3> nodes{NodeId{1},NodeId{2},NodeId{3}};
+    CTria3 elem(ElementId{1}, PropertyId{1}, nodes, m);
+
+    LocalKe Me = elem.mass_matrix();
+    Eigen::VectorXd u_x = Eigen::VectorXd::Zero(18);
+    for (int i = 0; i < 3; ++i) u_x(6*i) = 1.0;
+    double mass_x = u_x.transpose() * Me * u_x;
+    EXPECT_NEAR(mass_x, rho * t * A, 0.01 * rho * t * A)
+        << "CTria3 translational mass should equal rho*t*A";
+}
+
+TEST(MassMatrix, CHexa8Symmetry) {
+    Model m = make_solid_model_rho();
+    add_grid(m,1,0,0,0); add_grid(m,2,1,0,0); add_grid(m,3,1,1,0); add_grid(m,4,0,1,0);
+    add_grid(m,5,0,0,1); add_grid(m,6,1,0,1); add_grid(m,7,1,1,1); add_grid(m,8,0,1,1);
+    std::array<NodeId,8> nodes{NodeId{1},NodeId{2},NodeId{3},NodeId{4},
+                               NodeId{5},NodeId{6},NodeId{7},NodeId{8}};
+    CHexa8 elem(ElementId{1}, PropertyId{1}, nodes, m);
+
+    LocalKe Me = elem.mass_matrix();
+    double asym = (Me - Me.transpose()).cwiseAbs().maxCoeff();
+    EXPECT_LT(asym, 1e-12 * Me.cwiseAbs().maxCoeff())
+        << "CHexa8 mass matrix is not symmetric";
+}
+
+TEST(MassMatrix, CHexa8TotalMass) {
+    // Unit cube, rho=7850 → mass = 7850 kg
+    const double rho=7850.0;
+    Model m = make_solid_model_rho(2e11, 0.3, rho);
+    add_grid(m,1,0,0,0); add_grid(m,2,1,0,0); add_grid(m,3,1,1,0); add_grid(m,4,0,1,0);
+    add_grid(m,5,0,0,1); add_grid(m,6,1,0,1); add_grid(m,7,1,1,1); add_grid(m,8,0,1,1);
+    std::array<NodeId,8> nodes{NodeId{1},NodeId{2},NodeId{3},NodeId{4},
+                               NodeId{5},NodeId{6},NodeId{7},NodeId{8}};
+    CHexa8 elem(ElementId{1}, PropertyId{1}, nodes, m);
+
+    LocalKe Me = elem.mass_matrix();
+    // u=[1,0,0,...] uniform x-translation → u^T M u = total mass
+    Eigen::VectorXd u_x = Eigen::VectorXd::Zero(24);
+    for (int i = 0; i < 8; ++i) u_x(3*i) = 1.0;
+    double mass_x = u_x.transpose() * Me * u_x;
+    EXPECT_NEAR(mass_x, rho * 1.0, 0.01 * rho)
+        << "CHexa8 total mass should equal rho*V";
+}
+
+TEST(MassMatrix, CHexa8PositiveSemiDefinite) {
+    Model m = make_solid_model_rho();
+    add_grid(m,1,0,0,0); add_grid(m,2,1,0,0); add_grid(m,3,1,1,0); add_grid(m,4,0,1,0);
+    add_grid(m,5,0,0,1); add_grid(m,6,1,0,1); add_grid(m,7,1,1,1); add_grid(m,8,0,1,1);
+    std::array<NodeId,8> nodes{NodeId{1},NodeId{2},NodeId{3},NodeId{4},
+                               NodeId{5},NodeId{6},NodeId{7},NodeId{8}};
+    CHexa8 elem(ElementId{1}, PropertyId{1}, nodes, m);
+
+    LocalKe Me = elem.mass_matrix();
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(Me);
+    double min_ev = eig.eigenvalues().minCoeff();
+    double max_ev = eig.eigenvalues().maxCoeff();
+    EXPECT_GE(min_ev, -1e-10 * max_ev)
+        << "CHexa8 mass matrix has negative eigenvalue: " << min_ev;
+}
+
+TEST(MassMatrix, CTetra4TotalMass) {
+    // Regular tetrahedron with vertices at (0,0,0),(1,0,0),(0,1,0),(0,0,1)
+    // Volume = 1/6
+    const double rho=7850.0;
+    const double V=1.0/6.0;
+    Model m = make_solid_model_rho(2e11, 0.3, rho);
+    add_grid(m,1,0,0,0); add_grid(m,2,1,0,0); add_grid(m,3,0,1,0); add_grid(m,4,0,0,1);
+    std::array<NodeId,4> nodes{NodeId{1},NodeId{2},NodeId{3},NodeId{4}};
+    CTetra4 elem(ElementId{1}, PropertyId{1}, nodes, m);
+
+    LocalKe Me = elem.mass_matrix();
+    Eigen::VectorXd u_x = Eigen::VectorXd::Zero(12);
+    for (int i = 0; i < 4; ++i) u_x(3*i) = 1.0;
+    double mass_x = u_x.transpose() * Me * u_x;
+    EXPECT_NEAR(mass_x, rho * V, 0.01 * rho * V)
+        << "CTetra4 total mass should equal rho*V";
+}
+
+TEST(MassMatrix, CTetra4Symmetry) {
+    Model m = make_solid_model_rho();
+    add_grid(m,1,0,0,0); add_grid(m,2,1,0,0); add_grid(m,3,0,1,0); add_grid(m,4,0,0,1);
+    std::array<NodeId,4> nodes{NodeId{1},NodeId{2},NodeId{3},NodeId{4}};
+    CTetra4 elem(ElementId{1}, PropertyId{1}, nodes, m);
+
+    LocalKe Me = elem.mass_matrix();
+    double asym = (Me - Me.transpose()).cwiseAbs().maxCoeff();
+    EXPECT_LT(asym, 1e-12 * Me.cwiseAbs().maxCoeff())
+        << "CTetra4 mass matrix is not symmetric";
+}
+
+TEST(MassMatrix, CPenta6TotalMass) {
+    // Wedge element: 6 nodes forming a triangular prism
+    // Base triangle: (0,0,0),(1,0,0),(0,1,0); height = 1
+    // Volume = (1/2) * 1 * 1 = 0.5
+    const double rho=7850.0;
+    const double V=0.5;
+    Model m = make_solid_model_rho(2e11, 0.3, rho);
+    add_grid(m,1,0,0,0); add_grid(m,2,1,0,0); add_grid(m,3,0,1,0);
+    add_grid(m,4,0,0,1); add_grid(m,5,1,0,1); add_grid(m,6,0,1,1);
+    std::array<NodeId,6> nodes{NodeId{1},NodeId{2},NodeId{3},
+                               NodeId{4},NodeId{5},NodeId{6}};
+    CPenta6 elem(ElementId{1}, PropertyId{1}, nodes, m);
+
+    LocalKe Me = elem.mass_matrix();
+    Eigen::VectorXd u_x = Eigen::VectorXd::Zero(18);
+    for (int i = 0; i < 6; ++i) u_x(3*i) = 1.0;
+    double mass_x = u_x.transpose() * Me * u_x;
+    EXPECT_NEAR(mass_x, rho * V, 0.02 * rho * V)
+        << "CPenta6 total mass should equal rho*V";
+}
+
+TEST(MassMatrix, CPenta6Symmetry) {
+    Model m = make_solid_model_rho();
+    add_grid(m,1,0,0,0); add_grid(m,2,1,0,0); add_grid(m,3,0,1,0);
+    add_grid(m,4,0,0,1); add_grid(m,5,1,0,1); add_grid(m,6,0,1,1);
+    std::array<NodeId,6> nodes{NodeId{1},NodeId{2},NodeId{3},
+                               NodeId{4},NodeId{5},NodeId{6}};
+    CPenta6 elem(ElementId{1}, PropertyId{1}, nodes, m);
+
+    LocalKe Me = elem.mass_matrix();
+    double asym = (Me - Me.transpose()).cwiseAbs().maxCoeff();
+    EXPECT_LT(asym, 1e-12 * Me.cwiseAbs().maxCoeff())
+        << "CPenta6 mass matrix is not symmetric";
+}

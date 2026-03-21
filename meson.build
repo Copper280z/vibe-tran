@@ -59,6 +59,21 @@ else
   message('Using system Eigen3')
 endif
 
+# ── Spectra eigensolver (header-only, bundled) ────────────────────────────────
+spectra_dep = dependency('spectra', required : false)
+if not spectra_dep.found()
+  if fs.is_dir('third_party/spectra/include/Spectra')
+    message('Using bundled Spectra from third_party/spectra/')
+    spectra_dep = declare_dependency(
+      include_directories : include_directories('third_party/spectra/include'))
+  else
+    error('Spectra not found. Download from https://github.com/yixuan/spectra ' +
+          'and place headers in third_party/spectra/include/')
+  endif
+else
+  message('Using system Spectra')
+endif
+
 # ── Apple Accelerate sparse solver backend (optional, macOS only) ────────────
 # Accelerate.framework ships with every macOS install (10.13+) and provides
 # direct sparse Cholesky via Eigen's AccelerateSupport header — no Homebrew
@@ -319,6 +334,8 @@ solver_sources = files(
   # Solver
   'src/solver/solver_backend.cpp',
   'src/solver/linear_static.cpp',
+  'src/solver/eigensolver_backend.cpp',
+  'src/solver/modal.cpp',
 )
 
 # Append Vulkan and CUDA sources when available
@@ -332,7 +349,7 @@ src_inc = include_directories('src/solver') # for internal vulkan_pipelines.hpp
 # ── Library (solver logic, no main) ──────────────────────────────────────────
 tbb_args = tbb_dep.found() ? ['-DHAVE_TBB=1'] : []
 
-solver_lib_deps = [eigen_dep, thread_dep]
+solver_lib_deps = [eigen_dep, spectra_dep, thread_dep]
 if tbb_dep.found()
   solver_lib_deps += tbb_dep
 endif
@@ -458,6 +475,7 @@ summary({
   'Build type'        : get_option('buildtype'),
   'C++ std'           : 'C++20',
   'Eigen'             : eigen_dep.found(),
+  'Spectra'           : spectra_dep.found(),
   'CHOLMOD backend'   : have_cholmod,
   'Accelerate backend': have_accelerate,
   'Vulkan backend'    : have_vulkan_backend,

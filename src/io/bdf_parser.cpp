@@ -85,6 +85,8 @@ Model BdfParser::parse_stream(std::istream &in) {
       }
       if (sol_num == 101)
         ctx.model.analysis.sol = SolutionType::LinearStatic;
+      else if (sol_num == 103)
+        ctx.model.analysis.sol = SolutionType::Modal;
     }
   }
 
@@ -188,6 +190,31 @@ Model BdfParser::parse_stream(std::istream &in) {
             } else {
               // No modifier list → PRINT (text) output only
               cur_sc.disp_print = true;
+            }
+          }
+        }
+      } else if (kw.starts_with("METHOD")) {
+        // METHOD = <sid>  — references an EIGRL card SID
+        size_t eq = kw.find('=');
+        if (eq != std::string::npos)
+          try { cur_sc.eigrl_id = std::stoi(kw.substr(eq + 1)); } catch (...) {}
+      } else if (kw.starts_with("EIGENVECTOR") || kw.starts_with("VECTOR")) {
+        // EIGENVECTOR[(PRINT[,PLOT])] = ALL
+        // VECTOR is an alias for EIGENVECTOR
+        size_t eq = kw.find('=');
+        if (eq != std::string::npos) {
+          std::string val = kw.substr(eq + 1);
+          size_t ns = val.find_first_not_of(" \t");
+          if (ns != std::string::npos) val = val.substr(ns);
+          if (!val.starts_with("NONE")) {
+            size_t lp = kw.find('(');
+            size_t rp = kw.find(')');
+            if (lp != std::string::npos && rp != std::string::npos && rp > lp) {
+              std::string mods = kw.substr(lp + 1, rp - lp - 1);
+              if (mods.find("PRINT") != std::string::npos) cur_sc.eigvec_print = true;
+              if (mods.find("PLOT")  != std::string::npos) cur_sc.eigvec_plot  = true;
+            } else {
+              cur_sc.eigvec_print = true;
             }
           }
         }
@@ -412,6 +439,8 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_rbe3(ctx, card.fields);
       else if (kw == "PARAM")
         process_param(ctx, card.fields);
+      else if (kw == "EIGRL")
+        process_eigrl(ctx, card.fields);
       // Silently ignore unrecognized cards
     } catch (const ParseError &) {
       throw;
@@ -1019,6 +1048,32 @@ void BdfParser::process_rbe3(ParseContext &ctx,
   }
 
   ctx.model.rbe3s.push_back(std::move(rbe));
+}
+
+// ── EIGRL processor ───────────────────────────────────────────────────────────
+
+void BdfParser::process_eigrl(ParseContext& ctx,
+                               const std::vector<std::string>& f) {
+  // EIGRL, SID, V1, V2, ND, MSGLVL, MAXSET, SHFSCL, NORM
+  // Field indices: 0=EIGRL, 1=SID, 2=V1, 3=V2, 4=ND, 5=MSGLVL, 6=MAXSET, 7=SHFSCL, 8=NORM
+  EigRL e;
+  e.sid = parse_int(f[1], ctx.line_num);
+  if (f.size() > 2 && !f[2].empty())
+    try { e.v1 = parse_double(f[2], ctx.line_num); } catch (...) {}
+  if (f.size() > 3 && !f[3].empty())
+    try { e.v2 = parse_double(f[3], ctx.line_num); } catch (...) {}
+  if (f.size() > 4 && !f[4].empty())
+    try { e.nd = parse_int(f[4], ctx.line_num); } catch (...) {}
+  // Field 5 = MSGLVL, 6 = MAXSET, 7 = SHFSCL — skip
+  if (f.size() > 8 && !f[8].empty()) {
+    std::string norm = f[8];
+    std::transform(norm.begin(), norm.end(), norm.begin(), ::toupper);
+    if (norm.find("MAX") != std::string::npos)
+      e.norm = EigRL::Norm::Max;
+    else
+      e.norm = EigRL::Norm::Mass;
+  }
+  ctx.model.eigrls[e.sid] = e;
 }
 
 } // namespace vibetran

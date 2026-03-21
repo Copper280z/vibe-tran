@@ -169,6 +169,16 @@ struct Rbe3 {
   std::vector<Rbe3WeightGroup> weight_groups;
 };
 
+// ── EIGRL card (modal analysis) ──────────────────────────────────────────────
+
+struct EigRL {
+  int sid{0};
+  double v1{0.0};   // lower frequency bound (Hz); 0 = unconstrained
+  double v2{1e30};  // upper frequency bound (Hz)
+  int nd{10};       // number of desired eigenvalues
+  enum class Norm { Mass, Max } norm{Norm::Mass};
+};
+
 // ── Analysis case
 // ─────────────────────────────────────────────────────────────
 
@@ -189,6 +199,11 @@ struct SubCase {
   bool disp_plot{false};    // DISPLACEMENT(PLOT)=ALL
   bool stress_print{false}; // STRESS(PRINT)=ALL  or  STRESS=ALL
   bool stress_plot{false};  // STRESS(PLOT)=ALL
+
+  // Modal analysis (SOL 103) output selection
+  int eigrl_id{0};        // METHOD = <sid>  references an EIGRL card
+  bool eigvec_print{false}; // EIGENVECTOR(PRINT)=ALL
+  bool eigvec_plot{false};  // EIGENVECTOR(PLOT)=ALL
 };
 
 struct AnalysisCase {
@@ -237,6 +252,9 @@ public:
 
   // PARAM entries (name → value as string)
   std::unordered_map<std::string, std::string> params;
+
+  // EIGRL cards (keyed by SID)
+  std::unordered_map<int, EigRL> eigrls;
 
   // ── Accessors ────────────────────────────────────────────────────────────
 

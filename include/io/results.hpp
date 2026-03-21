@@ -53,6 +53,29 @@ struct SolverResults {
   std::vector<SubCaseResults> subcases;
 };
 
+// ── Modal result data ─────────────────────────────────────────────────────────
+
+struct ModeResult {
+  int mode_number{0};
+  double eigenvalue{0};       ///< λ = ω² (rad²/s²)
+  double radians_per_sec{0};  ///< ω = sqrt(max(λ,0))
+  double cycles_per_sec{0};   ///< f = ω/(2π)
+  double gen_mass{0};         ///< φᵀ M φ (≈ 1 after mass normalisation)
+  std::vector<NodeDisplacement> shape; ///< mode shape as nodal displacements
+};
+
+struct ModalSubCaseResults {
+  int id{1};
+  std::string label;
+  std::vector<ModeResult> modes;
+  bool eigvec_print{false};
+  bool eigvec_plot{false};
+};
+
+struct ModalSolverResults {
+  std::vector<ModalSubCaseResults> subcases;
+};
+
 // ── Principal stress helpers ──────────────────────────────────────────────────
 
 /// Compute 2-D principal stresses and angle from membrane stress components.
@@ -71,16 +94,25 @@ void compute_principal_3d(double sx, double sy, double sz,
 
 class F06Writer {
 public:
-  /// Write results to an F06 file (respects SubCase output flags)
+  /// Write linear-static results to an F06 file (respects SubCase output flags)
   static void write(const SolverResults &results, const Model &model,
                     const std::filesystem::path &path);
 
-  /// Write to stream (for testing)
+  /// Write linear-static results to stream (for testing)
   static void write(const SolverResults &results, const Model &model,
                     std::ostream &out);
 
+  /// Write modal results to an F06 file
+  static void write_modal(const ModalSolverResults &results, const Model &model,
+                          const std::filesystem::path &path);
+
+  /// Write modal results to stream (for testing)
+  static void write_modal(const ModalSolverResults &results, const Model &model,
+                          std::ostream &out);
+
 private:
   static void write_header(std::ostream &out);
+  static void write_modal_header(std::ostream &out);
   static void write_displacement_table(const SubCaseResults &sc,
                                        std::ostream &out);
   static void write_quad4_stress_table(const SubCaseResults &sc,
@@ -90,16 +122,25 @@ private:
   static void write_solid_stress_table(const SubCaseResults &sc,
                                        std::ostream &out,
                                        ElementType etype);
+  static void write_eigenvalue_table(const ModalSubCaseResults &msc,
+                                     std::ostream &out);
+  static void write_eigenvector_table(const ModeResult &mode,
+                                      std::ostream &out);
 };
 
 // ── OP2 writer ────────────────────────────────────────────────────────────────
 
 class Op2Writer {
 public:
-  /// Write results to an OP2 binary file (MSC Nastran format, little-endian).
+  /// Write linear-static results to an OP2 binary file.
   /// Respects SubCase disp_plot / stress_plot flags (PLOT modifier).
   static void write(const SolverResults &results, const Model &model,
                     const std::filesystem::path &path);
+
+  /// Write modal results to an OP2 binary file.
+  /// Writes LAMA (eigenvalue table) and OUGV1 (eigenvectors, if eigvec_plot).
+  static void write_modal(const ModalSolverResults &results, const Model &model,
+                          const std::filesystem::path &path);
 };
 
 // ── CSV writer ────────────────────────────────────────────────────────────────

@@ -64,6 +64,7 @@ private:
     static void process_rbe2    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_rbe3    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_param   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_eigrl   (ParseContext& ctx, const std::vector<std::string>& fields);
 
     // Field parsing helpers
     static double parse_double(const std::string& s, int line);

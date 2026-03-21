@@ -184,6 +184,7 @@ struct Vec3 {
 
 enum class SolutionType {
   LinearStatic = 101,
+  Modal        = 103,
 };
 
 // ── Solver error

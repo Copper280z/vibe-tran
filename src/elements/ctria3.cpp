@@ -155,6 +155,45 @@ LocalKe CTria3::stiffness_matrix() const {
     return Ke;
 }
 
+LocalKe CTria3::mass_matrix() const {
+    LocalKe Me = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+    const Mat1& mat = material();
+    const double rho = mat.rho;
+    if (rho == 0.0) return Me;
+    const double t = thickness();
+
+    // Closed-form consistent mass matrix for CST triangle.
+    // Nodal mass integrals: integral(Li^2 dA) = A/6, integral(Li*Lj dA) = A/12 (i≠j)
+    // Compute actual 3D area via cross product (handles arbitrary orientation).
+    auto c = node_coords();
+    Vec3 e1{c[1].x-c[0].x, c[1].y-c[0].y, c[1].z-c[0].z};
+    Vec3 e2{c[2].x-c[0].x, c[2].y-c[0].y, c[2].z-c[0].z};
+    double A = 0.5 * e1.cross(e2).norm();
+
+    double m_diag = rho * t * A / 6.0;
+    double m_off  = rho * t * A / 12.0;
+
+    double r_diag = rho * t * t * t / 12.0 * A / 6.0;
+    double r_off  = rho * t * t * t / 12.0 * A / 12.0;
+    double drill  = rho * t * t * t / 1200.0 * A / 6.0; // small drilling mass
+
+    for (int a = 0; a < 3; ++a) {
+        for (int b = 0; b < 3; ++b) {
+            double m_trans = (a == b) ? m_diag : m_off;
+            double m_rot   = (a == b) ? r_diag : r_off;
+            // Translational (T1,T2,T3): indices 6a+0,1,2
+            for (int d = 0; d < 3; ++d)
+                Me(6*a+d, 6*b+d) = m_trans;
+            // Rotational bending (R1,R2): indices 6a+3,4
+            for (int d = 0; d < 2; ++d)
+                Me(6*a+3+d, 6*b+3+d) = m_rot;
+        }
+        // Drilling (R3): diagonal only
+        Me(6*a+5, 6*a+5) = drill;
+    }
+    return Me;
+}
+
 LocalFe CTria3::thermal_load(std::span<const double> temperatures, double t_ref) const {
     LocalFe fe = LocalFe::Zero(NUM_DOFS);
     const double alpha = material().A;

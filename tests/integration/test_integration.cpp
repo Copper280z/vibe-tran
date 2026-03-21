@@ -20,12 +20,30 @@
 #include <gtest/gtest.h>
 #include "io/bdf_parser.hpp"
 #include "solver/linear_static.hpp"
+#include "solver/modal.hpp"
+#include "solver/eigensolver_backend.hpp"
 #include "solver/solver_backend.hpp"
 #include "io/results.hpp"
 #include <cmath>
+#include <numbers>
 #include <sstream>
 
 using namespace vibetran;
+
+// Helper: run a modal analysis from BDF string
+static ModalSolverResults run_modal(const std::string& bdf) {
+    Model model = BdfParser::parse_string(bdf);
+    ModalSolver solver(std::make_unique<SpectraEigensolverBackend>());
+    return solver.solve(model);
+}
+
+// Helper: get the frequency of mode i (0-based) in Hz
+static double get_freq(const ModalSolverResults& res, int mode_0based) {
+    for (const auto& msc : res.subcases)
+        if (mode_0based < static_cast<int>(msc.modes.size()))
+            return msc.modes[mode_0based].cycles_per_sec;
+    throw std::runtime_error("mode not found");
+}
 
 // Helper: run a full analysis from BDF string
 static SolverResults run_analysis(const std::string& bdf) {
@@ -1328,4 +1346,266 @@ ENDDATA
     double stress_tol = 0.01 * ps_mpc->von_mises;
     EXPECT_NEAR(ps_mpc->von_mises, ps_cd->von_mises, stress_tol)
         << "von Mises: mpc=" << ps_mpc->von_mises << " cd=" << ps_cd->von_mises;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SOL 103 Modal Analysis Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Test 1a: Cantilever bar first bending mode (CHEXA8) ───────────────────────
+// Geometry: L=1m, square cross-section a=0.01m (2×2 hex elements in y,z, 10 in x)
+// E=200 GPa, ρ=7850 kg/m³, ν=0.3
+// Fixed at x=0 (all 6 DOFs of the 9 nodes at x=0)
+// Analytical Euler-Bernoulli cantilever first bending frequency:
+//   f₁ = (1.875104)² / (2π) * sqrt(EI/ρA) / L²
+//   I = a⁴/12, A = a²
+//   EI/ρA = E*a²/(12*ρ) = 200e9*0.0001/(12*7850) = 213.4...
+//   f₁ ≈ 1.875² / (2π*1²) * sqrt(213.4) ≈ 8.15 Hz
+// Test: modes 0 and 1 (degenerate bending pair) within 10% of 8.15 Hz
+// Note: coarse 2×2 hex mesh; FE frequency is slightly higher than analytical.
+
+TEST(Modal, CantileverBarHex_FirstBendingMode) {
+    // 3×3×10 grid of nodes (4 hex elements in cross-section, 10 in length)
+    // Hex connectivity: 2x2 cross-section elements × 10 length elements
+    // Node numbering: x varies fastest, then y, then z
+    // Cross-section: 0.01×0.01, length: 1.0
+    const double L = 1.0, a = 0.01;
+    const double E = 200e9, rho = 7850.0;
+
+    // Build BDF programmatically
+    std::ostringstream bdf;
+    bdf << "SOL 103\nCEND\n";
+    bdf << "SUBCASE 1\n  SPC = 1\n  METHOD = 1\n  EIGENVECTOR = ALL\n";
+    bdf << "BEGIN BULK\n";
+    bdf << "MAT1,1," << E << ",,," << rho << "\n";
+    bdf << "PSOLID,1,1\n";
+    bdf << "EIGRL,1,0.0,,3\n";
+
+    // Nodes: (nx+1)×(ny+1)×(nz+1) = 11×3×3
+    const int NX=10, NY=2, NZ=2;
+    auto nid = [&](int ix, int iy, int iz) {
+        return 1 + ix + (NX+1)*(iy + (NY+1)*iz);
+    };
+    for (int iz = 0; iz <= NZ; ++iz)
+        for (int iy = 0; iy <= NY; ++iy)
+            for (int ix = 0; ix <= NX; ++ix) {
+                double x = ix * L / NX;
+                double y = (iy - 1) * a / NY;  // centered on y=0
+                double z = (iz - 1) * a / NZ;  // centered on z=0
+                bdf << "GRID," << nid(ix,iy,iz) << ",,"
+                    << x << "," << y << "," << z << "\n";
+            }
+
+    // CHEXA elements
+    int eid = 1;
+    for (int iz = 0; iz < NZ; ++iz)
+        for (int iy = 0; iy < NY; ++iy)
+            for (int ix = 0; ix < NX; ++ix) {
+                bdf << "CHEXA," << eid++ << ",1,"
+                    << nid(ix,iy,iz) << "," << nid(ix+1,iy,iz) << ","
+                    << nid(ix+1,iy+1,iz) << "," << nid(ix,iy+1,iz) << ","
+                    << nid(ix,iy,iz+1) << "," << nid(ix+1,iy,iz+1) << ","
+                    << nid(ix+1,iy+1,iz+1) << "," << nid(ix,iy+1,iz+1) << "\n";
+            }
+
+    // Fix all DOFs at x=0 face
+    bdf << "SPC1,1,123456";
+    for (int iz = 0; iz <= NZ; ++iz)
+        for (int iy = 0; iy <= NY; ++iy)
+            bdf << "," << nid(0,iy,iz);
+    bdf << "\nENDDATA\n";
+
+    ModalSolverResults res = run_modal(bdf.str());
+    ASSERT_FALSE(res.subcases.empty());
+    ASSERT_GE(static_cast<int>(res.subcases[0].modes.size()), 2);
+
+    // Analytical first bending frequency
+    const double I = std::pow(a,4) / 12.0;
+    const double A_cross = a * a;
+    const double omega1_analytical = std::pow(1.8751, 2)
+        * std::sqrt(E * I / (rho * A_cross)) / (L * L);
+    const double f1_analytical = omega1_analytical / (2.0 * std::numbers::pi);
+
+    double f0 = get_freq(res, 0);
+    double f1 = get_freq(res, 1);
+
+    // Modes 0 and 1 are the two degenerate bending planes
+    // FE over-estimates stiffness on coarse mesh; use 15% tolerance
+    EXPECT_NEAR(f0, f1_analytical, 0.15 * f1_analytical)
+        << "Mode 1 freq=" << f0 << " Hz, analytical=" << f1_analytical << " Hz";
+    EXPECT_NEAR(f1, f1_analytical, 0.15 * f1_analytical)
+        << "Mode 2 freq=" << f1 << " Hz, analytical=" << f1_analytical << " Hz";
+
+    // Mode 2 must be higher than mode 1
+    double f2 = get_freq(res, 2);
+    EXPECT_GT(f2, f1) << "Mode 3 must be higher than mode 2";
+}
+
+// ── Test 2: Free-free bar rigid-body modes (CHEXA8) ───────────────────────────
+// No SPCs → 6 rigid-body modes with f ≈ 0, first elastic mode at f > 5 Hz
+// Use ND=7 to capture 6 RBMs + 1 elastic mode.
+
+TEST(Modal, FreeBarHex_RigidBodyModes) {
+    const double L = 1.0, a = 0.01;
+    const double E = 200e9, rho = 7850.0;
+
+    std::ostringstream bdf;
+    bdf << "SOL 103\nCEND\n";
+    bdf << "SUBCASE 1\n  METHOD = 1\n";
+    bdf << "BEGIN BULK\n";
+    bdf << "MAT1,1," << E << ",,," << rho << "\n";
+    bdf << "PSOLID,1,1\n";
+    bdf << "EIGRL,1,0.0,,7\n";
+    bdf << "$ No SPC — free-free\n";
+
+    const int NX=5, NY=1, NZ=1;
+    auto nid = [&](int ix, int iy, int iz) {
+        return 1 + ix + (NX+1)*(iy + (NY+1)*iz);
+    };
+    for (int iz = 0; iz <= NZ; ++iz)
+        for (int iy = 0; iy <= NY; ++iy)
+            for (int ix = 0; ix <= NX; ++ix) {
+                double x = ix * L / NX;
+                double y = iy * a / NY;
+                double z = iz * a / NZ;
+                bdf << "GRID," << nid(ix,iy,iz) << ",,"
+                    << x << "," << y << "," << z << "\n";
+            }
+
+    int eid = 1;
+    for (int iz = 0; iz < NZ; ++iz)
+        for (int iy = 0; iy < NY; ++iy)
+            for (int ix = 0; ix < NX; ++ix) {
+                bdf << "CHEXA," << eid++ << ",1,"
+                    << nid(ix,iy,iz) << "," << nid(ix+1,iy,iz) << ","
+                    << nid(ix+1,iy+1,iz) << "," << nid(ix,iy+1,iz) << ","
+                    << nid(ix,iy,iz+1) << "," << nid(ix+1,iy,iz+1) << ","
+                    << nid(ix+1,iy+1,iz+1) << "," << nid(ix,iy+1,iz+1) << "\n";
+            }
+    bdf << "ENDDATA\n";
+
+    ModalSolverResults res = run_modal(bdf.str());
+    ASSERT_FALSE(res.subcases.empty());
+    const auto& modes = res.subcases[0].modes;
+    ASSERT_GE(static_cast<int>(modes.size()), 7);
+
+    // First 6 modes should be near-zero (rigid body)
+    for (int i = 0; i < 6; ++i) {
+        EXPECT_LT(modes[i].cycles_per_sec, 1.0)
+            << "Mode " << (i+1) << " should be rigid body, f=" << modes[i].cycles_per_sec;
+    }
+    // Mode 7 must be a genuine elastic mode
+    EXPECT_GT(modes[6].cycles_per_sec, 5.0)
+        << "Mode 7 should be elastic, f=" << modes[6].cycles_per_sec;
+}
+
+// ── Test 3: Simply-supported beam first bending mode (CQUAD4) ─────────────────
+// L=1m, width=w, t=0.01m, E=200 GPa, ρ=7850 kg/m³
+// Analytical: f₁ = (π/2L²) * sqrt(EI/(ρA)) = (π/2) * (t/(2*sqrt(3)*L²)) * sqrt(E/ρ)
+// Here I = w*t³/12, A = w*t, so EI/ρA = E*t²/(12*ρ)
+// ω₁ = π²/(L²) * sqrt(EI/ρA)  [simply supported beam formula ω = (nπ/L)² * sqrt(EI/ρA)]
+
+TEST(Modal, SimplySupportedBeamCQuad4_FirstBendingMode) {
+    const double L = 1.0, w = 0.01, t = 0.01;
+    const double E = 200e9, rho = 7850.0;
+
+    // Analytical first bending (simply-supported): ω₁ = (π/L)² * sqrt(EI/ρA)
+    // I = w*t³/12, A = w*t  → EI/ρA = E*t²/(12*ρ)
+    const double EI_rhoA = E * t * t / (12.0 * rho);
+    const double omega1 = std::pow(std::numbers::pi / L, 2) * std::sqrt(EI_rhoA);
+    const double f1_analytical = omega1 / (2.0 * std::numbers::pi);
+
+    // Build a 10-element CQUAD4 beam mesh (simply supported at ends: T3 fixed)
+    const int NX = 10;
+    std::ostringstream bdf;
+    bdf << "SOL 103\nCEND\n";
+    bdf << "SUBCASE 1\n  SPC = 1\n  METHOD = 1\n";
+    bdf << "BEGIN BULK\n";
+    bdf << "MAT1,1," << E << ",,," << rho << "\n";
+    bdf << "PSHELL,1,1," << t << "\n";
+    bdf << "EIGRL,1,0.0,,4\n";
+
+    // 2-row grid (width w): nodes at y=0 and y=w
+    for (int ix = 0; ix <= NX; ++ix) {
+        double x = ix * L / NX;
+        bdf << "GRID," << (2*ix+1) << ",," << x << ",0.0,0.0\n";
+        bdf << "GRID," << (2*ix+2) << ",," << x << "," << w << ",0.0\n";
+    }
+
+    // CQUAD4 elements
+    for (int ix = 0; ix < NX; ++ix) {
+        int n1 = 2*ix+1, n2 = 2*ix+3, n3 = 2*ix+4, n4 = 2*ix+2;
+        bdf << "CQUAD4," << (ix+1) << ",1," << n1 << "," << n2 << ","
+            << n3 << "," << n4 << "\n";
+    }
+
+    // Simply-supported: fix T3 (DOF 3) and all in-plane translations at both ends
+    // Left end: nodes 1,2  Right end: nodes 2*NX+1, 2*NX+2
+    bdf << "SPC1,1,123,1,2\n";             // left end: fix T1,T2,T3
+    bdf << "SPC1,1,23," << (2*NX+1) << "," << (2*NX+2) << "\n";  // right end: fix T2,T3
+    bdf << "ENDDATA\n";
+
+    ModalSolverResults res = run_modal(bdf.str());
+    ASSERT_FALSE(res.subcases.empty());
+    ASSERT_GE(static_cast<int>(res.subcases[0].modes.size()), 1);
+
+    double f1 = get_freq(res, 0);
+    // CQUAD4 with coarse mesh: allow 20% tolerance
+    EXPECT_NEAR(f1, f1_analytical, 0.20 * f1_analytical)
+        << "Simply-supported beam mode 1: f=" << f1 << " Hz, analytical=" << f1_analytical << " Hz";
+    // The mode must be positive (not rigid body)
+    EXPECT_GT(f1, 0.5 * f1_analytical)
+        << "Mode 1 should be a genuine bending mode";
+}
+
+// ── Test 4: Modes are returned in ascending frequency order ───────────────────
+
+TEST(Modal, ModesAscendingFrequency) {
+    const double L = 1.0, a = 0.01;
+    const double E = 200e9, rho = 7850.0;
+
+    std::ostringstream bdf;
+    bdf << "SOL 103\nCEND\n";
+    bdf << "SUBCASE 1\n  SPC = 1\n  METHOD = 1\n";
+    bdf << "BEGIN BULK\n";
+    bdf << "MAT1,1," << E << ",,," << rho << "\n";
+    bdf << "PSOLID,1,1\n";
+    bdf << "EIGRL,1,0.0,,4\n";
+
+    const int NX=4, NY=1, NZ=1;
+    auto nid = [&](int ix, int iy, int iz) {
+        return 1 + ix + (NX+1)*(iy + (NY+1)*iz);
+    };
+    for (int iz = 0; iz <= NZ; ++iz)
+        for (int iy = 0; iy <= NY; ++iy)
+            for (int ix = 0; ix <= NX; ++ix)
+                bdf << "GRID," << nid(ix,iy,iz) << ",,"
+                    << ix*L/NX << "," << iy*a/NY << "," << iz*a/NZ << "\n";
+
+    int eid = 1;
+    for (int iz = 0; iz < NZ; ++iz)
+        for (int iy = 0; iy < NY; ++iy)
+            for (int ix = 0; ix < NX; ++ix)
+                bdf << "CHEXA," << eid++ << ",1,"
+                    << nid(ix,iy,iz) << "," << nid(ix+1,iy,iz) << ","
+                    << nid(ix+1,iy+1,iz) << "," << nid(ix,iy+1,iz) << ","
+                    << nid(ix,iy,iz+1) << "," << nid(ix+1,iy,iz+1) << ","
+                    << nid(ix+1,iy+1,iz+1) << "," << nid(ix,iy+1,iz+1) << "\n";
+
+    // Fix one end
+    bdf << "SPC1,1,123456";
+    for (int iz = 0; iz <= NZ; ++iz)
+        for (int iy = 0; iy <= NY; ++iy)
+            bdf << "," << nid(0,iy,iz);
+    bdf << "\nENDDATA\n";
+
+    ModalSolverResults res = run_modal(bdf.str());
+    ASSERT_FALSE(res.subcases.empty());
+    const auto& modes = res.subcases[0].modes;
+    ASSERT_GE(static_cast<int>(modes.size()), 2);
+
+    for (int i = 1; i < static_cast<int>(modes.size()); ++i) {
+        EXPECT_LE(modes[i-1].eigenvalue, modes[i].eigenvalue + 1e-6)
+            << "Modes not in ascending order at i=" << i;
+    }
 }

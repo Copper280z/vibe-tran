@@ -279,6 +279,61 @@ LocalKe CQuad4::stiffness_matrix() const {
     return Ke;
 }
 
+LocalKe CQuad4::mass_matrix() const {
+    LocalKe Me = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+    const Mat1& mat = material();
+    const double rho = mat.rho;
+    if (rho == 0.0) return Me;
+    const double t = thickness();
+    auto coords = node_coords();
+
+    // 2×2 Gauss quadrature over element area.
+    // DOF layout per node: [T1, T2, T3, R1, R2, R3] = [u,v,w,θx,θy,θz]
+    // Translational (T1,T2,T3): rho*t * N[a]*N[b] * detJ * w
+    // Bending rotational (R1,R2): rho*t^3/12 * N[a]*N[b] * detJ * w
+    // Drilling (R3): small diagonal = rho*t^3/1200 * N[a]^2 * detJ * w
+    const double t3_12  = t * t * t / 12.0;
+    const double t3_1200 = t * t * t / 1200.0;
+
+    // Track diagonal translational contributions for reference (not needed since
+    // we accumulate drilling directly with the rho*t^3/1200 factor)
+    for (int gi = 0; gi < 2; ++gi) {
+        for (int gj = 0; gj < 2; ++gj) {
+            double xi  = GAUSS2[gi];
+            double eta = GAUSS2[gj];
+            double wi  = GAUSS2_W[gi];
+            double wj  = GAUSS2_W[gj];
+
+            auto sd = shape_functions(xi, eta);
+
+            Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
+            for (int n = 0; n < 4; ++n) {
+                J(0,0) += sd.dNdxi[n]  * coords[n].x;
+                J(0,1) += sd.dNdxi[n]  * coords[n].y;
+                J(1,0) += sd.dNdeta[n] * coords[n].x;
+                J(1,1) += sd.dNdeta[n] * coords[n].y;
+            }
+            double detJ = J.determinant();
+            double w = wi * wj * detJ;
+
+            for (int a = 0; a < 4; ++a) {
+                for (int b = 0; b < 4; ++b) {
+                    double mab = sd.N[a] * sd.N[b] * w;
+                    // Translational (T1,T2,T3): indices 6a+0,1,2
+                    for (int d = 0; d < 3; ++d)
+                        Me(6*a+d, 6*b+d) += rho * t * mab;
+                    // Rotational bending (R1,R2): indices 6a+3,4
+                    for (int d = 0; d < 2; ++d)
+                        Me(6*a+3+d, 6*b+3+d) += rho * t3_12 * mab;
+                }
+                // Drilling (R3): index 6a+5, diagonal only
+                Me(6*a+5, 6*a+5) += rho * t3_1200 * sd.N[a] * sd.N[a] * w;
+            }
+        }
+    }
+    return Me;
+}
+
 LocalFe CQuad4::thermal_load(std::span<const double> temperatures, double t_ref) const {
     LocalFe fe = LocalFe::Zero(NUM_DOFS);
     auto coords = node_coords();
@@ -581,6 +636,53 @@ LocalKe CQuad4Mitc4::stiffness_matrix() const {
         Ke(6*i+5, 6*i+5) += drill_stiff;
 
     return Ke;
+}
+
+LocalKe CQuad4Mitc4::mass_matrix() const {
+    // MITC4 and standard CQuad4 share the same mass matrix formulation;
+    // the MITC4 modification only affects the transverse shear stiffness.
+    LocalKe Me = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+    const Mat1& mat = material();
+    const double rho = mat.rho;
+    if (rho == 0.0) return Me;
+    const double t = thickness();
+    auto coords = node_coords();
+
+    const double t3_12   = t * t * t / 12.0;
+    const double t3_1200 = t * t * t / 1200.0;
+
+    for (int gi = 0; gi < 2; ++gi) {
+        for (int gj = 0; gj < 2; ++gj) {
+            double xi  = GAUSS2[gi];
+            double eta = GAUSS2[gj];
+            double wi  = GAUSS2_W[gi];
+            double wj  = GAUSS2_W[gj];
+
+            auto sd = CQuad4::shape_functions(xi, eta);
+
+            Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
+            for (int n = 0; n < 4; ++n) {
+                J(0,0) += sd.dNdxi[n]  * coords[n].x;
+                J(0,1) += sd.dNdxi[n]  * coords[n].y;
+                J(1,0) += sd.dNdeta[n] * coords[n].x;
+                J(1,1) += sd.dNdeta[n] * coords[n].y;
+            }
+            double detJ = J.determinant();
+            double w = wi * wj * detJ;
+
+            for (int a = 0; a < 4; ++a) {
+                for (int b = 0; b < 4; ++b) {
+                    double mab = sd.N[a] * sd.N[b] * w;
+                    for (int d = 0; d < 3; ++d)
+                        Me(6*a+d, 6*b+d) += rho * t * mab;
+                    for (int d = 0; d < 2; ++d)
+                        Me(6*a+3+d, 6*b+3+d) += rho * t3_12 * mab;
+                }
+                Me(6*a+5, 6*a+5) += rho * t3_1200 * sd.N[a] * sd.N[a] * w;
+            }
+        }
+    }
+    return Me;
 }
 
 LocalFe CQuad4Mitc4::thermal_load(std::span<const double> temperatures, double t_ref) const {

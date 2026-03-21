@@ -273,4 +273,79 @@ void F06Writer::write_solid_stress_table(const SubCaseResults& sc,
     }
 }
 
+// ── F06 modal output ──────────────────────────────────────────────────────────
+
+void F06Writer::write_modal(const ModalSolverResults& results, const Model& model,
+                            const std::filesystem::path& path) {
+    std::ofstream f(path);
+    if (!f) throw SolverError(std::format("Cannot write F06: {}", path.string()));
+    write_modal(results, model, f);
+}
+
+void F06Writer::write_modal(const ModalSolverResults& results, const Model& /*model*/,
+                            std::ostream& out) {
+    write_modal_header(out);
+    for (const auto& msc : results.subcases) {
+        bool do_vec = msc.eigvec_print;
+
+        out << "\n1                                             SUBCASE " << msc.id << "\n";
+        if (!msc.label.empty())
+            out << "                                              " << msc.label << "\n";
+
+        write_eigenvalue_table(msc, out);
+
+        if (do_vec)
+            for (const auto& mode : msc.modes)
+                write_eigenvector_table(mode, out);
+    }
+    out << "\n\n                     * * * END OF JOB * * *\n\n";
+}
+
+void F06Writer::write_modal_header(std::ostream& out) {
+    std::time_t t = std::time(nullptr);
+    char date_buf[32];
+    std::strftime(date_buf, sizeof(date_buf), "%B %e, %Y", std::localtime(&t));
+
+    out << "1                           N A S T R A N - C O M P A T I B L E   S O L V E R"
+        << "                                                          " << date_buf << "\n";
+    out << "0                                                                         \n";
+    out << "         S O L   1 0 3   N O R M A L   M O D E S   A N A L Y S I S\n";
+    out << "\n";
+}
+
+void F06Writer::write_eigenvalue_table(const ModalSubCaseResults& msc,
+                                       std::ostream& out) {
+    if (msc.modes.empty()) return;
+
+    out << "\n                                              R E A L   E I G E N V A L U E S\n\n";
+    out << "   MODE    EXTRACTION      EIGENVALUE            RADIANS             CYCLES           GENERALIZED       GENERALIZED\n";
+    out << "    NO.       ORDER                                                                       MASS            STIFFNESS\n";
+
+    for (const auto& mode : msc.modes) {
+        double gen_stiff = mode.eigenvalue * mode.gen_mass;
+        out << std::setw(7)  << mode.mode_number;
+        out << std::setw(12) << mode.mode_number; // extraction order = mode number
+        out << std::setw(20) << std::setprecision(8) << std::scientific << mode.eigenvalue;
+        out << std::setw(20) << std::setprecision(8) << std::scientific << mode.radians_per_sec;
+        out << std::setw(20) << std::setprecision(8) << std::scientific << mode.cycles_per_sec;
+        out << std::setw(16) << std::setprecision(6) << std::scientific << mode.gen_mass;
+        out << std::setw(16) << std::setprecision(6) << std::scientific << gen_stiff;
+        out << "\n";
+    }
+}
+
+void F06Writer::write_eigenvector_table(const ModeResult& mode, std::ostream& out) {
+    out << "\n                                                 E I G E N V E C T O R\n\n";
+    out << std::format("                               (MODE NUMBER {}  FREQUENCY = {:.6E} HZ)\n\n",
+                       mode.mode_number, mode.cycles_per_sec);
+    out << "      POINT ID.   TYPE          T1             T2             T3             R1             R2             R3\n";
+
+    for (const auto& nd : mode.shape) {
+        out << std::setw(12) << nd.node.value << "        G   ";
+        for (int i = 0; i < 6; ++i)
+            out << std::setw(15) << std::setprecision(6) << std::scientific << nd.d[i];
+        out << "\n";
+    }
+}
+
 } // namespace vibetran

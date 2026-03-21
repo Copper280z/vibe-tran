@@ -462,6 +462,219 @@ static int write_oes1x_solid(std::ostream& f,
     return itable;
 }
 
+// ── Write LAMA (eigenvalue table) ────────────────────────────────────────────
+// LAMA: one record per subcase.  Per mode: [mode_no, order, eigenvalue,
+//        radians, cycles, gen_mass, gen_stiffness] — 7 int32/float32 words.
+// approach_code=76 (analysis_code=7 real modes, device_code=6)
+// table_code=60
+
+static int write_lama(std::ostream& f,
+                      const ModalSubCaseResults& msc,
+                      bool new_result, int itable) {
+    if (msc.modes.empty()) return itable;
+
+    const int approach_code = 76; // SOL 103
+    const int table_code    = 60; // LAMA
+    const int num_wide      =  7;
+    const int nm     = static_cast<int>(msc.modes.size());
+    const int ntotal = nm * num_wide;
+
+    write_table3(f, new_result, itable,
+                 approach_code, table_code,
+                 /*element_type=*/0, msc.id,
+                 num_wide,
+                 /*title=*/"", msc.label, msc.label);
+    itable--;
+
+    {
+        int32_t m[13] = {4, itable, 4,
+                         4, 1, 4,
+                         4, 0, 4,
+                         4, ntotal, 4,
+                         4 * ntotal};
+        f.write(reinterpret_cast<const char*>(m), 52);
+    }
+
+    for (int i = 0; i < nm; ++i) {
+        const ModeResult& mr = msc.modes[i];
+        double gen_stiffness = mr.eigenvalue * mr.gen_mass;
+        write_f32(f, i32_as_f32(mr.mode_number));       // mode_no
+        write_f32(f, i32_as_f32(mr.mode_number));       // extraction order
+        write_f32(f, static_cast<float>(mr.eigenvalue));
+        write_f32(f, static_cast<float>(mr.radians_per_sec));
+        write_f32(f, static_cast<float>(mr.cycles_per_sec));
+        write_f32(f, static_cast<float>(mr.gen_mass));
+        write_f32(f, static_cast<float>(gen_stiffness));
+    }
+
+    {
+        int32_t tail = 4 * ntotal;
+        f.write(reinterpret_cast<const char*>(&tail), 4);
+    }
+    itable--;
+    return itable;
+}
+
+// ── Write OUGV1 eigenvector records (one TABLE-3/4 pair per mode) ─────────────
+
+static int write_ougv1_modal(std::ostream& f,
+                             const ModalSubCaseResults& msc,
+                             bool new_result, int itable) {
+    const int approach_code = 76; // SOL 103
+    const int table_code    =  7; // eigenvectors (OUGV1 variant)
+    const int num_wide      =  8;
+
+    bool first = true;
+    for (const auto& mr : msc.modes) {
+        if (mr.shape.empty()) continue;
+
+        const int nn     = static_cast<int>(mr.shape.size());
+        const int ntotal = nn * num_wide;
+
+        // Reuse write_table3; put mode number in lsdvmn (ints[4])
+        // We write table3 manually to set lsdvmn correctly.
+        int cur_itable = itable;
+        if (new_result && first && cur_itable != -3) {
+            int32_t m[3] = {4, 146, 4};
+            f.write(reinterpret_cast<const char*>(m), 12);
+        } else {
+            int32_t m[12] = {4, itable, 4, 4, 1, 4, 4, 0, 4, 4, 146, 4};
+            f.write(reinterpret_cast<const char*>(m), 48);
+        }
+
+        static constexpr int N_INTS = 50;
+        static constexpr int STR_LEN = 128;
+        int32_t ints[N_INTS] = {};
+        ints[0]  = approach_code;
+        ints[1]  = table_code;
+        ints[2]  = 0;
+        ints[3]  = msc.id;
+        ints[4]  = mr.mode_number;   // lsdvmn = mode number
+        ints[8]  = 1;                // format_code = real
+        ints[9]  = num_wide;
+
+        char strings[3][STR_LEN];
+        auto fill_str = [&](char dst[STR_LEN], const std::string& src) {
+            std::memset(dst, ' ', STR_LEN);
+            size_t n = std::min(src.size(), (size_t)STR_LEN);
+            std::memcpy(dst, src.data(), n);
+        };
+        fill_str(strings[0], "");
+        fill_str(strings[1], msc.label);
+        fill_str(strings[2], msc.label);
+
+        int32_t rec_len = N_INTS * 4 + 3 * STR_LEN; // 584
+        f.write(reinterpret_cast<const char*>(&rec_len), 4);
+        f.write(reinterpret_cast<const char*>(ints), N_INTS * 4);
+        f.write(strings[0], STR_LEN);
+        f.write(strings[1], STR_LEN);
+        f.write(strings[2], STR_LEN);
+        f.write(reinterpret_cast<const char*>(&rec_len), 4);
+        itable--;
+
+        // TABLE-4
+        {
+            int32_t m[13] = {4, itable, 4,
+                             4, 1, 4,
+                             4, 0, 4,
+                             4, ntotal, 4,
+                             4 * ntotal};
+            f.write(reinterpret_cast<const char*>(m), 52);
+        }
+
+        for (const auto& nd : mr.shape) {
+            int32_t id_dev = static_cast<int32_t>(nd.node.value) * 10 + 2;
+            write_f32(f, i32_as_f32(id_dev));
+            write_f32(f, i32_as_f32(1)); // grid type G=1
+            for (int i = 0; i < 6; ++i)
+                write_f32(f, static_cast<float>(nd.d[i]));
+        }
+
+        {
+            int32_t tail = 4 * ntotal;
+            f.write(reinterpret_cast<const char*>(&tail), 4);
+        }
+        itable--;
+        first = false;
+    }
+    return itable;
+}
+
+// ── Op2Writer::write_modal ────────────────────────────────────────────────────
+
+void Op2Writer::write_modal(const ModalSolverResults& results, const Model& model,
+                            const std::filesystem::path& path) {
+    std::ofstream f(path, std::ios::binary);
+    if (!f) throw SolverError(std::format("Cannot write OP2: {}", path.string()));
+
+    std::time_t now = std::time(nullptr);
+    std::tm* lt = std::localtime(&now);
+    int month = lt->tm_mon + 1;
+    int day   = lt->tm_mday;
+    int dyear = lt->tm_year - 100;
+
+    write_file_header(f, month, day, dyear);
+
+    // ── LAMA (eigenvalue table) ───────────────────────────────────────────────
+    {
+        bool any = false;
+        for (const auto& msc : results.subcases)
+            if (!msc.modes.empty()) { any = true; break; }
+        if (any) {
+            const char name8[8] = {'L','A','M','A',' ',' ',' ',' '};
+            write_table_header(f, name8, month, day, dyear);
+
+            int itable = -3;
+            bool new_result = true;
+            for (const auto& msc : results.subcases) {
+                if (msc.modes.empty()) continue;
+                itable = write_lama(f, msc, new_result, itable);
+                new_result = false;
+                int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};
+                f.write(reinterpret_cast<const char*>(footer), 36);
+            }
+            write_markers(f, 0);
+        }
+    }
+
+    // ── OUGV1 (eigenvectors, if eigvec_plot) ──────────────────────────────────
+    {
+        bool any = false;
+        for (const auto& msc : results.subcases) {
+            // Find matching subcase flags in model
+            for (const auto& sc : model.analysis.subcases) {
+                if (sc.id == msc.id && sc.eigvec_plot && !msc.modes.empty()) {
+                    any = true; break;
+                }
+            }
+            if (any) break;
+        }
+        if (any) {
+            const char name8[8] = {'O','U','G','V','1',' ',' ',' '};
+            write_table_header(f, name8, month, day, dyear);
+
+            int itable = -3;
+            bool new_result = true;
+            for (const auto& msc : results.subcases) {
+                bool do_plot = false;
+                for (const auto& sc : model.analysis.subcases)
+                    if (sc.id == msc.id) { do_plot = sc.eigvec_plot; break; }
+                if (!do_plot || msc.modes.empty()) continue;
+                itable = write_ougv1_modal(f, msc, new_result, itable);
+                new_result = false;
+                int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};
+                f.write(reinterpret_cast<const char*>(footer), 36);
+            }
+            write_markers(f, 0);
+        }
+    }
+
+    // Suppress unused model warning — model.analysis used above
+    (void)model;
+
+    write_markers(f, 0); // file end
+}
+
 // ── Op2Writer::write ──────────────────────────────────────────────────────────
 
 void Op2Writer::write(const SolverResults& results, const Model& model,

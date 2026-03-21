@@ -162,6 +162,43 @@ LocalKe CHexa8::stiffness_matrix() const {
     return Ke;
 }
 
+LocalKe CHexa8::mass_matrix() const {
+    LocalKe Me = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+    const double rho = material().rho;
+    if (rho == 0.0) return Me;
+
+    auto coords = node_coords();
+    const double gp = 1.0/std::sqrt(3.0);
+    const double gpts[2] = {-gp, gp};
+
+    for (int gi = 0; gi < 2; ++gi)
+    for (int gj = 0; gj < 2; ++gj)
+    for (int gk = 0; gk < 2; ++gk) {
+        double xi = gpts[gi], eta = gpts[gj], zeta = gpts[gk];
+
+        auto sd = shape_functions(xi, eta, zeta);
+
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 8; ++n) {
+            J(0,0)+=sd.dNdxi[n]  *coords[n].x; J(0,1)+=sd.dNdxi[n]  *coords[n].y; J(0,2)+=sd.dNdxi[n]  *coords[n].z;
+            J(1,0)+=sd.dNdeta[n] *coords[n].x; J(1,1)+=sd.dNdeta[n] *coords[n].y; J(1,2)+=sd.dNdeta[n] *coords[n].z;
+            J(2,0)+=sd.dNdzeta[n]*coords[n].x; J(2,1)+=sd.dNdzeta[n]*coords[n].y; J(2,2)+=sd.dNdzeta[n]*coords[n].z;
+        }
+        double detJ = J.determinant();
+        if (detJ <= 0)
+            throw SolverError(std::format("CHexa8 {}: non-positive Jacobian in mass_matrix det={:.6g}", eid_.value, detJ));
+
+        // Consistent mass: Me_ab += rho * N[a]*N[b] * detJ (weights = 1)
+        for (int a = 0; a < 8; ++a)
+            for (int b = 0; b < 8; ++b) {
+                double v = rho * sd.N[a] * sd.N[b] * detJ;
+                for (int d = 0; d < 3; ++d)
+                    Me(3*a+d, 3*b+d) += v;
+            }
+    }
+    return Me;
+}
+
 LocalFe CHexa8::thermal_load(std::span<const double> temperatures, double t_ref) const {
     LocalFe fe = LocalFe::Zero(NUM_DOFS);
     const double alpha = material().A;
@@ -333,6 +370,33 @@ LocalKe CTetra4::stiffness_matrix() const {
 
     Eigen::Matrix<double,6,6> D = constitutive_D();
     return V * B.transpose() * D * B;
+}
+
+LocalKe CTetra4::mass_matrix() const {
+    LocalKe Me = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+    const double rho = material().rho;
+    if (rho == 0.0) return Me;
+
+    // Closed-form consistent mass matrix for 4-node linear tetrahedron.
+    // integral(Li * Lj dV) = V/20 for i!=j, V/10 for i==j
+    auto c = node_coords();
+    Eigen::Matrix4d A4;
+    A4 << 1,c[0].x,c[0].y,c[0].z,
+          1,c[1].x,c[1].y,c[1].z,
+          1,c[2].x,c[2].y,c[2].z,
+          1,c[3].x,c[3].y,c[3].z;
+    double V = std::abs(A4.determinant()) / 6.0;
+
+    double m_diag = rho * V / 10.0;
+    double m_off  = rho * V / 20.0;
+
+    for (int a = 0; a < 4; ++a)
+        for (int b = 0; b < 4; ++b) {
+            double v = (a == b) ? m_diag : m_off;
+            for (int d = 0; d < 3; ++d)
+                Me(3*a+d, 3*b+d) = v;
+        }
+    return Me;
 }
 
 LocalFe CTetra4::thermal_load(std::span<const double> temperatures, double t_ref) const {
@@ -572,6 +636,53 @@ LocalKe CPenta6::stiffness_matrix() const {
     return Ke;
 }
 
+LocalKe CPenta6::mass_matrix() const {
+    LocalKe Me = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+    const double rho = material().rho;
+    if (rho == 0.0) return Me;
+
+    auto coords = node_coords();
+
+    // 3-point triangular × 2-point axial Gauss quadrature (6 total)
+    const double tri_pts[3][2] = {
+        {2.0/3.0, 1.0/6.0},
+        {1.0/6.0, 2.0/3.0},
+        {1.0/6.0, 1.0/6.0}
+    };
+    const double tri_w = 1.0 / 6.0;
+    const double ax_pts[2] = {-1.0/std::sqrt(3.0), 1.0/std::sqrt(3.0)};
+
+    for (int ti = 0; ti < 3; ++ti)
+    for (int ai = 0; ai < 2; ++ai) {
+        double L1 = tri_pts[ti][0], L2 = tri_pts[ti][1];
+        double zeta = ax_pts[ai];
+
+        auto sd = shape_functions(L1, L2, zeta);
+
+        // Jacobian [3x3]: maps (dL1,dL2,dzeta) → (dx,dy,dz)
+        // For penta, the Jacobian is:
+        // J = [dX/dL1, dX/dL2, dX/dzeta; ...]
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 6; ++n) {
+            J(0,0)+=sd.dNdL1[n]*coords[n].x; J(0,1)+=sd.dNdL1[n]*coords[n].y; J(0,2)+=sd.dNdL1[n]*coords[n].z;
+            J(1,0)+=sd.dNdL2[n]*coords[n].x; J(1,1)+=sd.dNdL2[n]*coords[n].y; J(1,2)+=sd.dNdL2[n]*coords[n].z;
+            J(2,0)+=sd.dNdzeta[n]*coords[n].x; J(2,1)+=sd.dNdzeta[n]*coords[n].y; J(2,2)+=sd.dNdzeta[n]*coords[n].z;
+        }
+        double detJ = J.determinant();
+        if (detJ <= 0)
+            throw SolverError(std::format("CPenta6 {}: non-positive Jacobian in mass_matrix det={:.6g}", eid_.value, detJ));
+
+        double weight = tri_w * 1.0; // axial weight = 1 for 2-point Gauss
+        for (int a = 0; a < 6; ++a)
+            for (int b = 0; b < 6; ++b) {
+                double v = rho * sd.N[a] * sd.N[b] * detJ * weight;
+                for (int d = 0; d < 3; ++d)
+                    Me(3*a+d, 3*b+d) += v;
+            }
+    }
+    return Me;
+}
+
 LocalFe CPenta6::thermal_load(std::span<const double> temperatures, double t_ref) const {
     LocalFe fe = LocalFe::Zero(NUM_DOFS);
     const double alpha = material().A;
@@ -804,6 +915,54 @@ LocalKe CTetra10::stiffness_matrix() const {
     }
 
     return Ke;
+}
+
+LocalKe CTetra10::mass_matrix() const {
+    LocalKe Me = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+    const double rho = material().rho;
+    if (rho == 0.0) return Me;
+
+    // 4-point Gauss quadrature for tetrahedron (exact for degree-3 polynomials,
+    // needed for quadratic shape function products which are degree 4 — slightly
+    // under-integrated, but standard practice for CTetra10 mass).
+    // Points and weights from Dunavant, 1985 (barycentric coordinates)
+    static const double gL[4][4] = {
+        {0.13819660,0.13819660,0.13819660,0.58541020},
+        {0.13819660,0.13819660,0.58541020,0.13819660},
+        {0.13819660,0.58541020,0.13819660,0.13819660},
+        {0.58541020,0.13819660,0.13819660,0.13819660}
+    };
+    static const double gW[4] = {0.04166667, 0.04166667, 0.04166667, 0.04166667};
+
+    auto coords = node_coords();
+
+    for (int gi = 0; gi < 4; ++gi) {
+        double L1 = gL[gi][0], L2 = gL[gi][1], L3 = gL[gi][2];
+        // L4 = gL[gi][3] but unused in shape_functions (derived as 1-L1-L2-L3)
+
+        auto sd = shape_functions(L1, L2, L3);
+
+        // Jacobian: maps (dL1,dL2,dL3) → (dx,dy,dz)
+        // J[i][j] = sum_n dN_n/dLj * coords[n][i]
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 10; ++n) {
+            J(0,0)+=sd.dNdL1[n]*coords[n].x; J(0,1)+=sd.dNdL2[n]*coords[n].x; J(0,2)+=sd.dNdL3[n]*coords[n].x;
+            J(1,0)+=sd.dNdL1[n]*coords[n].y; J(1,1)+=sd.dNdL2[n]*coords[n].y; J(1,2)+=sd.dNdL3[n]*coords[n].y;
+            J(2,0)+=sd.dNdL1[n]*coords[n].z; J(2,1)+=sd.dNdL2[n]*coords[n].z; J(2,2)+=sd.dNdL3[n]*coords[n].z;
+        }
+        double detJ = J.determinant();
+        if (detJ <= 0)
+            throw SolverError(std::format("CTetra10 {}: non-positive Jacobian in mass_matrix det={:.6g}", eid_.value, detJ));
+
+        double weight = gW[gi];
+        for (int a = 0; a < 10; ++a)
+            for (int b = 0; b < 10; ++b) {
+                double v = rho * sd.N[a] * sd.N[b] * detJ * weight;
+                for (int d = 0; d < 3; ++d)
+                    Me(3*a+d, 3*b+d) += v;
+            }
+    }
+    return Me;
 }
 
 LocalFe CTetra10::thermal_load(std::span<const double> temperatures, double t_ref) const {
@@ -1053,6 +1212,43 @@ LocalKe CHexa8Eas::stiffness_matrix() const {
     return Ke;
 }
 
+LocalKe CHexa8Eas::mass_matrix() const {
+    // EAS modes are element-internal (condensed out); mass matrix is identical to CHexa8.
+    LocalKe Me = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+    const double rho = material().rho;
+    if (rho == 0.0) return Me;
+
+    auto coords = node_coords();
+    const double gp = 1.0/std::sqrt(3.0);
+    const double gpts[2] = {-gp, gp};
+
+    for (int gi = 0; gi < 2; ++gi)
+    for (int gj = 0; gj < 2; ++gj)
+    for (int gk = 0; gk < 2; ++gk) {
+        double xi = gpts[gi], eta = gpts[gj], zeta = gpts[gk];
+
+        auto sd = CHexa8::shape_functions(xi, eta, zeta);
+
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 8; ++n) {
+            J(0,0)+=sd.dNdxi[n]  *coords[n].x; J(0,1)+=sd.dNdxi[n]  *coords[n].y; J(0,2)+=sd.dNdxi[n]  *coords[n].z;
+            J(1,0)+=sd.dNdeta[n] *coords[n].x; J(1,1)+=sd.dNdeta[n] *coords[n].y; J(1,2)+=sd.dNdeta[n] *coords[n].z;
+            J(2,0)+=sd.dNdzeta[n]*coords[n].x; J(2,1)+=sd.dNdzeta[n]*coords[n].y; J(2,2)+=sd.dNdzeta[n]*coords[n].z;
+        }
+        double detJ = J.determinant();
+        if (detJ <= 0)
+            throw SolverError(std::format("CHexa8Eas {}: non-positive Jacobian in mass_matrix det={:.6g}", eid_.value, detJ));
+
+        for (int a = 0; a < 8; ++a)
+            for (int b = 0; b < 8; ++b) {
+                double v = rho * sd.N[a] * sd.N[b] * detJ;
+                for (int d = 0; d < 3; ++d)
+                    Me(3*a+d, 3*b+d) += v;
+            }
+    }
+    return Me;
+}
+
 LocalFe CHexa8Eas::thermal_load(std::span<const double> temperatures, double t_ref) const {
     // EAS enhancement modes have zero mean strain, so thermal load is identical to CHexa8.
     LocalFe fe = LocalFe::Zero(NUM_DOFS);
@@ -1281,6 +1477,49 @@ LocalKe CPenta6Eas::stiffness_matrix() const {
 
     LocalKe Ke = Kuu - Kua * llt.solve(Kua.transpose());
     return Ke;
+}
+
+LocalKe CPenta6Eas::mass_matrix() const {
+    // EAS modes are element-internal (condensed out); mass matrix is identical to CPenta6.
+    LocalKe Me = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+    const double rho = material().rho;
+    if (rho == 0.0) return Me;
+
+    auto coords = node_coords();
+    const double tri_pts[3][2] = {
+        {2.0/3.0, 1.0/6.0},
+        {1.0/6.0, 2.0/3.0},
+        {1.0/6.0, 1.0/6.0}
+    };
+    const double tri_w = 1.0 / 6.0;
+    const double ax_pts[2] = {-1.0/std::sqrt(3.0), 1.0/std::sqrt(3.0)};
+
+    for (int ti = 0; ti < 3; ++ti)
+    for (int ai = 0; ai < 2; ++ai) {
+        double L1 = tri_pts[ti][0], L2 = tri_pts[ti][1];
+        double zeta = ax_pts[ai];
+
+        auto sd = CPenta6::shape_functions(L1, L2, zeta);
+
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 6; ++n) {
+            J(0,0)+=sd.dNdL1[n]*coords[n].x; J(0,1)+=sd.dNdL1[n]*coords[n].y; J(0,2)+=sd.dNdL1[n]*coords[n].z;
+            J(1,0)+=sd.dNdL2[n]*coords[n].x; J(1,1)+=sd.dNdL2[n]*coords[n].y; J(1,2)+=sd.dNdL2[n]*coords[n].z;
+            J(2,0)+=sd.dNdzeta[n]*coords[n].x; J(2,1)+=sd.dNdzeta[n]*coords[n].y; J(2,2)+=sd.dNdzeta[n]*coords[n].z;
+        }
+        double detJ = J.determinant();
+        if (detJ <= 0)
+            throw SolverError(std::format("CPenta6Eas {}: non-positive Jacobian in mass_matrix det={:.6g}", eid_.value, detJ));
+
+        double weight = tri_w * 1.0;
+        for (int a = 0; a < 6; ++a)
+            for (int b = 0; b < 6; ++b) {
+                double v = rho * sd.N[a] * sd.N[b] * detJ * weight;
+                for (int d = 0; d < 3; ++d)
+                    Me(3*a+d, 3*b+d) += v;
+            }
+    }
+    return Me;
 }
 
 LocalFe CPenta6Eas::thermal_load(std::span<const double> temperatures, double t_ref) const {

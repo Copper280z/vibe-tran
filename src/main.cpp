@@ -25,7 +25,9 @@
 #include "io/bdf_parser.hpp"
 #include "io/inp_parser.hpp"
 #include "io/results.hpp"
+#include "solver/eigensolver_backend.hpp"
 #include "solver/linear_static.hpp"
+#include "solver/modal.hpp"
 #include "solver/solver_backend.hpp"
 #ifdef HAVE_VULKAN
 #include "solver/vulkan_solver_backend.hpp"
@@ -190,35 +192,55 @@ int main(int argc, char *argv[]) {
     if (!backend)
       backend = std::make_unique<vibetran::EigenSolverBackend>();
 
-    std::cout << "Solving with: " << backend->name() << "\n";
-    vibetran::LinearStaticSolver solver(std::move(backend));
-    vibetran::SolverResults results = solver.solve(model);
-
-    auto t1 = std::chrono::steady_clock::now();
-    double elapsed = std::chrono::duration<double>(t1 - t0).count();
-    std::cout << "Solution complete in " << elapsed << " s\n";
-
-    // ── Write F06 ─────────────────────────────────────────────────────────
-    vibetran::F06Writer::write(results, model, f06_path);
-    std::cout << "F06 written: " << f06_path << "\n";
-
-    // ── Write OP2 ─────────────────────────────────────────────────────────
     auto op2_path = std::filesystem::path(f06_path).replace_extension(".op2");
-    vibetran::Op2Writer::write(results, model, op2_path);
-    std::cout << "OP2 written: " << op2_path << "\n";
 
-    // ── Write CSV (if requested via --csv or PARAM,CSVOUT,YES) ────────────
-    bool write_csv = force_csv;
-    if (!write_csv) {
-      auto it = model.params.find("CSVOUT");
-      if (it != model.params.end() && it->second == "YES")
-        write_csv = true;
-    }
-    if (write_csv) {
-      auto csv_stem = std::filesystem::path(f06_path).replace_extension("");
-      vibetran::CsvWriter::write(results, model, csv_stem);
-      std::cout << "CSV written: " << csv_stem.string()
-                << ".node.csv / .elem.csv\n";
+    if (model.analysis.sol == vibetran::SolutionType::Modal) {
+      // ── SOL 103 Modal Analysis ───────────────────────────────────────────
+      auto eig_backend =
+          std::make_unique<vibetran::SpectraEigensolverBackend>();
+      std::cout << "Solving with: " << eig_backend->name() << "\n";
+      vibetran::ModalSolver modal_solver(std::move(eig_backend));
+      vibetran::ModalSolverResults modal_results = modal_solver.solve(model);
+
+      auto t1 = std::chrono::steady_clock::now();
+      double elapsed = std::chrono::duration<double>(t1 - t0).count();
+      std::cout << "Solution complete in " << elapsed << " s\n";
+
+      vibetran::F06Writer::write_modal(modal_results, model, f06_path);
+      std::cout << "F06 written: " << f06_path << "\n";
+
+      vibetran::Op2Writer::write_modal(modal_results, model, op2_path);
+      std::cout << "OP2 written: " << op2_path << "\n";
+
+    } else {
+      // ── SOL 101 Linear Static ────────────────────────────────────────────
+      std::cout << "Solving with: " << backend->name() << "\n";
+      vibetran::LinearStaticSolver solver(std::move(backend));
+      vibetran::SolverResults results = solver.solve(model);
+
+      auto t1 = std::chrono::steady_clock::now();
+      double elapsed = std::chrono::duration<double>(t1 - t0).count();
+      std::cout << "Solution complete in " << elapsed << " s\n";
+
+      vibetran::F06Writer::write(results, model, f06_path);
+      std::cout << "F06 written: " << f06_path << "\n";
+
+      vibetran::Op2Writer::write(results, model, op2_path);
+      std::cout << "OP2 written: " << op2_path << "\n";
+
+      // ── Write CSV (if requested via --csv or PARAM,CSVOUT,YES) ──────────
+      bool write_csv = force_csv;
+      if (!write_csv) {
+        auto it = model.params.find("CSVOUT");
+        if (it != model.params.end() && it->second == "YES")
+          write_csv = true;
+      }
+      if (write_csv) {
+        auto csv_stem = std::filesystem::path(f06_path).replace_extension("");
+        vibetran::CsvWriter::write(results, model, csv_stem);
+        std::cout << "CSV written: " << csv_stem.string()
+                  << ".node.csv / .elem.csv\n";
+      }
     }
 
   } catch (const vibetran::ParseError &e) {

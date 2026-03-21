@@ -43,6 +43,9 @@ public:
     /// Compute local stiffness matrix Ke (num_dofs × num_dofs)
     [[nodiscard]] virtual LocalKe stiffness_matrix() const = 0;
 
+    /// Compute local consistent mass matrix Me (num_dofs × num_dofs)
+    [[nodiscard]] virtual LocalKe mass_matrix() const = 0;
+
     /// Compute local thermal load vector fe (num_dofs), given nodal temperatures
     /// and reference temperature.
     /// temperatures[i] = temperature at local node i
