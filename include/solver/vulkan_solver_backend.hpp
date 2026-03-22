@@ -69,9 +69,11 @@ public:
   /// True if the most recent solve used the full-GPU path.
   [[nodiscard]] bool last_solve_was_full_gpu() const noexcept;
   /// Number of PCG iterations in the most recent solve.
-  [[nodiscard]] int last_iteration_count() const noexcept;
+  [[nodiscard]] int last_iteration_count() const noexcept override;
   /// Relative residual norm at convergence (or at max_iterations).
   [[nodiscard]] double last_residual_norm() const noexcept;
+  /// Alias for last_residual_norm() to satisfy SolverBackend interface.
+  [[nodiscard]] double last_estimated_error() const noexcept override;
 
   // Opaque pipeline state — forward-declared here, defined in
   // vulkan_pipelines.hpp. Declared before private: so build_pipelines() (a free

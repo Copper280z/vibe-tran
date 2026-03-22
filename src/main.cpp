@@ -21,7 +21,11 @@
 //   <stem>.op2   OP2 binary results (always written)
 //   <stem>.node.csv  Nodal results CSV  \  written when PARAM,CSVOUT,YES is in
 //   <stem>.elem.csv  Element results CSV/  the BDF, or when --csv is passed.
+//
+// Logging:
+//   --log-file=<path>  Write all log output to <path> in addition to stdout.
 
+#include "core/logger.hpp"
 #include "io/bdf_parser.hpp"
 #include "io/inp_parser.hpp"
 #include "io/results.hpp"
@@ -40,34 +44,37 @@
 #include <cctype>
 #include <chrono>
 #include <filesystem>
-#include <iostream>
 #include <memory>
+#include <spdlog/spdlog.h>
 #include <string_view>
 
 enum class BackendChoice { Auto, Cpu, CpuPCG, Vulkan, Cuda, CudaPCG };
 
 static void print_usage() {
-  std::cerr << "Usage: vibetran "
-               "[--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg>]\n"
-               "                      [--cuda-single-precision] [--csv]\n"
-               "                      <input.bdf|input.inp> [output.f06]\n"
-               "  --backend=cpu              Eigen sparse Cholesky CPU solver "
-               "(default)\n"
-               "  --backend=cpu-pcg          Eigen PCG + IncompleteCholesky "
-               "CPU solver (low memory)\n"
-               "  --backend=vulkan           Vulkan PCG GPU solver (requires "
-               "Vulkan)\n"
-               "  --backend=cuda             CUDA cuDSS sparse direct solver "
-               "(requires CUDA)\n"
-               "  --backend=cuda-pcg         CUDA PCG + IC0/ILU0 GPU solver "
-               "(low memory, requires CUDA)\n"
-               "  --cuda-single-precision    Use float32 for CUDA solve "
-               "(halves GPU memory usage)\n"
-               "  --csv                      Write CSV output even if "
-               "PARAM,CSVOUT is not in the BDF\n"
-               "  OMP_NUM_THREADS=N          Limit CPU solver threads, e.g.:\n"
-               "                             OMP_NUM_THREADS=8 vibetran "
-               "input.bdf\n";
+  spdlog::error("Usage: vibetran "
+                "[--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg>]\n"
+                "                      [--cuda-single-precision] [--csv]\n"
+                "                      [--log-file=<path>]\n"
+                "                      <input.bdf|input.inp> [output.f06]\n"
+                "  --backend=cpu              Eigen sparse Cholesky CPU solver "
+                "(default)\n"
+                "  --backend=cpu-pcg          Eigen PCG + IncompleteCholesky "
+                "CPU solver (low memory)\n"
+                "  --backend=vulkan           Vulkan PCG GPU solver (requires "
+                "Vulkan)\n"
+                "  --backend=cuda             CUDA cuDSS sparse direct solver "
+                "(requires CUDA)\n"
+                "  --backend=cuda-pcg         CUDA PCG + IC0/ILU0 GPU solver "
+                "(low memory, requires CUDA)\n"
+                "  --cuda-single-precision    Use float32 for CUDA solve "
+                "(halves GPU memory usage)\n"
+                "  --csv                      Write CSV output even if "
+                "PARAM,CSVOUT is not in the BDF\n"
+                "  --log-file=<path>          Also write all log output to "
+                "this file\n"
+                "  OMP_NUM_THREADS=N          Limit CPU solver threads, e.g.:\n"
+                "                             OMP_NUM_THREADS=8 vibetran "
+                "input.bdf\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -75,6 +82,7 @@ int main(int argc, char *argv[]) {
   BackendChoice backend_choice = BackendChoice::Auto;
   bool cuda_single_precision = false;
   bool force_csv = false;
+  std::filesystem::path log_file_path;
   int positional = 0;
   std::filesystem::path bdf_path;
   std::filesystem::path f06_path;
@@ -85,6 +93,8 @@ int main(int argc, char *argv[]) {
       cuda_single_precision = true;
     } else if (arg == "--csv") {
       force_csv = true;
+    } else if (arg.starts_with("--log-file=")) {
+      log_file_path = std::string(arg.substr(std::string_view("--log-file=").size()));
     } else if (arg.starts_with("--backend=")) {
       std::string_view val = arg.substr(std::string_view("--backend=").size());
       if (val == "cpu")
@@ -98,8 +108,9 @@ int main(int argc, char *argv[]) {
       else if (val == "cuda-pcg")
         backend_choice = BackendChoice::CudaPCG;
       else {
-        std::cerr << "Unknown backend '" << val
-                  << "'. Valid: cpu, cpu-pcg, vulkan, cuda, cuda-pcg\n";
+        // init_logger with no file so error() goes somewhere
+        vibetran::init_logger();
+        spdlog::error("Unknown backend '{}'. Valid: cpu, cpu-pcg, vulkan, cuda, cuda-pcg", val);
         print_usage();
         return 1;
       }
@@ -110,16 +121,21 @@ int main(int argc, char *argv[]) {
       f06_path = arg;
       ++positional;
     } else {
-      std::cerr << "Unexpected argument: " << arg << "\n";
+      vibetran::init_logger();
+      spdlog::error("Unexpected argument: {}", arg);
       print_usage();
       return 1;
     }
   }
 
   if (positional == 0) {
+    vibetran::init_logger();
     print_usage();
     return 1;
   }
+
+  // Initialise logger (and optional file sink) before any logging.
+  vibetran::init_logger(log_file_path);
 
   if (f06_path.empty())
     f06_path = std::filesystem::path(bdf_path).replace_extension(".f06");
@@ -127,7 +143,7 @@ int main(int argc, char *argv[]) {
   try {
     auto t0 = std::chrono::steady_clock::now();
 
-    std::cout << "Reading: " << bdf_path << "\n";
+    spdlog::info("Reading: {}", bdf_path.string());
     std::string ext = bdf_path.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](unsigned char c) { return std::tolower(c); });
@@ -135,10 +151,10 @@ int main(int argc, char *argv[]) {
         ? vibetran::InpParser::parse_file(bdf_path)
         : vibetran::BdfParser::parse_file(bdf_path);
 
-    std::cout << "  Nodes:    " << model.nodes.size() << "\n";
-    std::cout << "  Elements: " << model.elements.size() << "\n";
-    std::cout << "  Materials:" << model.materials.size() << "\n";
-    std::cout << "  Subcases: " << model.analysis.subcases.size() << "\n";
+    spdlog::info("  Nodes:    {}", model.nodes.size());
+    spdlog::info("  Elements: {}", model.elements.size());
+    spdlog::info("  Materials:{}", model.materials.size());
+    spdlog::info("  Subcases: {}", model.analysis.subcases.size());
 
     // ── Backend selection ─────────────────────────────────────────────────
     std::unique_ptr<vibetran::SolverBackend> backend;
@@ -151,11 +167,11 @@ int main(int argc, char *argv[]) {
       if (cu.has_value()) {
         backend = std::make_unique<vibetran::CudaSolverBackend>(std::move(*cu));
       } else {
-        std::cerr << "CUDA backend requested but no CUDA device found\n";
+        spdlog::error("CUDA backend requested but no CUDA device found");
         return 1;
       }
 #else
-      std::cerr << "CUDA backend was not compiled into this build\n";
+      spdlog::error("CUDA backend was not compiled into this build");
       return 1;
 #endif
     } else if (backend_choice == BackendChoice::CudaPCG) {
@@ -166,11 +182,11 @@ int main(int argc, char *argv[]) {
         backend =
             std::make_unique<vibetran::CudaPCGSolverBackend>(std::move(*cu));
       } else {
-        std::cerr << "CUDA PCG backend requested but no CUDA device found\n";
+        spdlog::error("CUDA PCG backend requested but no CUDA device found");
         return 1;
       }
 #else
-      std::cerr << "CUDA PCG backend was not compiled into this build\n";
+      spdlog::error("CUDA PCG backend was not compiled into this build");
       return 1;
 #endif
     } else if (backend_choice == BackendChoice::Vulkan) {
@@ -180,11 +196,11 @@ int main(int argc, char *argv[]) {
         backend =
             std::make_unique<vibetran::VulkanSolverBackend>(std::move(*vk));
       } else {
-        std::cerr << "Vulkan backend requested but Vulkan is unavailable\n";
+        spdlog::error("Vulkan backend requested but Vulkan is unavailable");
         return 1;
       }
 #else
-      std::cerr << "Vulkan backend was not compiled into this build\n";
+      spdlog::error("Vulkan backend was not compiled into this build");
       return 1;
 #endif
     }
@@ -198,35 +214,35 @@ int main(int argc, char *argv[]) {
       // ── SOL 103 Modal Analysis ───────────────────────────────────────────
       auto eig_backend =
           std::make_unique<vibetran::SpectraEigensolverBackend>();
-      std::cout << "Solving with: " << eig_backend->name() << "\n";
+      spdlog::info("Solving with: {}", eig_backend->name());
       vibetran::ModalSolver modal_solver(std::move(eig_backend));
       vibetran::ModalSolverResults modal_results = modal_solver.solve(model);
 
       auto t1 = std::chrono::steady_clock::now();
       double elapsed = std::chrono::duration<double>(t1 - t0).count();
-      std::cout << "Solution complete in " << elapsed << " s\n";
+      spdlog::info("Solution complete in {:.3f} s", elapsed);
 
       vibetran::F06Writer::write_modal(modal_results, model, f06_path);
-      std::cout << "F06 written: " << f06_path << "\n";
+      spdlog::info("F06 written: {}", f06_path.string());
 
       vibetran::Op2Writer::write_modal(modal_results, model, op2_path);
-      std::cout << "OP2 written: " << op2_path << "\n";
+      spdlog::info("OP2 written: {}", op2_path.string());
 
     } else {
       // ── SOL 101 Linear Static ────────────────────────────────────────────
-      std::cout << "Solving with: " << backend->name() << "\n";
+      spdlog::info("Solving with: {}", backend->name());
       vibetran::LinearStaticSolver solver(std::move(backend));
       vibetran::SolverResults results = solver.solve(model);
 
       auto t1 = std::chrono::steady_clock::now();
       double elapsed = std::chrono::duration<double>(t1 - t0).count();
-      std::cout << "Solution complete in " << elapsed << " s\n";
+      spdlog::info("Solution complete in {:.3f} s", elapsed);
 
       vibetran::F06Writer::write(results, model, f06_path);
-      std::cout << "F06 written: " << f06_path << "\n";
+      spdlog::info("F06 written: {}", f06_path.string());
 
       vibetran::Op2Writer::write(results, model, op2_path);
-      std::cout << "OP2 written: " << op2_path << "\n";
+      spdlog::info("OP2 written: {}", op2_path.string());
 
       // ── Write CSV (if requested via --csv or PARAM,CSVOUT,YES) ──────────
       bool write_csv = force_csv;
@@ -238,19 +254,18 @@ int main(int argc, char *argv[]) {
       if (write_csv) {
         auto csv_stem = std::filesystem::path(f06_path).replace_extension("");
         vibetran::CsvWriter::write(results, model, csv_stem);
-        std::cout << "CSV written: " << csv_stem.string()
-                  << ".node.csv / .elem.csv\n";
+        spdlog::info("CSV written: {}.node.csv / .elem.csv", csv_stem.string());
       }
     }
 
   } catch (const vibetran::ParseError &e) {
-    std::cerr << "Parse error: " << e.what() << "\n";
+    spdlog::error("Parse error: {}", e.what());
     return 2;
   } catch (const vibetran::SolverError &e) {
-    std::cerr << "Solver error: " << e.what() << "\n";
+    spdlog::error("Solver error: {}", e.what());
     return 3;
   } catch (const std::exception &e) {
-    std::cerr << "Error: " << e.what() << "\n";
+    spdlog::error("Error: {}", e.what());
     return 4;
   }
   return 0;

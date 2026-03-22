@@ -29,6 +29,14 @@ public:
     /// Human-readable backend name (for logging)
     [[nodiscard]] virtual std::string_view name() const noexcept = 0;
 
+    /// Number of solver iterations from the most recent solve(), or -1 if the
+    /// backend is a direct solver (no iterations).
+    [[nodiscard]] virtual int last_iteration_count() const noexcept { return -1; }
+
+    /// Estimated relative residual from the most recent solve(), or -1.0 if
+    /// the backend is a direct solver or the estimate is unavailable.
+    [[nodiscard]] virtual double last_estimated_error() const noexcept { return -1.0; }
+
 };
 
 /// CPU backend using Eigen's sparse Cholesky.
@@ -74,10 +82,10 @@ public:
     }
 
     /// Number of CG iterations used in the most recent solve().
-    [[nodiscard]] int last_iteration_count() const noexcept { return last_iters_; }
+    [[nodiscard]] int last_iteration_count() const noexcept override { return last_iters_; }
 
     /// Estimated relative residual after the most recent solve().
-    [[nodiscard]] double last_estimated_error() const noexcept { return last_error_; }
+    [[nodiscard]] double last_estimated_error() const noexcept override { return last_error_; }
 
 private:
     double tolerance_;

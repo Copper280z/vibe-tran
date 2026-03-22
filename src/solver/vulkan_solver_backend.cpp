@@ -6,10 +6,9 @@
 #include "solver/solver_backend.hpp"
 #include "vulkan_pcg_internal.hpp"
 #include "vulkan_pipelines.hpp"
-#include "core/types.hpp"
+#include "core/exceptions.hpp"
 #include <chrono>
-#include <format>
-#include <iostream>
+#include <spdlog/spdlog.h>
 
 namespace vibetran {
 
@@ -40,7 +39,8 @@ std::string_view VulkanSolverBackend::name() const noexcept {
 
 bool   VulkanSolverBackend::last_solve_was_full_gpu() const noexcept { return last_full_gpu_; }
 int    VulkanSolverBackend::last_iteration_count()    const noexcept { return last_iters_; }
-double VulkanSolverBackend::last_residual_norm()       const noexcept { return last_residual_; }
+double VulkanSolverBackend::last_residual_norm()      const noexcept { return last_residual_; }
+double VulkanSolverBackend::last_estimated_error()    const noexcept { return last_residual_; }
 
 // ── VRAM checks ───────────────────────────────────────────────────────────────
 
@@ -117,16 +117,15 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
                 "Vulkan solver: zero diagonal at row {} — "
                 "stiffness matrix appears singular. Check boundary conditions.", row));
     }
-    std::clog << std::format("[vulkan] diagonal scan: {:.3f} ms\n", ms_since(t_diag));
+    spdlog::debug("[vulkan] diagonal scan: {:.3f} ms", ms_since(t_diag));
 
     // ── Path selection ────────────────────────────────────────────────────
 
     // Small problems: GPU kernel launch and PCIe readback overhead per iteration
     // dominates actual compute time. Fall back to the CPU direct solver.
     if (n < cfg_.min_dofs_for_gpu) {
-        std::clog << std::format(
-            "[vulkan] {} DOFs → CPU fallback (below min_dofs_for_gpu={})\n",
-            n, cfg_.min_dofs_for_gpu);
+        spdlog::debug("[vulkan] {} DOFs → CPU fallback (below min_dofs_for_gpu={})",
+                      n, cfg_.min_dofs_for_gpu);
         last_full_gpu_ = false;
         last_iters_    = 1;
         last_residual_ = 0.0;
@@ -143,7 +142,7 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
 
     auto t_pipelines = std::chrono::steady_clock::now();
     Pipelines* pl = ensure_pipelines(ctx_, pipelines_);
-    std::clog << std::format("[vulkan] pipeline init: {:.3f} ms\n", ms_since(t_pipelines));
+    spdlog::debug("[vulkan] pipeline init: {:.3f} ms", ms_since(t_pipelines));
 
     const size_t vram_total = ctx_.device_info().vram_bytes;
     const size_t available  = static_cast<size_t>(
@@ -153,9 +152,8 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
 
     if (!cfg_.force_tiled && fits_in_vram(K)) {
         const size_t needed = cfg_.use_double ? vram_needed_f64(K) : vram_needed_f32(K);
-        std::clog << std::format(
-            "[vulkan] {} DOFs → full-GPU {} ({} / {} VRAM)\n",
-            n, precision, mib_str(needed), mib_str(vram_total));
+        spdlog::debug("[vulkan] {} DOFs → full-GPU {} ({} / {} VRAM)",
+                      n, precision, mib_str(needed), mib_str(vram_total));
 
         last_full_gpu_ = true;
         auto t_solve = std::chrono::steady_clock::now();
@@ -171,8 +169,7 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
             } catch (const SolverError& e) {
                 if (ctx_.device_info().supports_float64 &&
                     vram_needed_f64(K) <= available) {
-                    std::clog << std::format(
-                        "[vulkan] float32 failed ({}), retrying with float64\n", e.what());
+                    spdlog::warn("[vulkan] float32 failed ({}), retrying with float64", e.what());
                     result = solve_full_gpu_double(ctx_, *pl, K, F, cfg_, last_iters_, last_residual_);
                 } else {
                     throw;
@@ -180,9 +177,8 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
             }
         }
 
-        std::clog << std::format(
-            "[vulkan] converged: {} iterations, residual = {:.2e}, solve = {:.3f} ms\n",
-            last_iters_, last_residual_, ms_since(t_solve));
+        spdlog::info("[vulkan] converged: {} iterations, residual = {:.2e}, solve = {:.3f} ms",
+                     last_iters_, last_residual_, ms_since(t_solve));
         return result;
     } else {
         if (cfg_.use_double)
@@ -191,18 +187,16 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
                 "for a full-GPU float64 solve. Use --cpu.",
                 mib_str(vram_needed_f64(K)), mib_str(available)));
 
-        std::clog << std::format(
-            "[vulkan] {} DOFs → tiled float32 (matrix {} exceeds VRAM budget {})\n",
-            n, mib_str(vram_needed_f32(K)), mib_str(available));
+        spdlog::debug("[vulkan] {} DOFs → tiled float32 (matrix {} exceeds VRAM budget {})",
+                      n, mib_str(vram_needed_f32(K)), mib_str(available));
 
         last_full_gpu_ = false;
         auto t_solve = std::chrono::steady_clock::now();
         auto result = solve_tiled(ctx_, *pl, K, F, cfg_,
                                    static_cast<uint64_t>(available),
                                    last_iters_, last_residual_);
-        std::clog << std::format(
-            "[vulkan] converged: {} iterations, residual = {:.2e}, solve = {:.3f} ms\n",
-            last_iters_, last_residual_, ms_since(t_solve));
+        spdlog::info("[vulkan] converged: {} iterations, residual = {:.2e}, solve = {:.3f} ms",
+                     last_iters_, last_residual_, ms_since(t_solve));
         return result;
     }
 }

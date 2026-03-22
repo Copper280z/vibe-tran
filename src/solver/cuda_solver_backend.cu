@@ -30,12 +30,12 @@
 #include "solver/cuda_solver_backend.hpp"
 // Include exceptions.hpp directly (not types.hpp) to avoid pulling in <format>.
 #include "core/exceptions.hpp"
+#include "core/logger.hpp"
 
 #include <cuda_runtime.h>
 #include <cudss.h>
 
 #include <cmath>
-#include <iostream>
 #include <string>
 #include <vector>
 
@@ -316,9 +316,9 @@ static bool solve_cudss(cudssHandle_t handle, const std::string &device_name,
       cudssDataGet(handle, solver_data.data,
                    CUDSS_DATA_HYBRID_DEVICE_MEMORY_MIN, &dev_mem_min,
                    sizeof(dev_mem_min), nullptr);
-      std::clog
-          << "[cuda] cuDSS hybrid mode active: min device memory required="
-          << dev_mem_min / kMiB << " MiB\n";
+      vibetran::log_debug(
+          "[cuda] cuDSS hybrid mode active: min device memory required=" +
+          std::to_string(dev_mem_min / static_cast<int64_t>(kMiB)) + " MiB");
     }
     return s;
   };
@@ -333,9 +333,9 @@ static bool solve_cudss(cudssHandle_t handle, const std::string &device_name,
   st = cudss_execute(handle, CUDSS_PHASE_ANALYSIS, cfg.cfg, solver_data.data,
                      A_mat.mat, x_mat.mat, b_mat.mat);
   if (st == CUDSS_STATUS_ALLOC_FAILED) {
-    std::clog << "[cuda] cuDSS (" << label
-              << "): analysis alloc failed -- "
-                 "enabling hybrid mode and retrying\n";
+    vibetran::log_debug("[cuda] cuDSS (" + label +
+                        "): analysis alloc failed -- "
+                        "enabling hybrid mode and retrying");
     st = enable_hybrid_and_reanalyse();
     if (st != CUDSS_STATUS_SUCCESS)
       throw SolverError(
@@ -352,19 +352,23 @@ static bool solve_cudss(cudssHandle_t handle, const std::string &device_name,
     int64_t mem_est[16] = {0};
     cudssDataGet(handle, solver_data.data, CUDSS_DATA_MEMORY_ESTIMATES,
                  &mem_est, sizeof(mem_est), nullptr);
-    std::clog << "[cuda] cuDSS memory estimates (" << label << "):"
-              << " device stable=" << mem_est[0] / kMiB << " MiB"
-              << " peak=" << mem_est[1] / kMiB << " MiB"
-              << ", host stable=" << mem_est[2] / kMiB << " MiB"
-              << " peak=" << mem_est[3] / kMiB << " MiB\n";
+    vibetran::log_debug(
+        "[cuda] cuDSS memory estimates (" + label + "):"
+        " device stable=" + std::to_string(mem_est[0] / static_cast<int64_t>(kMiB)) + " MiB"
+        " peak=" + std::to_string(mem_est[1] / static_cast<int64_t>(kMiB)) + " MiB"
+        ", host stable=" + std::to_string(mem_est[2] / static_cast<int64_t>(kMiB)) + " MiB"
+        " peak=" + std::to_string(mem_est[3] / static_cast<int64_t>(kMiB)) + " MiB");
 
     std::size_t free_bytes = 0, total_bytes = 0;
     cudaMemGetInfo(&free_bytes, &total_bytes);
     const int64_t threshold = static_cast<int64_t>(free_bytes * 0.85);
     if (mem_est[1] > threshold) {
-      std::clog << "[cuda] cuDSS (" << label << "): device peak estimate "
-                << mem_est[1] / kMiB << " MiB exceeds 85% of free memory ("
-                << free_bytes / kMiB << " MiB) -- enabling hybrid mode\n";
+      vibetran::log_debug(
+          "[cuda] cuDSS (" + label + "): device peak estimate " +
+          std::to_string(mem_est[1] / static_cast<int64_t>(kMiB)) +
+          " MiB exceeds 85% of free memory (" +
+          std::to_string(free_bytes / (1024UL * 1024UL)) +
+          " MiB) -- enabling hybrid mode");
       st = enable_hybrid_and_reanalyse();
       if (st != CUDSS_STATUS_SUCCESS)
         throw SolverError("CUDA solver: cuDSS analysis (hybrid) failed (" +
@@ -385,9 +389,10 @@ static bool solve_cudss(cudssHandle_t handle, const std::string &device_name,
   // Non-success for SPD factorisation likely means matrix is not positive
   // definite; return false so the caller can retry with GENERAL type.
   if (st != CUDSS_STATUS_SUCCESS) {
-    std::clog << "[cuda] cuDSS " << label
-              << " factorisation failed, status=" << static_cast<int>(st)
-              << " -- will retry with LU\n";
+    vibetran::log_debug("[cuda] cuDSS " + label +
+                        " factorisation failed, status=" +
+                        std::to_string(static_cast<int>(st)) +
+                        " -- will retry with LU");
     return false;
   }
 
@@ -426,10 +431,11 @@ solve_single_precision(cudssHandle_t handle, const std::string &device_name,
                             + (std::size_t)n * sizeof(float);    // d_u
   std::size_t free_bytes = 0, total_bytes = 0;
   cudaMemGetInfo(&free_bytes, &total_bytes);
-  std::clog << "[cuda] single-precision device memory: allocating "
-            << alloc_bytes / (1024.0 * 1024.0) << " MiB"
-            << " (free=" << free_bytes / (1024.0 * 1024.0) << " MiB"
-            << ", total=" << total_bytes / (1024.0 * 1024.0) << " MiB)\n";
+  vibetran::log_debug(
+      "[cuda] single-precision device memory: allocating " +
+      std::to_string(alloc_bytes / (1024UL * 1024UL)) + " MiB"
+      " (free=" + std::to_string(free_bytes / (1024UL * 1024UL)) + " MiB"
+      ", total=" + std::to_string(total_bytes / (1024UL * 1024UL)) + " MiB)");
 
   DeviceBuffer<float> d_values(nnz);
   DeviceBuffer<int> d_row_ptr(n + 1);
@@ -446,7 +452,7 @@ solve_single_precision(cudssHandle_t handle, const std::string &device_name,
                                d_col_ind, d_F, d_u, CUDSS_MTYPE_SPD, CUDA_R_32F,
                                "SPD/float");
   if (!ok) {
-    std::clog << "[cuda] single-precision SPD failed -- retrying with LU\n";
+    vibetran::log_debug("[cuda] single-precision SPD failed -- retrying with LU");
     ok = solve_cudss<float>(handle, device_name, n, nnz, d_values, d_row_ptr,
                             d_col_ind, d_F, d_u, CUDSS_MTYPE_GENERAL,
                             CUDA_R_32F, "LU/float");
@@ -463,8 +469,9 @@ solve_single_precision(cudssHandle_t handle, const std::string &device_name,
   for (int i = 0; i < n; ++i)
     u[i] = static_cast<double>(u_f[i]);
 
-  std::clog << "[cuda] single-precision solve: n=" << n << ", nnz=" << nnz
-            << ", device='" << device_name << "'\n";
+  vibetran::log_info("[cuda] single-precision solve: n=" + std::to_string(n) +
+                     ", nnz=" + std::to_string(nnz) +
+                     ", device='" + device_name + "'");
   return u;
 }
 
@@ -499,9 +506,10 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
                        / (1024.0 * 1024.0);
     std::size_t free_bytes = 0, total_bytes = 0;
     cudaMemGetInfo(&free_bytes, &total_bytes);
-    std::clog << "[cuda] device memory: allocating " << alloc_mib << " MiB"
-              << " (free=" << free_bytes / (1024.0 * 1024.0) << " MiB"
-              << ", total=" << total_bytes / (1024.0 * 1024.0) << " MiB)\n";
+    vibetran::log_debug(
+        "[cuda] device memory: allocating " + std::to_string(alloc_mib) + " MiB"
+        " (free=" + std::to_string(free_bytes / (1024UL * 1024UL)) + " MiB"
+        ", total=" + std::to_string(total_bytes / (1024UL * 1024UL)) + " MiB)");
   }
 
   DeviceBuffer<double> d_values(nnz);
@@ -525,16 +533,17 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
     d_u.download(u.data(), n);
     double rel_res = relative_residual(K, u, F);
     if (!std::isfinite(rel_res) || rel_res > 1e-2) {
-      std::clog << "[cuda] Cholesky residual " << rel_res
-                << " -- retrying with LU\n";
+      vibetran::log_debug("[cuda] Cholesky residual " + std::to_string(rel_res) +
+                          " -- retrying with LU");
       chol_ok = false;
     }
   }
 
   if (chol_ok) {
     last_cholesky_ = true;
-    std::clog << "[cuda] Cholesky solve: n=" << n << ", nnz=" << nnz
-              << ", device='" << ctx_->device_name << "'\n";
+    vibetran::log_info("[cuda] Cholesky solve: n=" + std::to_string(n) +
+                       ", nnz=" + std::to_string(nnz) +
+                       ", device='" + ctx_->device_name + "'");
     return u;
   }
 
@@ -558,8 +567,9 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
         "Check boundary conditions (SPCs)");
 
   last_cholesky_ = false;
-  std::clog << "[cuda] LU solve: n=" << n << ", nnz=" << nnz << ", device='"
-            << ctx_->device_name << "'\n";
+  vibetran::log_info("[cuda] LU solve: n=" + std::to_string(n) +
+                     ", nnz=" + std::to_string(nnz) +
+                     ", device='" + ctx_->device_name + "'");
   return u;
 }
 

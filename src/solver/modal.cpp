@@ -3,6 +3,7 @@
 
 #include "solver/modal.hpp"
 #include "core/coord_sys.hpp"
+#include "core/logger.hpp"
 #include "core/mpc_handler.hpp"
 #include "elements/element_factory.hpp"
 #include "elements/rbe_constraints.hpp"
@@ -11,9 +12,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <format>
-#include <iostream>
 #include <numbers>
+#include <spdlog/spdlog.h>
 
 namespace vibetran {
 
@@ -53,16 +53,16 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
     // ── 1. DOF map ────────────────────────────────────────────────────────────
     DofMap dof_map = build_dof_map(model, sc);
     const auto t1 = Clock::now();
-    std::clog << std::format("[modal sc {}] build_dof_map: {:.3f} ms  ({} free DOFs)\n",
-                             sc.id, Ms(t1 - t0).count(), dof_map.num_free_dofs());
+    spdlog::debug("[modal sc {}] build_dof_map: {:.3f} ms  ({} free DOFs)",
+                  sc.id, Ms(t1 - t0).count(), dof_map.num_free_dofs());
 
     // ── 2. MPC system ─────────────────────────────────────────────────────────
     MpcHandler mpc_handler;
     build_mpc_system(model, sc, dof_map, mpc_handler);
     const int n = mpc_handler.num_reduced();
     const auto t2 = Clock::now();
-    std::clog << std::format("[modal sc {}] build_mpc_system: {:.3f} ms  ({} reduced DOFs)\n",
-                             sc.id, Ms(t2 - t1).count(), n);
+    spdlog::debug("[modal sc {}] build_mpc_system: {:.3f} ms  ({} reduced DOFs)",
+                  sc.id, Ms(t2 - t1).count(), n);
 
     // ── 3. Assemble K and M ───────────────────────────────────────────────────
     SparseMatrixBuilder K_builder(n);
@@ -71,8 +71,7 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
     assemble_stiffness(model, mpc_handler, K_builder);
     assemble_mass(model, mpc_handler, M_builder, wtmass);
     const auto t3 = Clock::now();
-    std::clog << std::format("[modal sc {}] assemble K+M: {:.3f} ms\n",
-                             sc.id, Ms(t3 - t2).count());
+    spdlog::debug("[modal sc {}] assemble K+M: {:.3f} ms", sc.id, Ms(t3 - t2).count());
 
     // ── 4. Convert to Eigen::SparseMatrix ─────────────────────────────────────
     auto to_eigen = [](const SparseMatrixBuilder::CsrData& csr)
@@ -94,10 +93,8 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
     Eigen::SparseMatrix<double> K_eigen = to_eigen(K_csr);
     Eigen::SparseMatrix<double> M_eigen = to_eigen(M_csr);
     const auto t4 = Clock::now();
-    std::clog << std::format("[modal sc {}] build sparse matrices: {:.3f} ms  "
-                             "(K nnz={}, M nnz={})\n",
-                             sc.id, Ms(t4 - t3).count(),
-                             K_csr.nnz, M_csr.nnz);
+    spdlog::debug("[modal sc {}] build sparse matrices: {:.3f} ms  (K nnz={}, M nnz={})",
+                  sc.id, Ms(t4 - t3).count(), K_csr.nnz, M_csr.nnz);
 
     // ── 5. Eigensolver ────────────────────────────────────────────────────────
     // σ = (2π·V1)² if V1 > 0, else -1.0 (shifts K+M, making it positive def.)
@@ -105,14 +102,32 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
         ? std::pow(2.0 * std::numbers::pi * eigrl.v1, 2.0)
         : -1.0;
 
-    std::clog << std::format("[modal sc {}] launching {} (nd={}, sigma={:.6g})\n",
-                             sc.id, backend_->name(), eigrl.nd, sigma);
+    spdlog::debug("[modal sc {}] launching {} (nd={}, sigma={:.6g})",
+                  sc.id, backend_->name(), eigrl.nd, sigma);
 
     std::vector<EigenPair> pairs = backend_->solve(K_eigen, M_eigen,
                                                     eigrl.nd, sigma);
     const auto t5 = Clock::now();
-    std::clog << std::format("[modal sc {}] eigensolver: {:.3f} ms  ({} modes)\n",
-                             sc.id, Ms(t5 - t4).count(), pairs.size());
+    spdlog::debug("[modal sc {}] eigensolver: {:.3f} ms  ({} modes)",
+                  sc.id, Ms(t5 - t4).count(), pairs.size());
+
+    // Log per-mode residual ||K*φ - λM*φ|| / ||K*φ||.
+    // Near-zero rigid-body modes (λ ≈ 0) produce ||K*φ|| ≈ 0; the residual is
+    // reported as the absolute norm ||K*φ - λM*φ|| for those modes instead.
+    for (int i = 0; i < static_cast<int>(pairs.size()); ++i) {
+        const Eigen::VectorXd Kphi = K_eigen * pairs[i].eigenvector;
+        const Eigen::VectorXd res  = Kphi - pairs[i].eigenvalue *
+                                            (M_eigen * pairs[i].eigenvector);
+        const double kphi_norm = Kphi.norm();
+        const double rel_res   = (kphi_norm > 1e-300)
+            ? res.norm() / kphi_norm : res.norm();
+        const double freq_hz =
+            std::sqrt(std::max(pairs[i].eigenvalue, 0.0)) /
+            (2.0 * std::numbers::pi);
+        spdlog::info("[modal sc {}] mode {} ({:.4g} Hz): "
+                     "residual ||K*φ - λM*φ|| / ||K*φ|| = {:.3e}",
+                     sc.id, i + 1, freq_hz, rel_res);
+    }
 
     // ── 6. Build ModalSubCaseResults ──────────────────────────────────────────
     ModalSubCaseResults msc;
@@ -152,8 +167,7 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
     }
 
     const auto t6 = Clock::now();
-    std::clog << std::format("[modal sc {}] total: {:.3f} ms\n",
-                             sc.id, Ms(t6 - t0).count());
+    spdlog::debug("[modal sc {}] total: {:.3f} ms", sc.id, Ms(t6 - t0).count());
 
     return msc;
 }

@@ -59,6 +59,9 @@ else
   message('Using system Eigen3')
 endif
 
+# ── spdlog structured logging ─────────────────────────────────────────────────
+spdlog_dep = dependency('spdlog', required : true)
+
 # ── Spectra eigensolver (header-only, bundled) ────────────────────────────────
 spectra_dep = dependency('spectra', required : false)
 if not spectra_dep.found()
@@ -314,6 +317,7 @@ endif
 solver_sources = files(
   # Vulkan sources are appended conditionally below
   # Core
+  'src/core/logger.cpp',
   'src/core/model.cpp',
   'src/core/dof_map.cpp',
   'src/core/sparse_matrix.cpp',
@@ -349,7 +353,7 @@ src_inc = include_directories('src/solver') # for internal vulkan_pipelines.hpp
 # ── Library (solver logic, no main) ──────────────────────────────────────────
 tbb_args = tbb_dep.found() ? ['-DHAVE_TBB=1'] : []
 
-solver_lib_deps = [eigen_dep, spectra_dep, thread_dep]
+solver_lib_deps = [eigen_dep, spectra_dep, spdlog_dep, thread_dep]
 if tbb_dep.found()
   solver_lib_deps += tbb_dep
 endif

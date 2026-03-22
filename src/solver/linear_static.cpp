@@ -4,6 +4,7 @@
 
 #include "solver/linear_static.hpp"
 #include "core/coord_sys.hpp"
+#include "core/logger.hpp"
 #include "core/mpc_handler.hpp"
 #include "elements/cquad4.hpp"
 #include "elements/ctria3.hpp"
@@ -13,9 +14,9 @@
 #include <Eigen/Dense>
 #include <algorithm>
 #include <chrono>
-#include <format>
-#include <iostream>
+#include <cmath>
 #include <numbers>
+#include <spdlog/spdlog.h>
 
 namespace vibetran {
 
@@ -41,16 +42,16 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   // 1. Build DOF map and apply SPC boundary conditions
   DofMap dof_map = build_dof_map(model, sc);
   const auto t1 = Clock::now();
-  std::clog << std::format("[subcase {}] build_dof_map: {:.3f} ms  ({} free DOFs)\n",
-                           sc.id, Ms(t1 - t0).count(), dof_map.num_free_dofs());
+  spdlog::debug("[subcase {}] build_dof_map: {:.3f} ms  ({} free DOFs)",
+                sc.id, Ms(t1 - t0).count(), dof_map.num_free_dofs());
 
   // 2. Build MPC handler (CD-frame SPCs + explicit MPCs + RBE2/RBE3)
   MpcHandler mpc_handler;
   build_mpc_system(model, sc, dof_map, mpc_handler);
   const int n = mpc_handler.num_reduced();
   const auto t2 = Clock::now();
-  std::clog << std::format("[subcase {}] build_mpc_system: {:.3f} ms  ({} reduced DOFs)\n",
-                           sc.id, Ms(t2 - t1).count(), n);
+  spdlog::debug("[subcase {}] build_mpc_system: {:.3f} ms  ({} reduced DOFs)",
+                sc.id, Ms(t2 - t1).count(), n);
 
   // 3. Assemble global K and F using pre-MPC dof_map
   SparseMatrixBuilder K_builder(n);
@@ -58,29 +59,58 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
 
   assemble(model, sc, mpc_handler, K_builder, F);
   const auto t3 = Clock::now();
-  std::clog << std::format("[subcase {}] assemble K: {:.3f} ms\n",
-                           sc.id, Ms(t3 - t2).count());
+  spdlog::debug("[subcase {}] assemble K: {:.3f} ms", sc.id, Ms(t3 - t2).count());
 
   apply_point_loads(model, sc, mpc_handler, F);
   const auto t4 = Clock::now();
-  std::clog << std::format("[subcase {}] apply_point_loads: {:.3f} ms\n",
-                           sc.id, Ms(t4 - t3).count());
+  spdlog::debug("[subcase {}] apply_point_loads: {:.3f} ms", sc.id, Ms(t4 - t3).count());
 
   apply_thermal_loads(model, sc, mpc_handler, K_builder, F);
   const auto t5 = Clock::now();
-  std::clog << std::format("[subcase {}] apply_thermal_loads: {:.3f} ms\n",
-                           sc.id, Ms(t5 - t4).count());
+  spdlog::debug("[subcase {}] apply_thermal_loads: {:.3f} ms", sc.id, Ms(t5 - t4).count());
 
   // 4. Solve
   auto csr = K_builder.build_csr();
   const auto t5b = Clock::now();
-  std::clog << std::format("[subcase {}] build_csr: {:.3f} ms  ({} nnz)\n",
-                           sc.id, Ms(t5b - t5).count(), csr.nnz);
+  spdlog::debug("[subcase {}] build_csr: {:.3f} ms  ({} nnz)", sc.id, Ms(t5b - t5).count(), csr.nnz);
 
   std::vector<double> u_reduced = backend_->solve(csr, F);
   const auto t6 = Clock::now();
-  std::clog << std::format("[subcase {}] linear solve: {:.3f} ms\n",
-                           sc.id, Ms(t6 - t5b).count());
+  spdlog::debug("[subcase {}] linear solve: {:.3f} ms", sc.id, Ms(t6 - t5b).count());
+
+  // Log iterative solver convergence info when available (PCG backends).
+  {
+    int iters = backend_->last_iteration_count();
+    if (iters >= 0)
+      spdlog::debug("[subcase {}] PCG: {} iterations, estimated residual = {:.3e}",
+                    sc.id, iters, backend_->last_estimated_error());
+  }
+
+  // Compute the true relative residual r = K*u - F in the reduced system.
+  // For direct solvers this should be near machine epsilon; for PCG backends
+  // it reflects the iterative convergence quality.
+  {
+    double r_norm_sq = 0.0;
+    double f_norm_sq = 0.0;
+    const auto& rp = csr.row_ptr;
+    const auto& ci = csr.col_ind;
+    const auto& cv = csr.values;
+    for (int row = 0; row < n; ++row) {
+      double ku = 0.0;
+      for (int idx = rp[static_cast<size_t>(row)];
+           idx < rp[static_cast<size_t>(row + 1)]; ++idx)
+        ku += cv[static_cast<size_t>(idx)] *
+              u_reduced[static_cast<size_t>(ci[static_cast<size_t>(idx)])];
+      const double ri = ku - F[static_cast<size_t>(row)];
+      r_norm_sq += ri * ri;
+      f_norm_sq += F[static_cast<size_t>(row)] * F[static_cast<size_t>(row)];
+    }
+    const double rel_res = (f_norm_sq > 1e-300)
+        ? std::sqrt(r_norm_sq / f_norm_sq)
+        : std::sqrt(r_norm_sq);
+    spdlog::info("[subcase {}] relative residual ||K*u - F|| / ||F|| = {:.3e}",
+                 sc.id, rel_res);
+  }
 
   // 5. Recover full displacement vector (free + dep DOFs)
   int n_full = mpc_handler.full_dof_map().num_free_dofs();
@@ -92,10 +122,8 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
                                          mpc_handler.full_dof_map(),
                                          u_free);
   const auto t7 = Clock::now();
-  std::clog << std::format("[subcase {}] recover_results: {:.3f} ms\n",
-                           sc.id, Ms(t7 - t6).count());
-  std::clog << std::format("[subcase {}] total: {:.3f} ms\n",
-                           sc.id, Ms(t7 - t0).count());
+  spdlog::debug("[subcase {}] recover_results: {:.3f} ms", sc.id, Ms(t7 - t6).count());
+  spdlog::debug("[subcase {}] total: {:.3f} ms", sc.id, Ms(t7 - t0).count());
 
   return result;
 }
