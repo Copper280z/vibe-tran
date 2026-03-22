@@ -652,3 +652,115 @@ ENDDATA
     Model m = BdfParser::parse_string(bdf);
     EXPECT_EQ(m.params.find("CSVOUT"), m.params.end());
 }
+
+// ── BdfParser: SOL 103 case-control EIGENVECTOR / DISPLACEMENT flags ──────────
+
+TEST(BdfParser, Sol103EigenvectorPrintSetsEigvecPrint) {
+    const std::string bdf = R"(
+SOL 103
+CEND
+SUBCASE 1
+  METHOD = 1
+  EIGENVECTOR(PRINT) = ALL
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_TRUE(sc.eigvec_print);
+    EXPECT_FALSE(sc.eigvec_plot);
+}
+
+TEST(BdfParser, Sol103EigenvectorPlotSetsEigvecPlot) {
+    const std::string bdf = R"(
+SOL 103
+CEND
+SUBCASE 1
+  METHOD = 1
+  EIGENVECTOR(PLOT) = ALL
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_FALSE(sc.eigvec_print);
+    EXPECT_TRUE(sc.eigvec_plot);
+}
+
+TEST(BdfParser, Sol103EigenvectorNoModifierSetsPrintOnly) {
+    // EIGENVECTOR = ALL with no modifier is equivalent to PRINT
+    const std::string bdf = R"(
+SOL 103
+CEND
+SUBCASE 1
+  METHOD = 1
+  EIGENVECTOR = ALL
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_TRUE(sc.eigvec_print);
+    EXPECT_FALSE(sc.eigvec_plot);
+}
+
+TEST(BdfParser, Sol103DisplacementPlotSetsDispPlot) {
+    // DISPLACEMENT(PLOT)=ALL in SOL 103 sets disp_plot; the modal solver
+    // maps disp_plot → eigvec_print (F06) and eigvec_plot (OP2).
+    const std::string bdf = R"(
+SOL 103
+CEND
+SUBCASE 1
+  METHOD = 1
+  DISPLACEMENT(PLOT) = ALL
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_FALSE(sc.disp_print);
+    EXPECT_TRUE(sc.disp_plot);
+    // eigvec flags remain false at parse time; mapping happens in ModalSolver
+    EXPECT_FALSE(sc.eigvec_print);
+    EXPECT_FALSE(sc.eigvec_plot);
+}
+
+TEST(BdfParser, Sol103DisplacementPrintSetsDispPrint) {
+    const std::string bdf = R"(
+SOL 103
+CEND
+SUBCASE 1
+  METHOD = 1
+  DISPLACEMENT(PRINT) = ALL
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_TRUE(sc.disp_print);
+    EXPECT_FALSE(sc.disp_plot);
+}
+
+TEST(BdfParser, Sol103EigrlMethodParsed) {
+    const std::string bdf = R"(
+SOL 103
+CEND
+SUBCASE 1
+  METHOD = 5
+  EIGENVECTOR = ALL
+BEGIN BULK
+EIGRL,5,0.0,,10
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    EXPECT_EQ(m.analysis.subcases[0].eigrl_id, 5);
+    ASSERT_TRUE(m.eigrls.count(5));
+    EXPECT_EQ(m.eigrls.at(5).nd, 10);
+    EXPECT_DOUBLE_EQ(m.eigrls.at(5).v1, 0.0);
+}

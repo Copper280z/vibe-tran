@@ -1609,3 +1609,70 @@ TEST(Modal, ModesAscendingFrequency) {
             << "Modes not in ascending order at i=" << i;
     }
 }
+
+// ── Test 5: DISPLACEMENT(PLOT) triggers eigenvector output in F06 ─────────────
+// In SOL 103, DISPLACEMENT is an alias for EIGENVECTOR.
+// DISPLACEMENT(PLOT)=ALL must produce eigenvector tables in F06 (text output)
+// AND mark the subcase for OP2 binary output.
+
+TEST(Modal, DisplacementPlotProducesF06EigenvectorOutput) {
+    // Minimal 4-element CHEXA8 cantilever with DISPLACEMENT(PLOT) instead of
+    // EIGENVECTOR(PRINT) — F06 output must contain the EIGENVECTOR block.
+    const double L = 1.0, a = 0.01;
+    const double E = 200e9, rho = 7850.0;
+
+    std::ostringstream bdf;
+    bdf << "SOL 103\nCEND\n";
+    bdf << "SUBCASE 1\n  SPC = 1\n  METHOD = 1\n  DISPLACEMENT(PLOT) = ALL\n";
+    bdf << "BEGIN BULK\n";
+    bdf << "MAT1,1," << E << ",,," << rho << "\n";
+    bdf << "PSOLID,1,1\n";
+    bdf << "EIGRL,1,0.0,,2\n";
+
+    const int NX=4, NY=1, NZ=1;
+    auto nid = [&](int ix, int iy, int iz) {
+        return 1 + ix + (NX+1)*(iy + (NY+1)*iz);
+    };
+    for (int iz = 0; iz <= NZ; ++iz)
+        for (int iy = 0; iy <= NY; ++iy)
+            for (int ix = 0; ix <= NX; ++ix)
+                bdf << "GRID," << nid(ix,iy,iz) << ",,"
+                    << ix*L/NX << "," << iy*a/NY << "," << iz*a/NZ << "\n";
+
+    int eid = 1;
+    for (int iz = 0; iz < NZ; ++iz)
+        for (int iy = 0; iy < NY; ++iy)
+            for (int ix = 0; ix < NX; ++ix)
+                bdf << "CHEXA," << eid++ << ",1,"
+                    << nid(ix,iy,iz) << "," << nid(ix+1,iy,iz) << ","
+                    << nid(ix+1,iy+1,iz) << "," << nid(ix,iy+1,iz) << ","
+                    << nid(ix,iy,iz+1) << "," << nid(ix+1,iy,iz+1) << ","
+                    << nid(ix+1,iy+1,iz+1) << "," << nid(ix,iy+1,iz+1) << "\n";
+
+    bdf << "SPC1,1,123456";
+    for (int iz = 0; iz <= NZ; ++iz)
+        for (int iy = 0; iy <= NY; ++iy)
+            bdf << "," << nid(0,iy,iz);
+    bdf << "\nENDDATA\n";
+
+    Model model = BdfParser::parse_string(bdf.str());
+    ModalSolver solver(std::make_unique<SpectraEigensolverBackend>());
+    ModalSolverResults res = solver.solve(model);
+
+    ASSERT_FALSE(res.subcases.empty());
+    const auto& msc = res.subcases[0];
+
+    // Modal solver must have mapped disp_plot → eigvec_print and eigvec_plot
+    EXPECT_TRUE(msc.eigvec_print) << "DISPLACEMENT(PLOT) must set eigvec_print for F06 output";
+    EXPECT_TRUE(msc.eigvec_plot)  << "DISPLACEMENT(PLOT) must set eigvec_plot for OP2 output";
+
+    // Writing F06 to a string stream must include the EIGENVECTOR block
+    std::ostringstream f06;
+    F06Writer::write_modal(res, model, f06);
+    const std::string f06_text = f06.str();
+
+    EXPECT_NE(f06_text.find("E I G E N V E C T O R"), std::string::npos)
+        << "F06 must contain eigenvector table when DISPLACEMENT(PLOT)=ALL";
+    EXPECT_NE(f06_text.find("R E A L   E I G E N V A L U E S"), std::string::npos)
+        << "F06 must contain eigenvalue table";
+}

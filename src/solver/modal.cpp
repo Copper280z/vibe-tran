@@ -118,8 +118,11 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
     ModalSubCaseResults msc;
     msc.id          = sc.id;
     msc.label       = sc.label;
-    msc.eigvec_print = sc.eigvec_print;
-    msc.eigvec_plot  = sc.eigvec_plot;
+    // In SOL 103, DISPLACEMENT is an alias for EIGENVECTOR.
+    // Map both disp_print and disp_plot → eigvec_print (F06 text output).
+    // Map disp_plot → eigvec_plot (OP2 binary output).
+    msc.eigvec_print = sc.eigvec_print || sc.disp_print || sc.disp_plot;
+    msc.eigvec_plot  = sc.eigvec_plot  || sc.disp_plot;
 
     for (int i = 0; i < static_cast<int>(pairs.size()); ++i) {
         const EigenPair& ep = pairs[i];
