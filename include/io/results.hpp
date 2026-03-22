@@ -125,6 +125,7 @@ private:
   static void write_eigenvalue_table(const ModalSubCaseResults &msc,
                                      std::ostream &out);
   static void write_eigenvector_table(const ModeResult &mode,
+                                      const std::string &label,
                                       std::ostream &out);
 };
 
@@ -138,7 +139,7 @@ public:
                     const std::filesystem::path &path);
 
   /// Write modal results to an OP2 binary file.
-  /// Writes LAMA (eigenvalue table) and OUGV1 (eigenvectors, if eigvec_plot).
+  /// Writes OUGV1 (eigenvectors, one table per mode, if eigvec_plot).
   static void write_modal(const ModalSolverResults &results, const Model &model,
                           const std::filesystem::path &path);
 };

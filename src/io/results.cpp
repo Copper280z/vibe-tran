@@ -296,7 +296,7 @@ void F06Writer::write_modal(const ModalSolverResults& results, const Model& /*mo
 
         if (do_vec)
             for (const auto& mode : msc.modes)
-                write_eigenvector_table(mode, out);
+                write_eigenvector_table(mode, msc.label, out);
     }
     out << "\n\n                     * * * END OF JOB * * *\n\n";
 }
@@ -317,33 +317,48 @@ void F06Writer::write_eigenvalue_table(const ModalSubCaseResults& msc,
                                        std::ostream& out) {
     if (msc.modes.empty()) return;
 
-    out << "\n                                              R E A L   E I G E N V A L U E S\n\n";
-    out << "   MODE    EXTRACTION      EIGENVALUE            RADIANS             CYCLES           GENERALIZED       GENERALIZED\n";
-    out << "    NO.       ORDER                                                                       MASS            STIFFNESS\n";
+    out << "\n                                            R E A L   E I G E N V A L U E S\n";
+    out << "   MODE  EXTRACTION      EIGENVALUE           RADIANS              CYCLES            GENERALIZED         GENERALIZED        \n";
+    out << "  NUMBER   ORDER                                                                        MASS              STIFFNESS\n\n";
 
     for (const auto& mode : msc.modes) {
         double gen_stiff = mode.eigenvalue * mode.gen_mass;
-        out << std::setw(7)  << mode.mode_number;
-        out << std::setw(12) << mode.mode_number; // extraction order = mode number
-        out << std::setw(20) << std::setprecision(8) << std::scientific << mode.eigenvalue;
-        out << std::setw(20) << std::setprecision(8) << std::scientific << mode.radians_per_sec;
-        out << std::setw(20) << std::setprecision(8) << std::scientific << mode.cycles_per_sec;
-        out << std::setw(16) << std::setprecision(6) << std::scientific << mode.gen_mass;
-        out << std::setw(16) << std::setprecision(6) << std::scientific << gen_stiff;
+        out << std::setw(9)  << mode.mode_number;
+        out << std::setw(8)  << mode.mode_number; // extraction order = mode number
+        out << std::uppercase;
+        out << std::setw(20) << std::setprecision(6) << std::scientific << mode.eigenvalue;
+        out << std::setw(20) << std::setprecision(6) << std::scientific << mode.radians_per_sec;
+        out << std::setw(20) << std::setprecision(6) << std::scientific << mode.cycles_per_sec;
+        out << std::setw(20) << std::setprecision(6) << std::scientific << mode.gen_mass;
+        out << std::setw(20) << std::setprecision(6) << std::scientific << gen_stiff;
+        out << std::nouppercase;
         out << "\n";
     }
 }
 
-void F06Writer::write_eigenvector_table(const ModeResult& mode, std::ostream& out) {
-    out << "\n                                                 E I G E N V E C T O R\n\n";
-    out << std::format("                               (MODE NUMBER {}  FREQUENCY = {:.6E} HZ)\n\n",
-                       mode.mode_number, mode.cycles_per_sec);
-    out << "      POINT ID.   TYPE          T1             T2             T3             R1             R2             R3\n";
+void F06Writer::write_eigenvector_table(const ModeResult& mode,
+                                        const std::string& label,
+                                        std::ostream& out) {
+    out << "\nOUTPUT FOR EIGENVECTOR" << std::setw(9) << mode.mode_number << "\n";
+    out << label << "\n";
+    out << "\n                                                         E I G E N V E C T O R\n";
+    out << "                                              (in global coordinate system at each grid)\n";
+    out << "           GRID     COORD      T1            T2            T3            R1            R2            R3\n";
+    out << "                     SYS\n";
 
     for (const auto& nd : mode.shape) {
-        out << std::setw(12) << nd.node.value << "        G   ";
-        for (int i = 0; i < 6; ++i)
-            out << std::setw(15) << std::setprecision(6) << std::scientific << nd.d[i];
+        out << std::setw(15) << nd.node.value;
+        out << std::setw(9)  << 0; // global coord sys
+        out << std::uppercase;
+        for (int i = 0; i < 6; ++i) {
+            double v = nd.d[i];
+            if (v == 0.0) {
+                out << "  0.0         ";
+            } else {
+                out << std::setw(14) << std::setprecision(6) << std::scientific << v;
+            }
+        }
+        out << std::nouppercase;
         out << "\n";
     }
 }

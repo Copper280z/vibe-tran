@@ -462,32 +462,79 @@ static int write_oes1x_solid(std::ostream& f,
     return itable;
 }
 
-// ── Write LAMA (eigenvalue table) ────────────────────────────────────────────
-// LAMA: one record per subcase.  Per mode: [mode_no, order, eigenvalue,
-//        radians, cycles, gen_mass, gen_stiffness] — 7 int32/float32 words.
-// approach_code=76 (analysis_code=7 real modes, device_code=6)
-// table_code=60
+// LAMA table removed — eigenvalue data is embedded in each OUGV1 TABLE-3 record.
 
-static int write_lama(std::ostream& f,
-                      const ModalSubCaseResults& msc,
-                      bool new_result, int itable) {
-    if (msc.modes.empty()) return itable;
+// ── Write OUGV1 eigenvector records (one full table per mode, mystran format) ──
+// approach_code=21: analysis_code=2 (real modes), device_code=1 (print).
+// TABLE-3 ints[5] = eigenvalue as float32 bitcast, ints[6] = radians as float32 bitcast.
+// One complete table (header + TABLE-3/4 pair) is written per mode, matching the
+// mystran output format expected by community tools (pyNastran, Femap, etc.).
 
-    const int approach_code = 76; // SOL 103
-    const int table_code    = 60; // LAMA
-    const int num_wide      =  7;
-    const int nm     = static_cast<int>(msc.modes.size());
-    const int ntotal = nm * num_wide;
+static void write_ougv1_modal_mode(std::ostream& f,
+                                   const ModalSubCaseResults& msc,
+                                   const ModeResult& mr,
+                                   int month, int day, int dyear) {
+    if (mr.shape.empty()) return;
 
-    write_table3(f, new_result, itable,
-                 approach_code, table_code,
-                 /*element_type=*/0, msc.id,
-                 num_wide,
-                 /*title=*/"", msc.label, msc.label);
-    itable--;
+    const int approach_code = 21; // analysis_code=2 (real modes), device_code=1
+    const int table_code    =  7; // OUGV1 eigenvectors
+    const int num_wide      =  8;
+    const int nn     = static_cast<int>(mr.shape.size());
+    const int ntotal = nn * num_wide;
 
+    // Write fresh table header for this mode
+    const char name8[8] = {'O','U','G','V','1',' ',' ',' '};
+    write_table_header(f, name8, month, day, dyear);
+
+    // TABLE-3 prefix: [-3, 1, 0, 146]
     {
-        int32_t m[13] = {4, itable, 4,
+        int32_t m[12] = {4, -3, 4, 4, 1, 4, 4, 0, 4, 4, 146, 4};
+        f.write(reinterpret_cast<const char*>(m), 48);
+    }
+
+    // Build TABLE-3 payload (584 bytes = 50 ints + 3×128 chars)
+    static constexpr int N_INTS  = 50;
+    static constexpr int STR_LEN = 128;
+    int32_t ints[N_INTS] = {};
+    ints[0] = approach_code;
+    ints[1] = table_code;
+    ints[2] = 0;            // element_type
+    ints[3] = msc.id;       // isubcase
+    ints[4] = mr.mode_number; // lsdvmn = mode number
+    // ints[5] = eigenvalue as float32 bitcast to int32
+    {
+        float ev = static_cast<float>(mr.eigenvalue);
+        std::memcpy(&ints[5], &ev, 4);
+    }
+    // ints[6] = radians/sec as float32 bitcast to int32
+    {
+        float rad = static_cast<float>(mr.radians_per_sec);
+        std::memcpy(&ints[6], &rad, 4);
+    }
+    ints[8] = 1;          // format_code = real
+    ints[9] = num_wide;
+
+    char strings[3][STR_LEN];
+    auto fill_str = [&](char dst[STR_LEN], const std::string& src) {
+        std::memset(dst, ' ', STR_LEN);
+        size_t n = std::min(src.size(), (size_t)STR_LEN);
+        std::memcpy(dst, src.data(), n);
+    };
+    fill_str(strings[0], "");
+    fill_str(strings[1], "");
+    fill_str(strings[2], msc.label);
+
+    int32_t rec_len = N_INTS * 4 + 3 * STR_LEN; // 584
+    f.write(reinterpret_cast<const char*>(&rec_len), 4);
+    f.write(reinterpret_cast<const char*>(ints), N_INTS * 4);
+    f.write(strings[0], STR_LEN);
+    f.write(strings[1], STR_LEN);
+    f.write(strings[2], STR_LEN);
+    f.write(reinterpret_cast<const char*>(&rec_len), 4);
+
+    // TABLE-4 header markers: [-4, 1, 0, ntotal]
+    {
+        int32_t m[13] = {4, -4, 4,
                          4, 1, 4,
                          4, 0, 4,
                          4, ntotal, 4,
@@ -495,109 +542,26 @@ static int write_lama(std::ostream& f,
         f.write(reinterpret_cast<const char*>(m), 52);
     }
 
-    for (int i = 0; i < nm; ++i) {
-        const ModeResult& mr = msc.modes[i];
-        double gen_stiffness = mr.eigenvalue * mr.gen_mass;
-        write_f32(f, i32_as_f32(mr.mode_number));       // mode_no
-        write_f32(f, i32_as_f32(mr.mode_number));       // extraction order
-        write_f32(f, static_cast<float>(mr.eigenvalue));
-        write_f32(f, static_cast<float>(mr.radians_per_sec));
-        write_f32(f, static_cast<float>(mr.cycles_per_sec));
-        write_f32(f, static_cast<float>(mr.gen_mass));
-        write_f32(f, static_cast<float>(gen_stiffness));
+    // TABLE-4 data: one record per node [node_id*10+2 (as f32), grid_type=1, T1..R3]
+    for (const auto& nd : mr.shape) {
+        int32_t id_dev = static_cast<int32_t>(nd.node.value) * 10 + 2;
+        write_f32(f, i32_as_f32(id_dev));
+        write_f32(f, i32_as_f32(1)); // grid type G=1
+        for (int i = 0; i < 6; ++i)
+            write_f32(f, static_cast<float>(nd.d[i]));
     }
 
+    // TABLE-4 trailing length marker + footer
     {
         int32_t tail = 4 * ntotal;
         f.write(reinterpret_cast<const char*>(&tail), 4);
     }
-    itable--;
-    return itable;
-}
-
-// ── Write OUGV1 eigenvector records (one TABLE-3/4 pair per mode) ─────────────
-
-static int write_ougv1_modal(std::ostream& f,
-                             const ModalSubCaseResults& msc,
-                             bool new_result, int itable) {
-    const int approach_code = 76; // SOL 103
-    const int table_code    =  7; // eigenvectors (OUGV1 variant)
-    const int num_wide      =  8;
-
-    bool first = true;
-    for (const auto& mr : msc.modes) {
-        if (mr.shape.empty()) continue;
-
-        const int nn     = static_cast<int>(mr.shape.size());
-        const int ntotal = nn * num_wide;
-
-        // Reuse write_table3; put mode number in lsdvmn (ints[4])
-        // We write table3 manually to set lsdvmn correctly.
-        int cur_itable = itable;
-        if (new_result && first && cur_itable != -3) {
-            int32_t m[3] = {4, 146, 4};
-            f.write(reinterpret_cast<const char*>(m), 12);
-        } else {
-            int32_t m[12] = {4, itable, 4, 4, 1, 4, 4, 0, 4, 4, 146, 4};
-            f.write(reinterpret_cast<const char*>(m), 48);
-        }
-
-        static constexpr int N_INTS = 50;
-        static constexpr int STR_LEN = 128;
-        int32_t ints[N_INTS] = {};
-        ints[0]  = approach_code;
-        ints[1]  = table_code;
-        ints[2]  = 0;
-        ints[3]  = msc.id;
-        ints[4]  = mr.mode_number;   // lsdvmn = mode number
-        ints[8]  = 1;                // format_code = real
-        ints[9]  = num_wide;
-
-        char strings[3][STR_LEN];
-        auto fill_str = [&](char dst[STR_LEN], const std::string& src) {
-            std::memset(dst, ' ', STR_LEN);
-            size_t n = std::min(src.size(), (size_t)STR_LEN);
-            std::memcpy(dst, src.data(), n);
-        };
-        fill_str(strings[0], "");
-        fill_str(strings[1], msc.label);
-        fill_str(strings[2], msc.label);
-
-        int32_t rec_len = N_INTS * 4 + 3 * STR_LEN; // 584
-        f.write(reinterpret_cast<const char*>(&rec_len), 4);
-        f.write(reinterpret_cast<const char*>(ints), N_INTS * 4);
-        f.write(strings[0], STR_LEN);
-        f.write(strings[1], STR_LEN);
-        f.write(strings[2], STR_LEN);
-        f.write(reinterpret_cast<const char*>(&rec_len), 4);
-        itable--;
-
-        // TABLE-4
-        {
-            int32_t m[13] = {4, itable, 4,
-                             4, 1, 4,
-                             4, 0, 4,
-                             4, ntotal, 4,
-                             4 * ntotal};
-            f.write(reinterpret_cast<const char*>(m), 52);
-        }
-
-        for (const auto& nd : mr.shape) {
-            int32_t id_dev = static_cast<int32_t>(nd.node.value) * 10 + 2;
-            write_f32(f, i32_as_f32(id_dev));
-            write_f32(f, i32_as_f32(1)); // grid type G=1
-            for (int i = 0; i < 6; ++i)
-                write_f32(f, static_cast<float>(nd.d[i]));
-        }
-
-        {
-            int32_t tail = 4 * ntotal;
-            f.write(reinterpret_cast<const char*>(&tail), 4);
-        }
-        itable--;
-        first = false;
+    // Footer: [-5, 1, 0] then table close [0]
+    {
+        int32_t footer[9] = {4, -5, 4, 4, 1, 4, 4, 0, 4};
+        f.write(reinterpret_cast<const char*>(footer), 36);
     }
-    return itable;
+    write_markers(f, 0); // table close
 }
 
 // ── Op2Writer::write_modal ────────────────────────────────────────────────────
@@ -615,61 +579,16 @@ void Op2Writer::write_modal(const ModalSolverResults& results, const Model& mode
 
     write_file_header(f, month, day, dyear);
 
-    // ── LAMA (eigenvalue table) ───────────────────────────────────────────────
-    {
-        bool any = false;
-        for (const auto& msc : results.subcases)
-            if (!msc.modes.empty()) { any = true; break; }
-        if (any) {
-            const char name8[8] = {'L','A','M','A',' ',' ',' ',' '};
-            write_table_header(f, name8, month, day, dyear);
-
-            int itable = -3;
-            bool new_result = true;
-            for (const auto& msc : results.subcases) {
-                if (msc.modes.empty()) continue;
-                itable = write_lama(f, msc, new_result, itable);
-                new_result = false;
-                int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};
-                f.write(reinterpret_cast<const char*>(footer), 36);
-            }
-            write_markers(f, 0);
-        }
+    // ── OUGV1 (eigenvectors) ──────────────────────────────────────────────────
+    // One complete OUGV1 table is written per mode, matching the mystran format.
+    // eigvec_plot flag is taken from ModalSubCaseResults (which already applies
+    // the DISPLACEMENT→EIGENVECTOR alias performed in the modal solver).
+    for (const auto& msc : results.subcases) {
+        if (!msc.eigvec_plot || msc.modes.empty()) continue;
+        for (const auto& mr : msc.modes)
+            write_ougv1_modal_mode(f, msc, mr, month, day, dyear);
     }
 
-    // ── OUGV1 (eigenvectors, if eigvec_plot) ──────────────────────────────────
-    {
-        bool any = false;
-        for (const auto& msc : results.subcases) {
-            // Find matching subcase flags in model
-            for (const auto& sc : model.analysis.subcases) {
-                if (sc.id == msc.id && sc.eigvec_plot && !msc.modes.empty()) {
-                    any = true; break;
-                }
-            }
-            if (any) break;
-        }
-        if (any) {
-            const char name8[8] = {'O','U','G','V','1',' ',' ',' '};
-            write_table_header(f, name8, month, day, dyear);
-
-            int itable = -3;
-            bool new_result = true;
-            for (const auto& msc : results.subcases) {
-                bool do_plot = false;
-                for (const auto& sc : model.analysis.subcases)
-                    if (sc.id == msc.id) { do_plot = sc.eigvec_plot; break; }
-                if (!do_plot || msc.modes.empty()) continue;
-                itable = write_ougv1_modal(f, msc, new_result, itable);
-                new_result = false;
-                int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};
-                f.write(reinterpret_cast<const char*>(footer), 36);
-            }
-            write_markers(f, 0);
-        }
-    }
-
-    // Suppress unused model warning — model.analysis used above
     (void)model;
 
     write_markers(f, 0); // file end
