@@ -35,6 +35,44 @@ std::array<Vec3, 3> CTria3::node_coords() const {
             model_.node(nodes_[2]).position};
 }
 
+// Local element frame for arbitrary 3D orientation.
+// e1 = along node1→node2, e3 = normal (e1×edge13), e2 = e3×e1
+// xl[n], yl[n] are local in-plane coords of each node.
+// T is the 18×18 block-diagonal rotation matrix: K_global = T^T * K_local * T
+struct TriaFrame {
+    Vec3 e1, e2, e3;
+    std::array<double, 3> xl{};
+    std::array<double, 3> yl{};
+    Eigen::Matrix<double, 18, 18> T;
+};
+
+// eid is used only for error messages when nodes are degenerate.
+static TriaFrame compute_tria_frame(const std::array<Vec3, 3>& g, ElementId eid) {
+    TriaFrame fr;
+    Vec3 v12 = g[1] - g[0];
+    Vec3 v13 = g[2] - g[0];
+    Vec3 normal = v12.cross(v13);
+    if (normal.norm() < 1e-15)
+        throw SolverError(std::format("CTRIA3 {}: zero area (collinear nodes)", eid.value));
+    fr.e3 = normal.normalized();
+    fr.e1 = v12.normalized();
+    fr.e2 = fr.e3.cross(fr.e1);
+    for (int n = 0; n < 3; ++n) {
+        fr.xl[n] = g[n].dot(fr.e1);
+        fr.yl[n] = g[n].dot(fr.e2);
+    }
+    Eigen::Matrix3d R;
+    R << fr.e1.x, fr.e1.y, fr.e1.z,
+         fr.e2.x, fr.e2.y, fr.e2.z,
+         fr.e3.x, fr.e3.y, fr.e3.z;
+    fr.T.setZero();
+    for (int n = 0; n < 3; ++n) {
+        fr.T.template block<3, 3>(6 * n,     6 * n)     = R;
+        fr.T.template block<3, 3>(6 * n + 3, 6 * n + 3) = R;
+    }
+    return fr;
+}
+
 Eigen::Matrix3d CTria3::plane_stress_D() const {
     const Mat1& m = material();
     double c = m.E / (1.0 - m.nu * m.nu);
@@ -45,13 +83,13 @@ Eigen::Matrix3d CTria3::plane_stress_D() const {
     return D;
 }
 
-Eigen::MatrixXd CTria3::membrane_stiffness() const {
-    auto c = node_coords();
-    double x1 = c[0].x, y1 = c[0].y;
-    double x2 = c[1].x, y2 = c[1].y;
-    double x3 = c[2].x, y3 = c[2].y;
+Eigen::MatrixXd CTria3::membrane_stiffness(const std::array<double,3>& xl,
+                                             const std::array<double,3>& yl) const {
+    double x1 = xl[0], y1 = yl[0];
+    double x2 = xl[1], y2 = yl[1];
+    double x3 = xl[2], y3 = yl[2];
 
-    // Area via cross product
+    // Area in local plane
     double A2 = (x2-x1)*(y3-y1) - (x3-x1)*(y2-y1);
     if (std::abs(A2) < 1e-15)
         throw SolverError(std::format("CTRIA3 {}: zero area", eid_.value));
@@ -77,7 +115,8 @@ Eigen::MatrixXd CTria3::membrane_stiffness() const {
     return t * A * Bm.transpose() * D * Bm;
 }
 
-Eigen::MatrixXd CTria3::bending_stiffness() const {
+Eigen::MatrixXd CTria3::bending_stiffness(const std::array<double,3>& xl,
+                                            const std::array<double,3>& yl) const {
     // Simplified DKT: constant curvature triangle bending element.
     // Uses the standard thin-plate stiffness formulation.
     // For each node: DOFs are w (out-of-plane), θx, θy
@@ -86,10 +125,9 @@ Eigen::MatrixXd CTria3::bending_stiffness() const {
     // Curvature-displacement: κ = B_b * u_b
     // B_b is constant (same as CST approach for bending)
 
-    auto c = node_coords();
-    double x1=c[0].x, y1=c[0].y;
-    double x2=c[1].x, y2=c[1].y;
-    double x3=c[2].x, y3=c[2].y;
+    double x1=xl[0], y1=yl[0];
+    double x2=xl[1], y2=yl[1];
+    double x3=xl[2], y3=yl[2];
 
     double A2 = (x2-x1)*(y3-y1) - (x3-x1)*(y2-y1);
     double A  = 0.5 * std::abs(A2);
@@ -124,10 +162,13 @@ Eigen::MatrixXd CTria3::bending_stiffness() const {
 }
 
 LocalKe CTria3::stiffness_matrix() const {
+    auto g = node_coords();
+    TriaFrame frame = compute_tria_frame(g, eid_);
+
     LocalKe Ke = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
 
-    // Membrane stiffness (DOF layout per node: u=6i, v=6i+1)
-    Eigen::MatrixXd Km = membrane_stiffness(); // 6x6
+    // Membrane stiffness (DOF layout per node: u=6i, v=6i+1) in local frame
+    Eigen::MatrixXd Km = membrane_stiffness(frame.xl, frame.yl); // 6x6
     for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 3; ++j) {
             Ke(6*i+0, 6*j+0) += Km(2*i+0, 2*j+0);
@@ -136,9 +177,9 @@ LocalKe CTria3::stiffness_matrix() const {
             Ke(6*i+1, 6*j+1) += Km(2*i+1, 2*j+1);
         }
 
-    // Bending stiffness (DOF layout per node: w=6i+2, θx=6i+3, θy=6i+4)
+    // Bending stiffness (DOF layout per node: w=6i+2, θx=6i+3, θy=6i+4) in local frame
     // Local bending DOFs: w=3i+0, θx=3i+1, θy=3i+2
-    Eigen::MatrixXd Kb = bending_stiffness(); // 9x9
+    Eigen::MatrixXd Kb = bending_stiffness(frame.xl, frame.yl); // 9x9
     const int bend_map[3] = {2, 3, 4}; // local bend dof → offset in 6-DOF node block
     for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 3; ++j)
@@ -152,7 +193,8 @@ LocalKe CTria3::stiffness_matrix() const {
     for (int i = 0; i < 3; ++i)
         Ke(6*i+5, 6*i+5) += drill;
 
-    return Ke;
+    // Transform local stiffness to global frame: K_global = T^T * K_local * T
+    return frame.T.transpose() * Ke * frame.T;
 }
 
 LocalKe CTria3::mass_matrix() const {
@@ -165,10 +207,11 @@ LocalKe CTria3::mass_matrix() const {
     // Closed-form consistent mass matrix for CST triangle.
     // Nodal mass integrals: integral(Li^2 dA) = A/6, integral(Li*Lj dA) = A/12 (i≠j)
     // Compute actual 3D area via cross product (handles arbitrary orientation).
-    auto c = node_coords();
-    Vec3 e1{c[1].x-c[0].x, c[1].y-c[0].y, c[1].z-c[0].z};
-    Vec3 e2{c[2].x-c[0].x, c[2].y-c[0].y, c[2].z-c[0].z};
-    double A = 0.5 * e1.cross(e2).norm();
+    auto g = node_coords();
+    TriaFrame frame = compute_tria_frame(g, eid_);
+    Vec3 v12 = g[1] - g[0];
+    Vec3 v13 = g[2] - g[0];
+    double A = 0.5 * v12.cross(v13).norm();
 
     double m_diag = rho * t * A / 6.0;
     double m_off  = rho * t * A / 12.0;
@@ -191,7 +234,8 @@ LocalKe CTria3::mass_matrix() const {
         // Drilling (R3): diagonal only
         Me(6*a+5, 6*a+5) = drill;
     }
-    return Me;
+    // Transform local mass matrix to global frame: M_global = T^T * M_local * T
+    return frame.T.transpose() * Me * frame.T;
 }
 
 LocalFe CTria3::thermal_load(std::span<const double> temperatures, double t_ref) const {
@@ -199,10 +243,12 @@ LocalFe CTria3::thermal_load(std::span<const double> temperatures, double t_ref)
     const double alpha = material().A;
     if (alpha == 0.0) return fe;
 
-    auto c = node_coords();
-    double x1=c[0].x, y1=c[0].y;
-    double x2=c[1].x, y2=c[1].y;
-    double x3=c[2].x, y3=c[2].y;
+    auto g = node_coords();
+    TriaFrame frame = compute_tria_frame(g, eid_);
+
+    double x1=frame.xl[0], y1=frame.yl[0];
+    double x2=frame.xl[1], y2=frame.yl[1];
+    double x3=frame.xl[2], y3=frame.yl[2];
 
     double A2 = (x2-x1)*(y3-y1) - (x3-x1)*(y2-y1);
     // Use signed area for consistent B matrix sign (matches membrane_stiffness)
@@ -236,7 +282,8 @@ LocalFe CTria3::thermal_load(std::span<const double> temperatures, double t_ref)
         fe(6*n+0) += fe_mem(2*n+0);
         fe(6*n+1) += fe_mem(2*n+1);
     }
-    return fe;
+    // Transform local load vector to global frame: f_global = T^T * f_local
+    return frame.T.transpose() * fe;
 }
 
 std::vector<EqIndex> CTria3::global_dof_indices(const DofMap& dof_map) const {

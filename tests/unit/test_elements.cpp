@@ -897,6 +897,146 @@ TEST(MassMatrix, CTria3TotalMass) {
         << "CTria3 translational mass should equal rho*t*A";
 }
 
+// ── CTria3 orientation tests ──────────────────────────────────────────────────
+// These tests verify that CTRIA3 stiffness is invariant to element orientation
+// in 3D space (XY / XZ / YZ planes and angled orientations).
+
+// Helper: build a unit right-triangle CTria3 in the XY plane, return eigenvalues
+static std::vector<double> ctria3_xy_eigenvalues() {
+    Model m = make_shell_model();
+    add_grid(m, 1, 0.0, 0.0, 0.0);
+    add_grid(m, 2, 1.0, 0.0, 0.0);
+    add_grid(m, 3, 0.0, 1.0, 0.0);
+    std::array<NodeId, 3> nodes{NodeId{1}, NodeId{2}, NodeId{3}};
+    CTria3 elem(ElementId{1}, PropertyId{1}, nodes, m);
+    LocalKe Ke = elem.stiffness_matrix();
+    Eigen::SelfAdjointEigenSolver<LocalKe> es(Ke);
+    std::vector<double> ev(es.eigenvalues().data(),
+                           es.eigenvalues().data() + es.eigenvalues().size());
+    std::sort(ev.begin(), ev.end());
+    return ev;
+}
+
+TEST(CTria3, InclinedElement_XZPlane_StiffnessSymmetric) {
+    // Element in XZ plane: nodes at (0,0,0),(1,0,0),(0,0,1)
+    Model m = make_shell_model();
+    add_grid(m, 1, 0.0, 0.0, 0.0);
+    add_grid(m, 2, 1.0, 0.0, 0.0);
+    add_grid(m, 3, 0.0, 0.0, 1.0);
+    std::array<NodeId, 3> nodes{NodeId{1}, NodeId{2}, NodeId{3}};
+    CTria3 elem(ElementId{1}, PropertyId{1}, nodes, m);
+    LocalKe Ke = elem.stiffness_matrix();
+    double asym = (Ke - Ke.transpose()).cwiseAbs().maxCoeff();
+    EXPECT_LT(asym, 1e-10 * Ke.cwiseAbs().maxCoeff())
+        << "CTria3 in XZ plane: stiffness matrix not symmetric";
+}
+
+TEST(CTria3, AllCardinalOrientations_SpectrumMatchesXY) {
+    // XY plane reference eigenvalues
+    std::vector<double> ev_ref = ctria3_xy_eigenvalues();
+
+    // XZ plane: nodes (0,0,0),(1,0,0),(0,0,1)
+    {
+        Model m = make_shell_model();
+        add_grid(m, 1, 0.0, 0.0, 0.0);
+        add_grid(m, 2, 1.0, 0.0, 0.0);
+        add_grid(m, 3, 0.0, 0.0, 1.0);
+        std::array<NodeId, 3> nodes{NodeId{1}, NodeId{2}, NodeId{3}};
+        CTria3 elem(ElementId{1}, PropertyId{1}, nodes, m);
+        LocalKe Ke = elem.stiffness_matrix();
+        Eigen::SelfAdjointEigenSolver<LocalKe> es(Ke);
+        std::vector<double> ev(es.eigenvalues().data(),
+                               es.eigenvalues().data() + es.eigenvalues().size());
+        std::sort(ev.begin(), ev.end());
+        ASSERT_EQ(ev.size(), ev_ref.size());
+        for (size_t i = 0; i < ev.size(); ++i)
+            EXPECT_NEAR(ev[i], ev_ref[i], 1e-6 * (std::abs(ev_ref[i]) + 1.0))
+                << "XZ plane eigenvalue mismatch at index " << i;
+    }
+
+    // YZ plane: nodes (0,0,0),(0,1,0),(0,0,1)
+    {
+        Model m = make_shell_model();
+        add_grid(m, 1, 0.0, 0.0, 0.0);
+        add_grid(m, 2, 0.0, 1.0, 0.0);
+        add_grid(m, 3, 0.0, 0.0, 1.0);
+        std::array<NodeId, 3> nodes{NodeId{1}, NodeId{2}, NodeId{3}};
+        CTria3 elem(ElementId{1}, PropertyId{1}, nodes, m);
+        LocalKe Ke = elem.stiffness_matrix();
+        Eigen::SelfAdjointEigenSolver<LocalKe> es(Ke);
+        std::vector<double> ev(es.eigenvalues().data(),
+                               es.eigenvalues().data() + es.eigenvalues().size());
+        std::sort(ev.begin(), ev.end());
+        ASSERT_EQ(ev.size(), ev_ref.size());
+        for (size_t i = 0; i < ev.size(); ++i)
+            EXPECT_NEAR(ev[i], ev_ref[i], 1e-6 * (std::abs(ev_ref[i]) + 1.0))
+                << "YZ plane eigenvalue mismatch at index " << i;
+    }
+}
+
+TEST(CTria3, AngledOrientations_SpectrumMatchesXY) {
+    // 45° rotated triangle in each principal plane — checks arbitrary orientations
+    std::vector<double> ev_ref = ctria3_xy_eigenvalues();
+
+    // 45° about Z: nodes at (0,0,0), (cos45,sin45,0), (-sin45,cos45,0)
+    const double c = std::cos(M_PI / 4.0);
+    const double s = std::sin(M_PI / 4.0);
+
+    // Rotation about Z
+    {
+        Model m = make_shell_model();
+        add_grid(m, 1, 0.0, 0.0, 0.0);
+        add_grid(m, 2, c,   s,   0.0);
+        add_grid(m, 3, -s,  c,   0.0);
+        std::array<NodeId, 3> nodes{NodeId{1}, NodeId{2}, NodeId{3}};
+        CTria3 elem(ElementId{1}, PropertyId{1}, nodes, m);
+        LocalKe Ke = elem.stiffness_matrix();
+        Eigen::SelfAdjointEigenSolver<LocalKe> es(Ke);
+        std::vector<double> ev(es.eigenvalues().data(),
+                               es.eigenvalues().data() + es.eigenvalues().size());
+        std::sort(ev.begin(), ev.end());
+        for (size_t i = 0; i < ev.size(); ++i)
+            EXPECT_NEAR(ev[i], ev_ref[i], 1e-6 * (std::abs(ev_ref[i]) + 1.0))
+                << "45° about Z: eigenvalue mismatch at index " << i;
+    }
+
+    // 45° about X: nodes at (0,0,0),(1,0,0),(0,c,s)
+    {
+        Model m = make_shell_model();
+        add_grid(m, 1, 0.0, 0.0, 0.0);
+        add_grid(m, 2, 1.0, 0.0, 0.0);
+        add_grid(m, 3, 0.0, c,   s);
+        std::array<NodeId, 3> nodes{NodeId{1}, NodeId{2}, NodeId{3}};
+        CTria3 elem(ElementId{1}, PropertyId{1}, nodes, m);
+        LocalKe Ke = elem.stiffness_matrix();
+        Eigen::SelfAdjointEigenSolver<LocalKe> es(Ke);
+        std::vector<double> ev(es.eigenvalues().data(),
+                               es.eigenvalues().data() + es.eigenvalues().size());
+        std::sort(ev.begin(), ev.end());
+        for (size_t i = 0; i < ev.size(); ++i)
+            EXPECT_NEAR(ev[i], ev_ref[i], 1e-6 * (std::abs(ev_ref[i]) + 1.0))
+                << "45° about X: eigenvalue mismatch at index " << i;
+    }
+
+    // 45° about Y: nodes at (0,0,0),(c,0,-s),(0,1,0)
+    {
+        Model m = make_shell_model();
+        add_grid(m, 1, 0.0, 0.0,  0.0);
+        add_grid(m, 2, c,   0.0, -s);
+        add_grid(m, 3, 0.0, 1.0,  0.0);
+        std::array<NodeId, 3> nodes{NodeId{1}, NodeId{2}, NodeId{3}};
+        CTria3 elem(ElementId{1}, PropertyId{1}, nodes, m);
+        LocalKe Ke = elem.stiffness_matrix();
+        Eigen::SelfAdjointEigenSolver<LocalKe> es(Ke);
+        std::vector<double> ev(es.eigenvalues().data(),
+                               es.eigenvalues().data() + es.eigenvalues().size());
+        std::sort(ev.begin(), ev.end());
+        for (size_t i = 0; i < ev.size(); ++i)
+            EXPECT_NEAR(ev[i], ev_ref[i], 1e-6 * (std::abs(ev_ref[i]) + 1.0))
+                << "45° about Y: eigenvalue mismatch at index " << i;
+    }
+}
+
 TEST(MassMatrix, CHexa8Symmetry) {
     Model m = make_solid_model_rho();
     add_grid(m,1,0,0,0); add_grid(m,2,1,0,0); add_grid(m,3,1,1,0); add_grid(m,4,0,1,0);

@@ -53,11 +53,13 @@ private:
     const Mat1& material() const;
     const PShell& pshell() const;
 
-    /// Compute membrane stiffness (CST, 3×2 DOF = 6 DOF membrane part)
-    Eigen::MatrixXd membrane_stiffness() const;
+    /// Compute membrane stiffness (CST) from local in-plane coordinates xl[3], yl[3]
+    Eigen::MatrixXd membrane_stiffness(const std::array<double,3>& xl,
+                                        const std::array<double,3>& yl) const;
 
-    /// Compute bending stiffness via DKT formulation
-    Eigen::MatrixXd bending_stiffness() const;
+    /// Compute bending stiffness (DKT) from local in-plane coordinates xl[3], yl[3]
+    Eigen::MatrixXd bending_stiffness(const std::array<double,3>& xl,
+                                       const std::array<double,3>& yl) const;
 };
 
 } // namespace vibestran
