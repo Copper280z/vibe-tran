@@ -46,15 +46,28 @@ static ShellFrame compute_shell_frame(const std::array<Vec3,4>& g) {
         fr.xl[n] = g[n].dot(fr.e1);
         fr.yl[n] = g[n].dot(fr.e2);
     }
-    // R rows = local axes expressed in global frame
+    // R rows = local axes expressed in global frame.
+    // Translational DOFs: u_local = R * u_global  (R transforms global to local)
     Eigen::Matrix3d R;
     R << fr.e1.x, fr.e1.y, fr.e1.z,
          fr.e2.x, fr.e2.y, fr.e2.z,
          fr.e3.x, fr.e3.y, fr.e3.z;
+    // Rotational DOFs correction:
+    // The code uses "slope" convention: DOF3 = θx = slope-in-x (γ_xz = ∂w/∂x - θx = 0 for no shear),
+    // DOF4 = θy = slope-in-y (γ_yz = ∂w/∂y - θy = 0 for no shear).
+    // For a rigid-body rotation ω_global, the transverse displacement at local (x,0,0) is:
+    //   w = -(e2·ω_global)*x  →  ∂w/∂x = -(e2·ω_global)  →  DOF3 = -(e2·ω_global)
+    // Similarly: ∂w/∂y = (e1·ω_global) → DOF4 = (e1·ω_global)
+    // Therefore T_rot maps global ω to local DOFs as:
+    //   [DOF3, DOF4, DOF5] = M * R * ω_global,   M = [[0,-1,0],[1,0,0],[0,0,1]]
+    Eigen::Matrix3d M;
+    M << 0, -1, 0,
+         1,  0, 0,
+         0,  0, 1;
     fr.T.setZero();
     for (int n = 0; n < 4; ++n) {
-        fr.T.template block<3,3>(6*n,   6*n)   = R;
-        fr.T.template block<3,3>(6*n+3, 6*n+3) = R;
+        fr.T.template block<3,3>(6*n,   6*n)   = R;       // translations
+        fr.T.template block<3,3>(6*n+3, 6*n+3) = M * R;  // rotations (slope convention)
     }
     return fr;
 }
