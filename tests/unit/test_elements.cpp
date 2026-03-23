@@ -1010,3 +1010,213 @@ TEST(MassMatrix, CPenta6Symmetry) {
     EXPECT_LT(asym, 1e-12 * Me.cwiseAbs().maxCoeff())
         << "CPenta6 mass matrix is not symmetric";
 }
+
+// ── Inclined shell element tests ──────────────────────────────────────────────
+// These tests exercise the 3D local-frame computation added to CQuad4 and
+// CQuad4Mitc4.  Previous tests used elements in the global XY-plane (T=I),
+// which masked the bug.  The cases below place elements in the XZ-plane and at
+// a 45° tilt so that the Jacobian must be evaluated in local coordinates.
+
+TEST(CQuad4, InclinedElement_XZPlane_StiffnessSymmetric) {
+    // Element lies in the global XZ-plane (y=const).  global x,y Jacobian → 0
+    // without the local-frame fix.
+    Model m = make_shell_model();
+    add_grid(m,1, 0, 0.5, 0);
+    add_grid(m,2, 1, 0.5, 0);
+    add_grid(m,3, 1, 0.5, 1);
+    add_grid(m,4, 0, 0.5, 1);
+    std::array<NodeId,4> nodes{NodeId{1},NodeId{2},NodeId{3},NodeId{4}};
+    CQuad4 elem(ElementId{1}, PropertyId{1}, nodes, m);
+    LocalKe Ke = elem.stiffness_matrix();
+    double asym = (Ke - Ke.transpose()).cwiseAbs().maxCoeff();
+    EXPECT_LT(asym, 1e-10 * Ke.cwiseAbs().maxCoeff())
+        << "Inclined (XZ-plane) CQuad4 stiffness is not symmetric";
+    // Must be positive semi-definite
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(Ke);
+    EXPECT_GE(eig.eigenvalues().minCoeff(), -1e-6 * eig.eigenvalues().maxCoeff())
+        << "Inclined CQuad4 stiffness has large negative eigenvalue";
+}
+
+TEST(CQuad4, InclinedElement_XZPlane_RigidBodyZeroForce) {
+    // A rigid-body x-translation applied to an XZ-plane element must produce
+    // no internal force.
+    Model m = make_shell_model();
+    add_grid(m,1, 0, 0.5, 0);
+    add_grid(m,2, 1, 0.5, 0);
+    add_grid(m,3, 1, 0.5, 1);
+    add_grid(m,4, 0, 0.5, 1);
+    std::array<NodeId,4> nodes{NodeId{1},NodeId{2},NodeId{3},NodeId{4}};
+    CQuad4 elem(ElementId{1}, PropertyId{1}, nodes, m);
+    LocalKe Ke = elem.stiffness_matrix();
+    Eigen::VectorXd u = Eigen::VectorXd::Zero(24);
+    for (int i = 0; i < 4; ++i) u(6*i) = 1.0; // rigid x-translation
+    Eigen::VectorXd f = Ke * u;
+    EXPECT_LT(f.norm(), 1e-8 * Ke.norm());
+}
+
+TEST(CQuad4Mitc4, InclinedElement_XZPlane_StiffnessSymmetric) {
+    // Same geometry as above for the MITC4 variant.
+    Model m = make_shell_model();
+    auto& ps = std::get<PShell>(m.properties.at(PropertyId{1}));
+    ps.shell_form = ShellFormulation::MITC4;
+    add_grid(m,1, 0, 0.5, 0);
+    add_grid(m,2, 1, 0.5, 0);
+    add_grid(m,3, 1, 0.5, 1);
+    add_grid(m,4, 0, 0.5, 1);
+    std::array<NodeId,4> nodes{NodeId{1},NodeId{2},NodeId{3},NodeId{4}};
+    CQuad4Mitc4 elem(ElementId{1}, PropertyId{1}, nodes, m);
+    LocalKe Ke = elem.stiffness_matrix();
+    double asym = (Ke - Ke.transpose()).cwiseAbs().maxCoeff();
+    EXPECT_LT(asym, 1e-10 * Ke.cwiseAbs().maxCoeff())
+        << "Inclined (XZ-plane) CQuad4Mitc4 stiffness is not symmetric";
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(Ke);
+    EXPECT_GE(eig.eigenvalues().minCoeff(), -1e-6 * eig.eigenvalues().maxCoeff())
+        << "Inclined CQuad4Mitc4 stiffness has large negative eigenvalue";
+}
+
+TEST(CQuad4Mitc4, InclinedElement_XZPlane_StiffnessMatchesXYEquivalent) {
+    // An XZ-plane element and its equivalent rotated-to-XY version must have
+    // the same eigenvalue spectrum (rotations preserve stiffness magnitude).
+    const double E = 2.0e7, nu = 0.3, t = 0.1;
+    Model m_xz = make_shell_model(E, nu, t);
+    // XZ-plane element: nodes in y=0 plane, spanning x=[0,1], z=[0,1]
+    add_grid(m_xz,1, 0, 0, 0); add_grid(m_xz,2, 1, 0, 0);
+    add_grid(m_xz,3, 1, 0, 1); add_grid(m_xz,4, 0, 0, 1);
+    std::array<NodeId,4> n4{NodeId{1},NodeId{2},NodeId{3},NodeId{4}};
+    LocalKe Ke_xz = CQuad4Mitc4(ElementId{1}, PropertyId{1}, n4, m_xz).stiffness_matrix();
+
+    Model m_xy = make_shell_model(E, nu, t);
+    // XY-plane equivalent: same size, nodes in z=0 plane
+    add_grid(m_xy,1, 0, 0, 0); add_grid(m_xy,2, 1, 0, 0);
+    add_grid(m_xy,3, 1, 1, 0); add_grid(m_xy,4, 0, 1, 0);
+    LocalKe Ke_xy = CQuad4Mitc4(ElementId{1}, PropertyId{1}, n4, m_xy).stiffness_matrix();
+
+    // Sort eigenvalues and compare
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig_xz(Ke_xz), eig_xy(Ke_xy);
+    Eigen::VectorXd ev_xz = eig_xz.eigenvalues();
+    Eigen::VectorXd ev_xy = eig_xy.eigenvalues();
+    // Eigenvalues must match to within 0.1% (up to sorting, which Eigen does for us)
+    for (int i = 0; i < 24; ++i) {
+        EXPECT_NEAR(ev_xz(i), ev_xy(i), 1e-3 * std::abs(ev_xy(i)) + 1e-6)
+            << "Eigenvalue " << i << " differs between XZ and XY orientations";
+    }
+}
+
+// Helper: verify that a CQuad4Mitc4 element in an arbitrary orientation has the
+// same stiffness eigenvalue spectrum as the reference XY-plane element.
+// This is the core correctness check — rotating an element must not change its
+// stiffness characteristics.
+static void check_mitc4_spectrum_matches_xy(
+    const std::array<Vec3,4>& nodes_3d,
+    const std::string& label)
+{
+    const double E = 2.0e7, nu = 0.3, t = 0.1;
+
+    // 3D-oriented element
+    Model m3d = make_shell_model(E, nu, t);
+    std::array<NodeId,4> nids{NodeId{1},NodeId{2},NodeId{3},NodeId{4}};
+    for (int i = 0; i < 4; ++i) {
+        GridPoint g; g.id = NodeId{i+1}; g.position = nodes_3d[i];
+        m3d.nodes[g.id] = g;
+    }
+    LocalKe Ke_3d = CQuad4Mitc4(ElementId{1}, PropertyId{1}, nids, m3d).stiffness_matrix();
+
+    // XY reference (same element geometry but in z=0 plane)
+    Model mxy = make_shell_model(E, nu, t);
+    // Compute local frame to get the 2D extents
+    Vec3 e1 = (nodes_3d[1] - nodes_3d[0]).normalized();
+    Vec3 v14 = nodes_3d[3] - nodes_3d[0];
+    Vec3 e3 = (nodes_3d[1]-nodes_3d[0]).cross(v14).normalized();
+    Vec3 e2 = e3.cross(e1);
+    std::array<Vec3,4> xy_nodes;
+    for (int i = 0; i < 4; ++i) {
+        Vec3 d = nodes_3d[i] - nodes_3d[0];
+        xy_nodes[i] = {d.dot(e1), d.dot(e2), 0.0};
+    }
+    for (int i = 0; i < 4; ++i) {
+        GridPoint g; g.id = NodeId{i+1}; g.position = xy_nodes[i];
+        mxy.nodes[g.id] = g;
+    }
+    LocalKe Ke_xy = CQuad4Mitc4(ElementId{1}, PropertyId{1}, nids, mxy).stiffness_matrix();
+
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig_3d(Ke_3d), eig_xy(Ke_xy);
+    for (int i = 0; i < 24; ++i) {
+        EXPECT_NEAR(eig_3d.eigenvalues()(i), eig_xy.eigenvalues()(i),
+                    1e-3 * std::abs(eig_xy.eigenvalues()(i)) + 1e-8)
+            << label << ": eigenvalue " << i << " differs from XY reference";
+    }
+}
+
+TEST(CQuad4Mitc4, AllCardinalOrientations_SpectrumMatchesXY) {
+    // XY-plane (baseline — identical to reference, should be trivially true)
+    check_mitc4_spectrum_matches_xy(
+        {Vec3{0,0,0}, Vec3{1,0,0}, Vec3{1,1,0}, Vec3{0,1,0}},
+        "XY-plane");
+    // XZ-plane (normal along +Y)
+    check_mitc4_spectrum_matches_xy(
+        {Vec3{0,0,0}, Vec3{1,0,0}, Vec3{1,0,1}, Vec3{0,0,1}},
+        "XZ-plane");
+    // YZ-plane (normal along +X)
+    check_mitc4_spectrum_matches_xy(
+        {Vec3{0,0,0}, Vec3{0,1,0}, Vec3{0,1,1}, Vec3{0,0,1}},
+        "YZ-plane");
+}
+
+TEST(CQuad4Mitc4, AngledOrientations_SpectrumMatchesXY) {
+    const double s = std::sqrt(0.5); // sin/cos 45°
+    // 45° about Z-axis
+    check_mitc4_spectrum_matches_xy(
+        {Vec3{0,0,0}, Vec3{s,s,0}, Vec3{s-s,s+s,0}, Vec3{-s,s,0}},
+        "45-deg about Z");
+    // 45° about X-axis
+    check_mitc4_spectrum_matches_xy(
+        {Vec3{0,0,0}, Vec3{1,0,0}, Vec3{1,s,s}, Vec3{0,s,s}},
+        "45-deg about X");
+    // 45° about Y-axis (element in a tilted plane)
+    check_mitc4_spectrum_matches_xy(
+        {Vec3{0,0,0}, Vec3{s,0,-s}, Vec3{s,1,-s}, Vec3{0,1,0}},
+        "45-deg about Y");
+}
+
+TEST(CQuad4, AllCardinalOrientations_SpectrumMatchesXY) {
+    // Same test for the standard Mindlin CQuad4
+    auto check_cquad4 = [](const std::array<Vec3,4>& nodes_3d,
+                           const std::string& label) {
+        const double E = 2.0e7, nu = 0.3, t = 0.1;
+        Model m3d = make_shell_model(E, nu, t);
+        std::get<PShell>(m3d.properties.at(PropertyId{1})).shell_form =
+            ShellFormulation::MINDLIN;
+        std::array<NodeId,4> nids{NodeId{1},NodeId{2},NodeId{3},NodeId{4}};
+        for (int i = 0; i < 4; ++i) {
+            GridPoint g; g.id = NodeId{i+1}; g.position = nodes_3d[i];
+            m3d.nodes[g.id] = g;
+        }
+        LocalKe Ke_3d = CQuad4(ElementId{1}, PropertyId{1}, nids, m3d).stiffness_matrix();
+
+        Vec3 e1 = (nodes_3d[1]-nodes_3d[0]).normalized();
+        Vec3 v14 = nodes_3d[3]-nodes_3d[0];
+        Vec3 e3 = (nodes_3d[1]-nodes_3d[0]).cross(v14).normalized();
+        Vec3 e2 = e3.cross(e1);
+        Model mxy = make_shell_model(E, nu, t);
+        std::get<PShell>(mxy.properties.at(PropertyId{1})).shell_form =
+            ShellFormulation::MINDLIN;
+        for (int i = 0; i < 4; ++i) {
+            Vec3 d = nodes_3d[i]-nodes_3d[0];
+            GridPoint g; g.id = NodeId{i+1};
+            g.position = {d.dot(e1), d.dot(e2), 0.0};
+            mxy.nodes[g.id] = g;
+        }
+        LocalKe Ke_xy = CQuad4(ElementId{1}, PropertyId{1}, nids, mxy).stiffness_matrix();
+
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig_3d(Ke_3d), eig_xy(Ke_xy);
+        for (int i = 0; i < 24; ++i) {
+            EXPECT_NEAR(eig_3d.eigenvalues()(i), eig_xy.eigenvalues()(i),
+                        1e-3 * std::abs(eig_xy.eigenvalues()(i)) + 1e-8)
+                << label << ": eigenvalue " << i << " differs from XY reference";
+        }
+    };
+
+    check_cquad4({Vec3{0,0,0},Vec3{1,0,0},Vec3{1,1,0},Vec3{0,1,0}}, "XY-plane");
+    check_cquad4({Vec3{0,0,0},Vec3{1,0,0},Vec3{1,0,1},Vec3{0,0,1}}, "XZ-plane");
+    check_cquad4({Vec3{0,0,0},Vec3{0,1,0},Vec3{0,1,1},Vec3{0,0,1}}, "YZ-plane");
+}

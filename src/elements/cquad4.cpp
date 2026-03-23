@@ -17,6 +17,48 @@ static constexpr double GP2 = 1.0 / std::numbers::sqrt3; // ≈ 0.5773502692
 static const double GAUSS2[2] = {-GP2, GP2};
 static const double GAUSS2_W[2] = {1.0, 1.0};
 
+// ── Shell local coordinate frame ─────────────────────────────────────────────
+// Shell elements in 3D space require a local element frame so that the 2D
+// isoparametric Jacobian is computed in the plane of the element.  When all
+// nodes lie in the global XY-plane this reduces to the identity (no change to
+// existing results).  For arbitrarily-oriented elements:
+//   e1 — along the first edge (node1→node2, local x)
+//   e3 — element normal (e1 × edge14, normalised)
+//   e2 — e3 × e1  (local y, completes right-hand frame)
+// xl[n], yl[n] are the projections of each node onto (e1, e2).
+// T (24×24) transforms global DOFs to local DOFs: u_local = T * u_global.
+// The assembled element matrix in global frame is T^T * K_local * T.
+struct ShellFrame {
+    Vec3 e1, e2, e3;
+    std::array<double,4> xl;
+    std::array<double,4> yl;
+    Eigen::Matrix<double,24,24> T;
+};
+
+static ShellFrame compute_shell_frame(const std::array<Vec3,4>& g) {
+    ShellFrame fr;
+    Vec3 v12 = g[1] - g[0];
+    Vec3 v14 = g[3] - g[0];
+    fr.e3 = v12.cross(v14).normalized();
+    fr.e1 = v12.normalized();
+    fr.e2 = fr.e3.cross(fr.e1);  // unit: e3 ⊥ e1 → |e2|=1
+    for (int n = 0; n < 4; ++n) {
+        fr.xl[n] = g[n].dot(fr.e1);
+        fr.yl[n] = g[n].dot(fr.e2);
+    }
+    // R rows = local axes expressed in global frame
+    Eigen::Matrix3d R;
+    R << fr.e1.x, fr.e1.y, fr.e1.z,
+         fr.e2.x, fr.e2.y, fr.e2.z,
+         fr.e3.x, fr.e3.y, fr.e3.z;
+    fr.T.setZero();
+    for (int n = 0; n < 4; ++n) {
+        fr.T.template block<3,3>(6*n,   6*n)   = R;
+        fr.T.template block<3,3>(6*n+3, 6*n+3) = R;
+    }
+    return fr;
+}
+
 CQuad4::CQuad4(ElementId eid, PropertyId pid,
                std::array<NodeId, 4> node_ids,
                const Model& model)
@@ -85,6 +127,9 @@ Eigen::Matrix3d CQuad4::bending_D() const {
 LocalKe CQuad4::stiffness_matrix() const {
     LocalKe Ke = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
     auto coords = node_coords();
+    auto frame  = compute_shell_frame(coords);
+    const auto& xl = frame.xl;
+    const auto& yl = frame.yl;
     const double t = thickness();
 
     Eigen::Matrix3d Dm = membrane_D();
@@ -112,14 +157,13 @@ LocalKe CQuad4::stiffness_matrix() const {
 
             auto sd = shape_functions(xi, eta);
 
-            // Jacobian J = dX/d(xi,eta) [2x2]
-            // X = sum N_I * x_I, Y = sum N_I * y_I
+            // Jacobian J = dX/d(xi,eta) [2x2] in local element frame
             Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
             for (int n = 0; n < 4; ++n) {
-                J(0,0) += sd.dNdxi[n]  * coords[n].x;
-                J(0,1) += sd.dNdxi[n]  * coords[n].y;
-                J(1,0) += sd.dNdeta[n] * coords[n].x;
-                J(1,1) += sd.dNdeta[n] * coords[n].y;
+                J(0,0) += sd.dNdxi[n]  * xl[n];
+                J(0,1) += sd.dNdxi[n]  * yl[n];
+                J(1,0) += sd.dNdeta[n] * xl[n];
+                J(1,1) += sd.dNdeta[n] * yl[n];
             }
             double detJ = J.determinant();
             if (detJ <= 0)
@@ -234,10 +278,10 @@ LocalKe CQuad4::stiffness_matrix() const {
         auto sd0 = shape_functions(0.0, 0.0);
         Eigen::Matrix2d J0 = Eigen::Matrix2d::Zero();
         for (int n = 0; n < 4; ++n) {
-            J0(0,0) += sd0.dNdxi[n]  * coords[n].x;
-            J0(0,1) += sd0.dNdxi[n]  * coords[n].y;
-            J0(1,0) += sd0.dNdeta[n] * coords[n].x;
-            J0(1,1) += sd0.dNdeta[n] * coords[n].y;
+            J0(0,0) += sd0.dNdxi[n]  * xl[n];
+            J0(0,1) += sd0.dNdxi[n]  * yl[n];
+            J0(1,0) += sd0.dNdeta[n] * xl[n];
+            J0(1,1) += sd0.dNdeta[n] * yl[n];
         }
         double detJ0 = J0.determinant();
         Eigen::Matrix2d Jinv0 = J0.inverse();
@@ -276,7 +320,8 @@ LocalKe CQuad4::stiffness_matrix() const {
     for (int i = 0; i < 4; ++i)
         Ke(6*i+5, 6*i+5) += drill_stiff;
 
-    return Ke;
+    // Transform from local element frame to global frame: K_global = T^T K_local T
+    return frame.T.transpose() * Ke * frame.T;
 }
 
 LocalKe CQuad4::mass_matrix() const {
@@ -286,6 +331,9 @@ LocalKe CQuad4::mass_matrix() const {
     if (rho == 0.0) return Me;
     const double t = thickness();
     auto coords = node_coords();
+    auto frame  = compute_shell_frame(coords);
+    const auto& xl = frame.xl;
+    const auto& yl = frame.yl;
 
     // 2×2 Gauss quadrature over element area.
     // DOF layout per node: [T1, T2, T3, R1, R2, R3] = [u,v,w,θx,θy,θz]
@@ -308,10 +356,10 @@ LocalKe CQuad4::mass_matrix() const {
 
             Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
             for (int n = 0; n < 4; ++n) {
-                J(0,0) += sd.dNdxi[n]  * coords[n].x;
-                J(0,1) += sd.dNdxi[n]  * coords[n].y;
-                J(1,0) += sd.dNdeta[n] * coords[n].x;
-                J(1,1) += sd.dNdeta[n] * coords[n].y;
+                J(0,0) += sd.dNdxi[n]  * xl[n];
+                J(0,1) += sd.dNdxi[n]  * yl[n];
+                J(1,0) += sd.dNdeta[n] * xl[n];
+                J(1,1) += sd.dNdeta[n] * yl[n];
             }
             double detJ = J.determinant();
             double w = wi * wj * detJ;
@@ -331,12 +379,15 @@ LocalKe CQuad4::mass_matrix() const {
             }
         }
     }
-    return Me;
+    return frame.T.transpose() * Me * frame.T;
 }
 
 LocalFe CQuad4::thermal_load(std::span<const double> temperatures, double t_ref) const {
     LocalFe fe = LocalFe::Zero(NUM_DOFS);
     auto coords = node_coords();
+    auto frame  = compute_shell_frame(coords);
+    const auto& xl = frame.xl;
+    const auto& yl = frame.yl;
     const double thickness = this->thickness();
     const Mat1& mat = material();
     const double alpha = mat.A;
@@ -361,13 +412,13 @@ LocalFe CQuad4::thermal_load(std::span<const double> temperatures, double t_ref)
             double dT = T - t_ref;
             if (std::abs(dT) < 1e-15) continue;
 
-            // Jacobian
+            // Jacobian in local element frame
             Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
             for (int n = 0; n < 4; ++n) {
-                J(0,0) += sd.dNdxi[n]  * coords[n].x;
-                J(0,1) += sd.dNdxi[n]  * coords[n].y;
-                J(1,0) += sd.dNdeta[n] * coords[n].x;
-                J(1,1) += sd.dNdeta[n] * coords[n].y;
+                J(0,0) += sd.dNdxi[n]  * xl[n];
+                J(0,1) += sd.dNdxi[n]  * yl[n];
+                J(1,0) += sd.dNdeta[n] * xl[n];
+                J(1,1) += sd.dNdeta[n] * yl[n];
             }
             double detJ = J.determinant();
             Eigen::Matrix2d Jinv = J.inverse();
@@ -390,14 +441,15 @@ LocalFe CQuad4::thermal_load(std::span<const double> temperatures, double t_ref)
             Eigen::Vector3d eps_th(alpha*dT, alpha*dT, 0);
             Eigen::VectorXd fe_mem = thickness * Bm.transpose() * Dm * eps_th * detJ * wi * wj;
 
-            // Map into full 24-DOF vector (u,v components only)
+            // Map into full 24-DOF vector (local u,v components)
             for (int n = 0; n < 4; ++n) {
                 fe(6*n+0) += fe_mem(2*n+0);
                 fe(6*n+1) += fe_mem(2*n+1);
             }
         }
     }
-    return fe;
+    // Transform local thermal force vector to global frame: f_global = T^T f_local
+    return frame.T.transpose() * fe;
 }
 
 std::vector<EqIndex> CQuad4::global_dof_indices(const DofMap& dof_map) const {
@@ -460,6 +512,9 @@ LocalKe CQuad4Mitc4::stiffness_matrix() const {
 
     LocalKe Ke = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
     auto coords = node_coords();
+    auto frame  = compute_shell_frame(coords);
+    const auto& xl = frame.xl;
+    const auto& yl = frame.yl;
     const double t = thickness();
     double kappa = pshell().tst;
     const Mat1& mat = material();
@@ -492,13 +547,13 @@ LocalKe CQuad4Mitc4::stiffness_matrix() const {
     auto covariant_shear = [&](double xi0, double eta0)
         -> std::pair<Eigen::Matrix<double,1,12>, Eigen::Matrix<double,1,12>> {
         auto sd = CQuad4::shape_functions(xi0, eta0);
-        // Jacobian tangent vectors g_ξ and g_η
+        // Jacobian tangent vectors g_ξ and g_η in local element frame
         double gxi_x=0,gxi_y=0, geta_x=0,geta_y=0;
         for (int n = 0; n < 4; ++n) {
-            gxi_x  += sd.dNdxi[n]  * coords[n].x;
-            gxi_y  += sd.dNdxi[n]  * coords[n].y;
-            geta_x += sd.dNdeta[n] * coords[n].x;
-            geta_y += sd.dNdeta[n] * coords[n].y;
+            gxi_x  += sd.dNdxi[n]  * xl[n];
+            gxi_y  += sd.dNdxi[n]  * yl[n];
+            geta_x += sd.dNdeta[n] * xl[n];
+            geta_y += sd.dNdeta[n] * yl[n];
         }
         // γ_ξζ_cov[n] = dNdξ_n * w - N_n*(gxi_x*θx + gxi_y*θy)
         // γ_ηζ_cov[n] = dNdη_n * w - N_n*(geta_x*θx + geta_y*θy)
@@ -532,10 +587,10 @@ LocalKe CQuad4Mitc4::stiffness_matrix() const {
 
         Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
         for (int n = 0; n < 4; ++n) {
-            J(0,0) += sd.dNdxi[n]  * coords[n].x;
-            J(0,1) += sd.dNdxi[n]  * coords[n].y;
-            J(1,0) += sd.dNdeta[n] * coords[n].x;
-            J(1,1) += sd.dNdeta[n] * coords[n].y;
+            J(0,0) += sd.dNdxi[n]  * xl[n];
+            J(0,1) += sd.dNdxi[n]  * yl[n];
+            J(1,0) += sd.dNdeta[n] * xl[n];
+            J(1,1) += sd.dNdeta[n] * yl[n];
         }
         double detJ = J.determinant();
         if (detJ <= 0)
@@ -607,8 +662,8 @@ LocalKe CQuad4Mitc4::stiffness_matrix() const {
         auto sd0 = CQuad4::shape_functions(0.0, 0.0);
         Eigen::Matrix2d J0 = Eigen::Matrix2d::Zero();
         for (int n = 0; n < 4; ++n) {
-            J0(0,0) += sd0.dNdxi[n]*coords[n].x; J0(0,1) += sd0.dNdxi[n]*coords[n].y;
-            J0(1,0) += sd0.dNdeta[n]*coords[n].x; J0(1,1) += sd0.dNdeta[n]*coords[n].y;
+            J0(0,0) += sd0.dNdxi[n]*xl[n];  J0(0,1) += sd0.dNdxi[n]*yl[n];
+            J0(1,0) += sd0.dNdeta[n]*xl[n]; J0(1,1) += sd0.dNdeta[n]*yl[n];
         }
         double detJ0 = J0.determinant();
         Eigen::Matrix2d Jinv0 = J0.inverse();
@@ -635,7 +690,7 @@ LocalKe CQuad4Mitc4::stiffness_matrix() const {
     for (int i = 0; i < 4; ++i)
         Ke(6*i+5, 6*i+5) += drill_stiff;
 
-    return Ke;
+    return frame.T.transpose() * Ke * frame.T;
 }
 
 LocalKe CQuad4Mitc4::mass_matrix() const {
@@ -647,6 +702,9 @@ LocalKe CQuad4Mitc4::mass_matrix() const {
     if (rho == 0.0) return Me;
     const double t = thickness();
     auto coords = node_coords();
+    auto frame  = compute_shell_frame(coords);
+    const auto& xl = frame.xl;
+    const auto& yl = frame.yl;
 
     const double t3_12   = t * t * t / 12.0;
     const double t3_1200 = t * t * t / 1200.0;
@@ -662,10 +720,10 @@ LocalKe CQuad4Mitc4::mass_matrix() const {
 
             Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
             for (int n = 0; n < 4; ++n) {
-                J(0,0) += sd.dNdxi[n]  * coords[n].x;
-                J(0,1) += sd.dNdxi[n]  * coords[n].y;
-                J(1,0) += sd.dNdeta[n] * coords[n].x;
-                J(1,1) += sd.dNdeta[n] * coords[n].y;
+                J(0,0) += sd.dNdxi[n]  * xl[n];
+                J(0,1) += sd.dNdxi[n]  * yl[n];
+                J(1,0) += sd.dNdeta[n] * xl[n];
+                J(1,1) += sd.dNdeta[n] * yl[n];
             }
             double detJ = J.determinant();
             double w = wi * wj * detJ;
@@ -682,13 +740,16 @@ LocalKe CQuad4Mitc4::mass_matrix() const {
             }
         }
     }
-    return Me;
+    return frame.T.transpose() * Me * frame.T;
 }
 
 LocalFe CQuad4Mitc4::thermal_load(std::span<const double> temperatures, double t_ref) const {
     // Identical to CQuad4 — MITC4 only changes transverse shear stiffness, not thermal load.
     LocalFe fe = LocalFe::Zero(NUM_DOFS);
     auto coords = node_coords();
+    auto frame  = compute_shell_frame(coords);
+    const auto& xl = frame.xl;
+    const auto& yl = frame.yl;
     const double th = thickness();
     const Mat1& mat = material();
     const double alpha = mat.A;
@@ -708,8 +769,8 @@ LocalFe CQuad4Mitc4::thermal_load(std::span<const double> temperatures, double t
 
         Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
         for (int n = 0; n < 4; ++n) {
-            J(0,0)+=sd.dNdxi[n]*coords[n].x; J(0,1)+=sd.dNdxi[n]*coords[n].y;
-            J(1,0)+=sd.dNdeta[n]*coords[n].x; J(1,1)+=sd.dNdeta[n]*coords[n].y;
+            J(0,0)+=sd.dNdxi[n]*xl[n];  J(0,1)+=sd.dNdxi[n]*yl[n];
+            J(1,0)+=sd.dNdeta[n]*xl[n]; J(1,1)+=sd.dNdeta[n]*yl[n];
         }
         double detJ = J.determinant();
         Eigen::Matrix2d Jinv = J.inverse();
@@ -731,7 +792,7 @@ LocalFe CQuad4Mitc4::thermal_load(std::span<const double> temperatures, double t
             fe(6*n+1) += fe_mem(2*n+1);
         }
     }}
-    return fe;
+    return frame.T.transpose() * fe;
 }
 
 std::vector<EqIndex> CQuad4Mitc4::global_dof_indices(const DofMap& dof_map) const {

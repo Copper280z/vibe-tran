@@ -245,9 +245,18 @@ Model BdfParser::parse_stream(std::istream &in) {
     if (in_sc)
       ctx.model.analysis.subcases.push_back(cur_sc);
     if (ctx.model.analysis.subcases.empty()) {
-      // Default single subcase
-      ctx.model.analysis.subcases.push_back(
-          SubCase{1, "DEFAULT", LoadSetId{1}, SpcSetId{1}});
+      // No SUBCASE block: global case control entries were collected in cur_sc.
+      // Promote them as subcase 1 so METHOD, SPC, LOAD, etc. take effect.
+      if (cur_sc.id == 1 && cur_sc.label.empty())
+        cur_sc.label = "DEFAULT";
+      if (cur_sc.spc_set.value == 0 && cur_sc.eigrl_id == 0 &&
+          cur_sc.load_set.value == 0) {
+        // Truly empty — fall back to old default
+        ctx.model.analysis.subcases.push_back(
+            SubCase{1, "DEFAULT", LoadSetId{1}, SpcSetId{1}});
+      } else {
+        ctx.model.analysis.subcases.push_back(cur_sc);
+      }
     }
   }
 
@@ -311,8 +320,15 @@ Model BdfParser::parse_stream(std::istream &in) {
 
     // Detect free-field (has commas)
     bool is_free = l.find(',') != std::string::npos;
-    // Detect large-field (starts with * or +*)
+    // Detect large-field: starts with '*' (e.g. *GRID) OR keyword field ends
+    // with '*' (e.g. GRID* — standard MSC Nastran large-field notation).
     bool is_large = !l.empty() && l[0] == '*';
+    if (!is_large && !is_free) {
+      size_t kend = std::min(l.size(), size_t(8));
+      size_t last = l.find_last_not_of(" \t", kend - 1);
+      if (last != std::string::npos && l[last] == '*')
+        is_large = true;
+    }
 
     if (is_continuation(l))
       continue; // handled below
@@ -380,11 +396,11 @@ Model BdfParser::parse_stream(std::istream &in) {
     if (card.fields.empty())
       continue;
     std::string kw = card.fields[0];
-    // Uppercase, strip leading '*' (large-field prefix), trailing whitespace
+    // Uppercase, strip leading/trailing '*' (large-field prefix/suffix), whitespace
     std::transform(kw.begin(), kw.end(), kw.begin(), ::toupper);
     if (!kw.empty() && kw[0] == '*')
       kw.erase(0, 1);
-    while (!kw.empty() && std::isspace((unsigned char)kw.back()))
+    while (!kw.empty() && (kw.back() == '*' || std::isspace((unsigned char)kw.back())))
       kw.pop_back();
 
     ctx.line_num = card.first_line;

@@ -710,6 +710,64 @@ ENDDATA
     EXPECT_NEAR(mat.ref_temp, 20.0, 1e-6);
 }
 
+// ── Large-field KEYWORD* format (standard MSC Nastran) ──────────────────────
+
+TEST(BdfParser, LargeFieldGridStar_WithContinuation) {
+    // Standard MSC Nastran large-field format: keyword ends with '*' (e.g. GRID*)
+    // and continuation starts with '*'.  The Mecway-generated test file uses this
+    // convention.  Fields are 16 chars wide, so a two-line GRID* card fully
+    // captures ID, CP, X1, X2, X3, CD.
+    // Large-field layout (80-column): keyword(8) + 4×field(16) + cont(8)
+    // cols 0-7:   GRID*
+    // cols 8-23:  node ID (right-justified)
+    // cols 24-39: CP
+    // cols 40-55: X1
+    // cols 56-71: X2  ← continuation marker occupies col 72
+    // line 2: *-marker(8) + X3(16) + CD(16)
+    const std::string bdf =
+        "BEGIN BULK\n"
+        "GRID*                  7               0        3.000000        4.000000*\n"
+        "*               5.000000               0\n"
+        "ENDDATA\n";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.nodes.size(), 1u);
+    const GridPoint& n = m.nodes.at(NodeId{7});
+    EXPECT_DOUBLE_EQ(n.position.x, 3.0);
+    EXPECT_DOUBLE_EQ(n.position.y, 4.0);
+    EXPECT_DOUBLE_EQ(n.position.z, 5.0);
+}
+
+TEST(BdfParser, GlobalCaseControlNoSubcase) {
+    // Some solvers (e.g. Mecway) emit case control entries at the global level
+    // without an explicit SUBCASE block.  These entries must be applied to the
+    // default subcase so METHOD/SPC/DISPLACEMENT take effect.
+    const std::string bdf = R"(
+SOL 103
+CEND
+METHOD = 5
+SPC = 2
+DISPLACEMENT = ALL
+BEGIN BULK
+MAT1,1,2.0E7,,0.3,1.0
+PSHELL,1,1,0.1
+GRID,1,,0.,0.,0.
+GRID,2,,1.,0.,0.
+GRID,3,,1.,1.,0.
+GRID,4,,0.,1.,0.
+CQUAD4,1,1,1,2,3,4
+SPC1,2,123456,1,2,3,4
+EIGRL,5,,,4
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.analysis.subcases.size(), 1u);
+    const SubCase& sc = m.analysis.subcases[0];
+    // METHOD = 5 and SPC = 2 from global case control must be applied
+    EXPECT_EQ(sc.eigrl_id, 5);
+    EXPECT_EQ(sc.spc_set.value, 2);
+    EXPECT_TRUE(sc.disp_print);
+}
+
 TEST(BdfParser, TEMPD_StoredInModel) {
     // TEMPD cards should populate model.tempd map
     const std::string bdf = R"(

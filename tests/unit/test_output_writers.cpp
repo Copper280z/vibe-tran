@@ -167,7 +167,7 @@ TEST(F06Writer, HeaderContainsNastranTitle) {
     std::ostringstream oss;
     F06Writer::write(res, m, oss);
     std::string out = oss.str();
-    EXPECT_NE(out.find("N A S T R A N"), std::string::npos);
+    EXPECT_NE(out.find("V I B E S T R A N"), std::string::npos);
     EXPECT_NE(out.find("S O L   1 0 1"), std::string::npos);
 }
 
