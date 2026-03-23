@@ -241,4 +241,293 @@ TEST_F(CudaTest, ZeroForceSolvesCorrectly) {
         << "Zero force should produce zero displacement";
 }
 
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CudaEigensolverBackend tests
+// ═════════════════════════════════════════════════════════════════════════════
+
 #endif // HAVE_CUDA
+
+#ifdef HAVE_CUDA_EIGENSOLVER
+#include "solver/cuda_eigensolver_backend.hpp"
+
+using namespace vibetran;
+
+// ── Fixture ───────────────────────────────────────────────────────────────────
+
+class CudaEigTest : public ::testing::Test {
+protected:
+    // cppcheck-suppress unusedFunction -- called by GTest framework
+    void SetUp() override {
+        backend_ = CudaEigensolverBackend::try_create();
+        if (!backend_.has_value())
+            GTEST_SKIP() << "CUDA not available — skipping CUDA eigensolver tests";
+    }
+
+    std::optional<CudaEigensolverBackend> backend_;
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Build an Eigen::SparseMatrix<double> from a dense symmetric matrix.
+static Eigen::SparseMatrix<double> dense_to_sparse(
+    const std::vector<std::vector<double>>& A)
+{
+    int n = static_cast<int>(A.size());
+    using T = Eigen::Triplet<double>;
+    std::vector<T> trips;
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j)
+            if (A[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] != 0.0)
+                trips.emplace_back(i, j,
+                    A[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)]);
+    Eigen::SparseMatrix<double> mat(n, n);
+    mat.setFromTriplets(trips.begin(), trips.end());
+    return mat;
+}
+
+// ── Test 1: diagonal GEVP — exact eigenvalues ─────────────────────────────────
+// K = diag(1, 4, 9),  M = diag(1, 1, 1).
+// Eigenvalues are exactly 1, 4, 9; eigenvectors are the standard basis.
+// With sigma = 0 (shift below all eigenvalues, using default -1 to keep C = K+M
+// positive definite), we expect the 3 eigenvalues in ascending order.
+
+TEST_F(CudaEigTest, DiagonalGEVPExactEigenvalues) {
+    std::vector<std::vector<double>> Kd = {{1,0,0},{0,4,0},{0,0,9}};
+    std::vector<std::vector<double>> Md = {{1,0,0},{0,1,0},{0,0,1}};
+    auto K = dense_to_sparse(Kd);
+    auto M = dense_to_sparse(Md);
+
+    auto pairs = backend_->solve(K, M, 3, /*sigma=*/-1.0);
+
+    ASSERT_GE(static_cast<int>(pairs.size()), 3);
+    // Sorted ascending by eigenvalue.
+    EXPECT_NEAR(pairs[0].eigenvalue, 1.0, 1e-6)
+        << "First eigenvalue should be 1.0";
+    EXPECT_NEAR(pairs[1].eigenvalue, 4.0, 1e-6)
+        << "Second eigenvalue should be 4.0";
+    EXPECT_NEAR(pairs[2].eigenvalue, 9.0, 1e-6)
+        << "Third eigenvalue should be 9.0";
+}
+
+// ── Test 2: diagonal GEVP with non-identity M ─────────────────────────────────
+// K = diag(2, 8, 18),  M = diag(2, 2, 2).
+// Eigenvalues lambda satisfy K phi = lambda M phi  =>  2/2=1, 8/2=4, 18/2=9.
+// Same eigenvalues as Test 1 despite different K and M, which tests that the
+// generalized problem (not just a standard eigenvalue problem) is solved.
+
+TEST_F(CudaEigTest, DiagonalGEVPScaledMass) {
+    std::vector<std::vector<double>> Kd = {{2,0,0},{0,8,0},{0,0,18}};
+    std::vector<std::vector<double>> Md = {{2,0,0},{0,2,0},{0,0,2}};
+    auto K = dense_to_sparse(Kd);
+    auto M = dense_to_sparse(Md);
+
+    auto pairs = backend_->solve(K, M, 3, -1.0);
+
+    ASSERT_GE(static_cast<int>(pairs.size()), 3);
+    EXPECT_NEAR(pairs[0].eigenvalue, 1.0, 1e-6);
+    EXPECT_NEAR(pairs[1].eigenvalue, 4.0, 1e-6);
+    EXPECT_NEAR(pairs[2].eigenvalue, 9.0, 1e-6);
+}
+
+// ── Test 3: tridiagonal GEVP against SpectraEigensolverBackend ────────────────
+// K = tridiag(2, -1, -1) of size 20, M = identity.
+// Analytical eigenvalues: lambda_k = 2 - 2*cos(k*pi/(n+1)), k=1..n.
+// We compare the 5 lowest eigenvalues against Spectra to within 1e-6.
+
+TEST_F(CudaEigTest, TridiagonalGEVPMatchesSpectra) {
+    const int n = 20;
+    Eigen::SparseMatrix<double> K(n, n), M(n, n);
+    {
+        using T = Eigen::Triplet<double>;
+        std::vector<T> Kt, Mt;
+        for (int i = 0; i < n; ++i) {
+            Kt.emplace_back(i, i, 2.0);
+            if (i > 0)     { Kt.emplace_back(i, i-1, -1.0); Kt.emplace_back(i-1, i, -1.0); }
+            Mt.emplace_back(i, i, 1.0);
+        }
+        K.setFromTriplets(Kt.begin(), Kt.end());
+        M.setFromTriplets(Mt.begin(), Mt.end());
+    }
+
+    const int nd = 5;
+    auto cuda_pairs   = backend_->solve(K, M, nd, -1.0);
+    auto spectra_pairs = SpectraEigensolverBackend{}.solve(K, M, nd, -1.0);
+
+    ASSERT_GE(static_cast<int>(cuda_pairs.size()), nd);
+    ASSERT_GE(static_cast<int>(spectra_pairs.size()), nd);
+
+    for (int i = 0; i < nd; ++i) {
+        EXPECT_NEAR(cuda_pairs[static_cast<std::size_t>(i)].eigenvalue,
+                    spectra_pairs[static_cast<std::size_t>(i)].eigenvalue, 1e-6)
+            << "Mode " << i+1 << " eigenvalue differs between CUDA and Spectra";
+    }
+}
+
+// ── Test 4: eigenvalues sorted ascending ─────────────────────────────────────
+// Verify the output is sorted ascending regardless of the internal Ritz value
+// ordering.  Use a well-conditioned diagonal problem.
+
+TEST_F(CudaEigTest, EigenvaluesSortedAscending) {
+    const int n = 10;
+    std::vector<std::vector<double>> Kd(static_cast<std::size_t>(n),
+                                        std::vector<double>(static_cast<std::size_t>(n), 0.0));
+    std::vector<std::vector<double>> Md(static_cast<std::size_t>(n),
+                                        std::vector<double>(static_cast<std::size_t>(n), 0.0));
+    for (int i = 0; i < n; ++i) {
+        Kd[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] =
+            static_cast<double>((i + 1) * (i + 1));
+        Md[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] = 1.0;
+    }
+    auto K = dense_to_sparse(Kd);
+    auto M = dense_to_sparse(Md);
+
+    auto pairs = backend_->solve(K, M, 5, -1.0);
+
+    ASSERT_GE(static_cast<int>(pairs.size()), 2);
+    for (std::size_t i = 1; i < pairs.size(); ++i)
+        EXPECT_LE(pairs[i-1].eigenvalue, pairs[i].eigenvalue)
+            << "Eigenvalues not sorted at index " << i;
+}
+
+// ── Test 5: eigenvectors are M-orthonormal ────────────────────────────────────
+// For K = tridiag(2,-1,-1), M = I, the returned eigenvectors should satisfy
+// phi_i^T M phi_j = delta_{ij}  (mass-normalised).
+// We verify this for the lowest 4 modes: off-diagonal < 1e-10, diagonal ≈ 1.
+
+TEST_F(CudaEigTest, EigenvectorsMassNormalised) {
+    const int n = 15;
+    Eigen::SparseMatrix<double> K(n, n), M(n, n);
+    {
+        using T = Eigen::Triplet<double>;
+        std::vector<T> Kt, Mt;
+        for (int i = 0; i < n; ++i) {
+            Kt.emplace_back(i, i, 2.0);
+            if (i > 0) { Kt.emplace_back(i,i-1,-1.0); Kt.emplace_back(i-1,i,-1.0); }
+            Mt.emplace_back(i, i, 1.0);
+        }
+        K.setFromTriplets(Kt.begin(), Kt.end());
+        M.setFromTriplets(Mt.begin(), Mt.end());
+    }
+
+    const int nd = 4;
+    auto pairs = backend_->solve(K, M, nd, -1.0);
+    ASSERT_GE(static_cast<int>(pairs.size()), nd);
+
+    for (int i = 0; i < nd; ++i) {
+        for (int j = i; j < nd; ++j) {
+            const Eigen::VectorXd& phi_i = pairs[static_cast<std::size_t>(i)].eigenvector;
+            const Eigen::VectorXd& phi_j = pairs[static_cast<std::size_t>(j)].eigenvector;
+            double inner = phi_i.dot(M * phi_j);
+            if (i == j) {
+                EXPECT_NEAR(inner, 1.0, 1e-6)
+                    << "Mode " << i+1 << " is not M-normalised (phi^T M phi = " << inner << ")";
+            } else {
+                EXPECT_NEAR(inner, 0.0, 1e-6)
+                    << "Modes " << i+1 << " and " << j+1
+                    << " are not M-orthogonal (phi_i^T M phi_j = " << inner << ")";
+            }
+        }
+    }
+}
+
+// ── Test 6: residual ||K phi - lambda M phi|| / ||K phi|| < 1e-6 ──────────────
+// A direct measure of eigenpair quality.  For a well-converged Lanczos run
+// the relative residual should be well below 1e-6.
+
+TEST_F(CudaEigTest, EigenpairResidualsSmall) {
+    const int n = 30;
+    Eigen::SparseMatrix<double> K(n, n), M(n, n);
+    {
+        using T = Eigen::Triplet<double>;
+        std::vector<T> Kt, Mt;
+        for (int i = 0; i < n; ++i) {
+            Kt.emplace_back(i, i, 2.0);
+            if (i > 0) { Kt.emplace_back(i,i-1,-1.0); Kt.emplace_back(i-1,i,-1.0); }
+            Mt.emplace_back(i, i, 1.0);
+        }
+        K.setFromTriplets(Kt.begin(), Kt.end());
+        M.setFromTriplets(Mt.begin(), Mt.end());
+    }
+
+    auto pairs = backend_->solve(K, M, 6, -1.0);
+    ASSERT_GE(static_cast<int>(pairs.size()), 6);
+
+    for (std::size_t i = 0; i < 6; ++i) {
+        const Eigen::VectorXd Kphi = K * pairs[i].eigenvector;
+        const Eigen::VectorXd res  = Kphi - pairs[i].eigenvalue * (M * pairs[i].eigenvector);
+        double kphi_norm = Kphi.norm();
+        double rel_res   = (kphi_norm > 1e-300) ? res.norm() / kphi_norm : res.norm();
+        EXPECT_LT(rel_res, 1e-6)
+            << "Mode " << i+1 << " residual too large: " << rel_res;
+    }
+}
+
+// ── Test 7: full comparison with SpectraEigensolverBackend ───────────────────
+// Builds a tridiagonal K (size 25) with a non-identity lumped mass M
+// (M_ii = 1 + 0.1*i to break symmetry).  Requests the 6 lowest eigenpairs
+// from both solvers and verifies:
+//   (a) Eigenvalues agree to within 1e-5.
+//   (b) Eigenvectors agree up to sign: |phi_cuda^T M phi_spectra| ≈ 1.
+// This is the primary regression test ensuring the CUDA Lanczos produces
+// the same physical result as the well-validated Spectra backend.
+
+TEST_F(CudaEigTest, CompareFullyWithSpectra) {
+    const int n = 25;
+    Eigen::SparseMatrix<double> K(n, n), M(n, n);
+    {
+        using T = Eigen::Triplet<double>;
+        std::vector<T> Kt, Mt;
+        for (int i = 0; i < n; ++i) {
+            Kt.emplace_back(i, i, 2.0);
+            if (i > 0) { Kt.emplace_back(i,i-1,-1.0); Kt.emplace_back(i-1,i,-1.0); }
+            // Non-uniform lumped mass: M_ii = 1 + 0.1*i
+            Mt.emplace_back(i, i, 1.0 + 0.1 * i);
+        }
+        K.setFromTriplets(Kt.begin(), Kt.end());
+        M.setFromTriplets(Mt.begin(), Mt.end());
+    }
+
+    const int nd = 6;
+    auto cuda_pairs    = backend_->solve(K, M, nd, -1.0);
+    auto spectra_pairs = SpectraEigensolverBackend{}.solve(K, M, nd, -1.0);
+
+    ASSERT_GE(static_cast<int>(cuda_pairs.size()),    nd) << "CUDA returned fewer pairs than requested";
+    ASSERT_GE(static_cast<int>(spectra_pairs.size()), nd) << "Spectra returned fewer pairs than requested";
+
+    for (int i = 0; i < nd; ++i) {
+        double lam_cuda    = cuda_pairs[static_cast<std::size_t>(i)].eigenvalue;
+        double lam_spectra = spectra_pairs[static_cast<std::size_t>(i)].eigenvalue;
+
+        // (a) Eigenvalue agreement.
+        EXPECT_NEAR(lam_cuda, lam_spectra, 1e-5)
+            << "Mode " << i+1 << " eigenvalue: CUDA=" << lam_cuda
+            << " Spectra=" << lam_spectra;
+
+        // (b) Eigenvector agreement (sign-agnostic via |phi_c^T M phi_s| ≈ 1).
+        // Both are M-normalised so the M-inner product should be ±1 if they
+        // span the same direction.
+        const Eigen::VectorXd& phi_c = cuda_pairs[static_cast<std::size_t>(i)].eigenvector;
+        const Eigen::VectorXd& phi_s = spectra_pairs[static_cast<std::size_t>(i)].eigenvector;
+        double m_inner = std::abs(phi_c.dot(M * phi_s));
+        EXPECT_NEAR(m_inner, 1.0, 1e-4)
+            << "Mode " << i+1 << " eigenvectors differ: |phi_c^T M phi_s|=" << m_inner;
+    }
+}
+
+// ── Test 9: name() and device_name() non-empty ────────────────────────────────
+
+TEST_F(CudaEigTest, NameAndDeviceName) {
+    EXPECT_FALSE(backend_->name().empty());
+    EXPECT_NE(backend_->name().find("CUDA"), std::string::npos)
+        << "Backend name should contain 'CUDA'";
+    EXPECT_FALSE(backend_->device_name().empty())
+        << "device_name() should return the GPU model string";
+}
+
+#else
+// Compile-time stub when CUDA eigensolver was not compiled in.
+TEST(CudaEigTest, CudaEigensolverNotCompiled) {
+    GTEST_SKIP() << "CUDA eigensolver not compiled — skipping eigensolver tests";
+}
+#endif // HAVE_CUDA_EIGENSOLVER

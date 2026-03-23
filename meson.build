@@ -214,6 +214,17 @@ if have_cuda_compiler
   # compatibility.  Set --std=c++20 so other C++20 features (span, optional,
   # string_view) are available in host code.
   add_project_arguments('--std=c++20', language: 'cuda')
+
+  # Eigen sets EIGEN_DEFAULT_ALIGN_BYTES based on the target architecture.
+  # With -march=native on AVX2 hosts this is 32; without it, 16.  Both the
+  # .cpp and .cu translation units instantiate Eigen templates (VectorXd,
+  # SparseMatrix), so they MUST agree on alignment, otherwise Eigen objects
+  # allocated on one side and freed on the other will use mismatched
+  # allocators, causing double-free / heap corruption at runtime.
+  # Forward the same -march=native flag to nvcc's host compiler.
+  if get_option('buildtype') == 'release'
+    add_project_arguments('-Xcompiler=-march=native', language: 'cuda')
+  endif
 endif
 
 if have_cuda_compiler
@@ -283,8 +294,19 @@ if have_cuda_compiler
       cuda_sources      += files('src/solver/cuda_pcg_solver_backend.cu')
       cuda_lib_deps     += [cuda_pcg_dep]
       message('CUDA PCG solver backend: enabled (cuBLAS + cuSPARSE)')
+
+      # Modal eigensolver requires cuDSS + cuBLAS + cuSPARSE together.
+      cuda_eigensolver_dep = declare_dependency(
+        dependencies: [_cudart_lib, _cudss_lib, _cublas_lib, _cusparse_lib],
+        include_directories: _cudss_inc,
+      )
+      cuda_sources      += files('src/solver/cuda_eigensolver_backend.cu')
+      cuda_compile_args += ['-DHAVE_CUDA_EIGENSOLVER=1']
+      cuda_lib_deps     += [cuda_eigensolver_dep]
+      message('CUDA eigensolver backend: enabled (cuDSS + cuBLAS + cuSPARSE)')
     else
       message('CUDA PCG solver backend: disabled (cublas or cusparse not found)')
+      message('CUDA eigensolver backend: disabled (cublas or cusparse not found)')
     endif
   else
     message('CUDA sparse solver backend: disabled (cudart/cudss not found)')

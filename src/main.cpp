@@ -5,9 +5,14 @@
 // solver when available:
 //   --backend=cpu               Eigen sparse Cholesky (always available, default)
 //   --backend=cpu-pcg           Eigen PCG + IncompleteCholesky (low memory)
-//   --backend=cuda              NVIDIA cuSOLVER sparse Cholesky (requires CUDA)
+//   --backend=cuda              NVIDIA cuDSS sparse direct solver (requires CUDA)
+//                               For SOL 103 modal: uses the CUDA shift-invert
+//                               Lanczos eigensolver (requires cuDSS+cuBLAS+cuSPARSE)
 //   --backend=cuda-pcg          NVIDIA cuBLAS/cuSPARSE PCG (low memory, requires CUDA)
+//                               For SOL 103 modal: uses the CUDA eigensolver
+//                               (requires cuDSS+cuBLAS+cuSPARSE)
 //   --backend=vulkan            Vulkan PCG (requires Vulkan SDK)
+//                               SOL 103 modal is not supported with --backend=vulkan.
 //   --cuda-single-precision     Use float32 instead of float64 for the CUDA solve.
 //
 // Thread control (CPU backends):
@@ -40,6 +45,9 @@
 #include "solver/cuda_pcg_solver_backend.hpp"
 #include "solver/cuda_solver_backend.hpp"
 #endif
+#ifdef HAVE_CUDA_EIGENSOLVER
+#include "solver/cuda_eigensolver_backend.hpp"
+#endif
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -61,11 +69,11 @@ static void print_usage() {
                 "  --backend=cpu-pcg          Eigen PCG + IncompleteCholesky "
                 "CPU solver (low memory)\n"
                 "  --backend=vulkan           Vulkan PCG GPU solver (requires "
-                "Vulkan)\n"
-                "  --backend=cuda             CUDA cuDSS sparse direct solver "
-                "(requires CUDA)\n"
+                "Vulkan; SOL 101 only)\n"
+                "  --backend=cuda             CUDA cuDSS direct solver "
+                "(requires CUDA; SOL 101 + SOL 103)\n"
                 "  --backend=cuda-pcg         CUDA PCG + IC0/ILU0 GPU solver "
-                "(low memory, requires CUDA)\n"
+                "(requires CUDA; SOL 101 + SOL 103)\n"
                 "  --cuda-single-precision    Use float32 for CUDA solve "
                 "(halves GPU memory usage)\n"
                 "  --csv                      Write CSV output even if "
@@ -212,8 +220,36 @@ int main(int argc, char *argv[]) {
 
     if (model.analysis.sol == vibetran::SolutionType::Modal) {
       // ── SOL 103 Modal Analysis ───────────────────────────────────────────
-      auto eig_backend =
-          std::make_unique<vibetran::SpectraEigensolverBackend>();
+      // Select eigensolver backend.
+      // CUDA (cuda / cuda-pcg): use the GPU shift-invert Lanczos eigensolver
+      //   when the CUDA eigensolver was compiled in; error otherwise.
+      // Vulkan: not supported for modal analysis.
+      // CPU / Auto: use Spectra.
+      std::unique_ptr<vibetran::EigensolverBackend> eig_backend;
+
+      if (backend_choice == BackendChoice::Cuda ||
+          backend_choice == BackendChoice::CudaPCG) {
+#ifdef HAVE_CUDA_EIGENSOLVER
+        auto cu_eig = vibetran::CudaEigensolverBackend::try_create();
+        if (!cu_eig.has_value()) {
+          spdlog::error("CUDA eigensolver requested but no CUDA device found");
+          return 1;
+        }
+        eig_backend = std::make_unique<vibetran::CudaEigensolverBackend>(
+            std::move(*cu_eig));
+#else
+        spdlog::error("CUDA eigensolver was not compiled into this build "
+                      "(requires cuDSS + cuBLAS + cuSPARSE)");
+        return 1;
+#endif
+      } else if (backend_choice == BackendChoice::Vulkan) {
+        spdlog::error("--backend=vulkan is not supported for SOL 103 modal "
+                      "analysis; use --backend=cuda or --backend=cpu");
+        return 1;
+      } else {
+        eig_backend = std::make_unique<vibetran::SpectraEigensolverBackend>();
+      }
+
       spdlog::info("Solving with: {}", eig_backend->name());
       vibetran::ModalSolver modal_solver(std::move(eig_backend));
       vibetran::ModalSolverResults modal_results = modal_solver.solve(model);
