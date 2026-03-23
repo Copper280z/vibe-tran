@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <vector>
 
-namespace vibetran {
+namespace vibestran {
 
 // ── Destruction ─────────────────────────────────────────────────────────────
 
@@ -71,7 +71,7 @@ std::optional<VulkanContext> VulkanContext::create() noexcept {
     // ── Instance ─────────────────────────────────────────────────────────────
     VkApplicationInfo app_info{};
     app_info.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    app_info.pApplicationName   = "Vibetran";
+    app_info.pApplicationName   = "Vibestran";
     app_info.applicationVersion = VK_MAKE_VERSION(0, 1, 0);
     app_info.apiVersion         = VK_API_VERSION_1_1;
 
@@ -198,6 +198,6 @@ std::optional<VulkanContext> VulkanContext::create() noexcept {
     return ctx;
 }
 
-} // namespace vibetran
+} // namespace vibestran
 
 #endif // HAVE_VULKAN

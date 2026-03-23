@@ -21,7 +21,7 @@
 #include "core/types.hpp"
 #include <array>
 
-namespace vibetran {
+namespace vibestran {
 
 enum class CoordType {
     Rectangular,  // CORD2R / CORD1R
@@ -85,4 +85,4 @@ Mat3 rotation_matrix(const CoordSys& cs, const Vec3& basic_pos);
 /// Apply a Mat3 rotation: result[i] = sum_j M[i][j] * v[j]
 Vec3 apply_rotation(const Mat3& M, const Vec3& v);
 
-} // namespace vibetran
+} // namespace vibestran

@@ -7,7 +7,7 @@
 #include "core/sparse_matrix.hpp"
 #include "solver/solver_backend.hpp"
 
-using namespace vibetran;
+using namespace vibestran;
 
 // ── SparseMatrixBuilder::add and triplets (only used in tests) ────────────────
 

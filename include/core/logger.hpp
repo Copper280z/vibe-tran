@@ -1,6 +1,6 @@
 #pragma once
 // include/core/logger.hpp
-// Minimal logging interface for Vibetran.
+// Minimal logging interface for Vibestran.
 //
 // This header is intentionally kept free of spdlog includes so it can be
 // safely included from CUDA .cu files (nvcc / g++-12 host compiler).
@@ -13,14 +13,14 @@
 //
 // Usage in CUDA .cu files:
 //   #include "core/logger.hpp"
-//   vibetran::log_debug("[cuda] allocating " + std::to_string(mb) + " MiB");
+//   vibestran::log_debug("[cuda] allocating " + std::to_string(mb) + " MiB");
 //
 // All log functions are thread-safe (spdlog async-safe sinks).
 
 #include <filesystem>
 #include <string>
 
-namespace vibetran {
+namespace vibestran {
 
 /// Initialize the global spdlog logger. Must be called once from main()
 /// before any logging. Safe to call multiple times (re-initializes).
@@ -35,4 +35,4 @@ void log_info (const std::string& msg);
 void log_warn (const std::string& msg);
 void log_error(const std::string& msg);
 
-} // namespace vibetran
+} // namespace vibestran

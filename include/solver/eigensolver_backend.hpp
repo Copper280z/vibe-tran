@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace vibetran {
+namespace vibestran {
 
 /// One mode shape result (single eigenvalue/eigenvector pair)
 struct EigenPair {
@@ -49,4 +49,4 @@ public:
     }
 };
 
-} // namespace vibetran
+} // namespace vibestran

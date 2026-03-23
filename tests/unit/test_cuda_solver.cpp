@@ -17,7 +17,7 @@
 #include "solver/cuda_solver_backend.hpp"
 #endif
 
-using namespace vibetran;
+using namespace vibestran;
 
 #ifndef HAVE_CUDA
 // All tests in this file are no-ops when CUDA was not compiled in.
@@ -251,7 +251,7 @@ TEST_F(CudaTest, ZeroForceSolvesCorrectly) {
 #ifdef HAVE_CUDA_EIGENSOLVER
 #include "solver/cuda_eigensolver_backend.hpp"
 
-using namespace vibetran;
+using namespace vibestran;
 
 // ── Fixture ───────────────────────────────────────────────────────────────────
 

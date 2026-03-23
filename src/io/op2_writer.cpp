@@ -28,7 +28,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace vibetran {
+namespace vibestran {
 
 // ── Primitive I/O helpers ─────────────────────────────────────────────────────
 
@@ -750,4 +750,4 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
     write_markers(f, 0);
 }
 
-} // namespace vibetran
+} // namespace vibestran

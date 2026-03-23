@@ -26,7 +26,7 @@
 #include <span>
 #include <vector>
 
-namespace vibetran {
+namespace vibestran {
 
 /// Describes how one dependent DOF is expressed in terms of independent DOFs.
 struct MpcElimination {
@@ -109,4 +109,4 @@ private:
     t_column(EqIndex full_eq) const;
 };
 
-} // namespace vibetran
+} // namespace vibestran

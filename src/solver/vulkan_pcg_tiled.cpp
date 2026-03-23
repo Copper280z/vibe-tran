@@ -22,7 +22,7 @@
 #include <format>
 #include <vector>
 
-namespace vibetran {
+namespace vibestran {
 
 // ── CPU scalar helpers ────────────────────────────────────────────────────────
 
@@ -252,6 +252,6 @@ solve_tiled(VulkanContext& ctx, Pipelines& pl,
     return x;
 }
 
-} // namespace vibetran
+} // namespace vibestran
 
 #endif // HAVE_VULKAN

@@ -10,7 +10,7 @@
 #include <stdexcept>
 #include <format>
 
-namespace vibetran {
+namespace vibestran {
 
 // Gauss points for 2x2 quadrature
 static constexpr double GP2 = 1.0 / std::numbers::sqrt3; // ≈ 0.5773502692
@@ -745,4 +745,4 @@ std::vector<EqIndex> CQuad4Mitc4::global_dof_indices(const DofMap& dof_map) cons
     return result;
 }
 
-} // namespace vibetran
+} // namespace vibestran

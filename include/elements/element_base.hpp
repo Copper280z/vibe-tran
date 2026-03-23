@@ -18,7 +18,7 @@
 #include <span>
 #include <Eigen/Dense>
 
-namespace vibetran {
+namespace vibestran {
 
 /// Dense local stiffness matrix (heap-allocated, row-major)
 using LocalKe = Eigen::MatrixXd;
@@ -60,4 +60,4 @@ public:
     [[nodiscard]] virtual std::span<const NodeId> node_ids() const noexcept = 0;
 };
 
-} // namespace vibetran
+} // namespace vibestran

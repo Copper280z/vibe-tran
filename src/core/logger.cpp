@@ -1,5 +1,5 @@
 // src/core/logger.cpp
-// spdlog-backed implementation of the Vibetran logging interface.
+// spdlog-backed implementation of the Vibestran logging interface.
 
 #include "core/logger.hpp"
 #include <spdlog/sinks/basic_file_sink.h>
@@ -8,7 +8,7 @@
 #include <memory>
 #include <vector>
 
-namespace vibetran {
+namespace vibestran {
 
 void init_logger(const std::filesystem::path& log_file) {
     std::vector<spdlog::sink_ptr> sinks;
@@ -30,7 +30,7 @@ void init_logger(const std::filesystem::path& log_file) {
     }
 
     auto logger = std::make_shared<spdlog::logger>(
-        "vibetran", sinks.begin(), sinks.end());
+        "vibestran", sinks.begin(), sinks.end());
     logger->set_level(spdlog::level::debug);
     spdlog::set_default_logger(logger);
 }
@@ -41,4 +41,4 @@ void log_info (const std::string& msg) { spdlog::info("{}", msg); }
 void log_warn (const std::string& msg) { spdlog::warn("{}", msg); }
 void log_error(const std::string& msg) { spdlog::error("{}", msg); }
 
-} // namespace vibetran
+} // namespace vibestran

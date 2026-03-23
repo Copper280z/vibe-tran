@@ -5,7 +5,7 @@
 #include <cmath>
 #include <format>
 
-namespace vibetran {
+namespace vibestran {
 
 // ── RBE2 ──────────────────────────────────────────────────────────────────────
 //
@@ -182,4 +182,4 @@ void expand_rbe3(const Rbe3& rbe, const Model& model, std::vector<Mpc>& out) {
     }
 }
 
-} // namespace vibetran
+} // namespace vibestran

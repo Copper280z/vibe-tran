@@ -1,5 +1,5 @@
 // src/main.cpp
-// Command-line driver: vibetran [options] <input.bdf> [output.f06]
+// Command-line driver: vibestran [options] <input.bdf> [output.f06]
 //
 // Default backend is the Eigen CPU solver.  Use --backend to select a GPU
 // solver when available:
@@ -17,7 +17,7 @@
 //
 // Thread control (CPU backends):
 //   Set OMP_NUM_THREADS before running to limit parallelism, e.g.:
-//     OMP_NUM_THREADS=8 vibetran input.bdf
+//     OMP_NUM_THREADS=8 vibestran input.bdf
 //   On hyperthreaded CPUs, setting this to the physical core count often
 //   improves performance.
 //
@@ -59,7 +59,7 @@
 enum class BackendChoice { Auto, Cpu, CpuPCG, Vulkan, Cuda, CudaPCG };
 
 static void print_usage() {
-  spdlog::error("Usage: vibetran "
+  spdlog::error("Usage: vibestran "
                 "[--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg>]\n"
                 "                      [--cuda-single-precision] [--csv]\n"
                 "                      [--log-file=<path>]\n"
@@ -81,7 +81,7 @@ static void print_usage() {
                 "  --log-file=<path>          Also write all log output to "
                 "this file\n"
                 "  OMP_NUM_THREADS=N          Limit CPU solver threads, e.g.:\n"
-                "                             OMP_NUM_THREADS=8 vibetran "
+                "                             OMP_NUM_THREADS=8 vibestran "
                 "input.bdf\n");
 }
 
@@ -117,7 +117,7 @@ int main(int argc, char *argv[]) {
         backend_choice = BackendChoice::CudaPCG;
       else {
         // init_logger with no file so error() goes somewhere
-        vibetran::init_logger();
+        vibestran::init_logger();
         spdlog::error("Unknown backend '{}'. Valid: cpu, cpu-pcg, vulkan, cuda, cuda-pcg", val);
         print_usage();
         return 1;
@@ -129,7 +129,7 @@ int main(int argc, char *argv[]) {
       f06_path = arg;
       ++positional;
     } else {
-      vibetran::init_logger();
+      vibestran::init_logger();
       spdlog::error("Unexpected argument: {}", arg);
       print_usage();
       return 1;
@@ -137,13 +137,13 @@ int main(int argc, char *argv[]) {
   }
 
   if (positional == 0) {
-    vibetran::init_logger();
+    vibestran::init_logger();
     print_usage();
     return 1;
   }
 
   // Initialise logger (and optional file sink) before any logging.
-  vibetran::init_logger(log_file_path);
+  vibestran::init_logger(log_file_path);
 
   if (f06_path.empty())
     f06_path = std::filesystem::path(bdf_path).replace_extension(".f06");
@@ -155,9 +155,9 @@ int main(int argc, char *argv[]) {
     std::string ext = bdf_path.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](unsigned char c) { return std::tolower(c); });
-    vibetran::Model model = (ext == ".inp")
-        ? vibetran::InpParser::parse_file(bdf_path)
-        : vibetran::BdfParser::parse_file(bdf_path);
+    vibestran::Model model = (ext == ".inp")
+        ? vibestran::InpParser::parse_file(bdf_path)
+        : vibestran::BdfParser::parse_file(bdf_path);
 
     spdlog::info("  Nodes:    {}", model.nodes.size());
     spdlog::info("  Elements: {}", model.elements.size());
@@ -165,15 +165,15 @@ int main(int argc, char *argv[]) {
     spdlog::info("  Subcases: {}", model.analysis.subcases.size());
 
     // ── Backend selection ─────────────────────────────────────────────────
-    std::unique_ptr<vibetran::SolverBackend> backend;
+    std::unique_ptr<vibestran::SolverBackend> backend;
 
     if (backend_choice == BackendChoice::CpuPCG) {
-      backend = std::make_unique<vibetran::EigenPCGSolverBackend>();
+      backend = std::make_unique<vibestran::EigenPCGSolverBackend>();
     } else if (backend_choice == BackendChoice::Cuda) {
 #ifdef HAVE_CUDA
-      auto cu = vibetran::CudaSolverBackend::try_create(cuda_single_precision);
+      auto cu = vibestran::CudaSolverBackend::try_create(cuda_single_precision);
       if (cu.has_value()) {
-        backend = std::make_unique<vibetran::CudaSolverBackend>(std::move(*cu));
+        backend = std::make_unique<vibestran::CudaSolverBackend>(std::move(*cu));
       } else {
         spdlog::error("CUDA backend requested but no CUDA device found");
         return 1;
@@ -185,10 +185,10 @@ int main(int argc, char *argv[]) {
     } else if (backend_choice == BackendChoice::CudaPCG) {
 #ifdef HAVE_CUDA
       auto cu =
-          vibetran::CudaPCGSolverBackend::try_create(cuda_single_precision);
+          vibestran::CudaPCGSolverBackend::try_create(cuda_single_precision);
       if (cu.has_value()) {
         backend =
-            std::make_unique<vibetran::CudaPCGSolverBackend>(std::move(*cu));
+            std::make_unique<vibestran::CudaPCGSolverBackend>(std::move(*cu));
       } else {
         spdlog::error("CUDA PCG backend requested but no CUDA device found");
         return 1;
@@ -199,10 +199,10 @@ int main(int argc, char *argv[]) {
 #endif
     } else if (backend_choice == BackendChoice::Vulkan) {
 #ifdef HAVE_VULKAN
-      auto vk = vibetran::VulkanSolverBackend::try_create();
+      auto vk = vibestran::VulkanSolverBackend::try_create();
       if (vk.has_value()) {
         backend =
-            std::make_unique<vibetran::VulkanSolverBackend>(std::move(*vk));
+            std::make_unique<vibestran::VulkanSolverBackend>(std::move(*vk));
       } else {
         spdlog::error("Vulkan backend requested but Vulkan is unavailable");
         return 1;
@@ -214,28 +214,28 @@ int main(int argc, char *argv[]) {
     }
     // BackendChoice::Auto and BackendChoice::Cpu both default to Eigen CPU.
     if (!backend)
-      backend = std::make_unique<vibetran::EigenSolverBackend>();
+      backend = std::make_unique<vibestran::EigenSolverBackend>();
 
     auto op2_path = std::filesystem::path(f06_path).replace_extension(".op2");
 
-    if (model.analysis.sol == vibetran::SolutionType::Modal) {
+    if (model.analysis.sol == vibestran::SolutionType::Modal) {
       // ── SOL 103 Modal Analysis ───────────────────────────────────────────
       // Select eigensolver backend.
       // CUDA (cuda / cuda-pcg): use the GPU shift-invert Lanczos eigensolver
       //   when the CUDA eigensolver was compiled in; error otherwise.
       // Vulkan: not supported for modal analysis.
       // CPU / Auto: use Spectra.
-      std::unique_ptr<vibetran::EigensolverBackend> eig_backend;
+      std::unique_ptr<vibestran::EigensolverBackend> eig_backend;
 
       if (backend_choice == BackendChoice::Cuda ||
           backend_choice == BackendChoice::CudaPCG) {
 #ifdef HAVE_CUDA_EIGENSOLVER
-        auto cu_eig = vibetran::CudaEigensolverBackend::try_create();
+        auto cu_eig = vibestran::CudaEigensolverBackend::try_create();
         if (!cu_eig.has_value()) {
           spdlog::error("CUDA eigensolver requested but no CUDA device found");
           return 1;
         }
-        eig_backend = std::make_unique<vibetran::CudaEigensolverBackend>(
+        eig_backend = std::make_unique<vibestran::CudaEigensolverBackend>(
             std::move(*cu_eig));
 #else
         spdlog::error("CUDA eigensolver was not compiled into this build "
@@ -247,37 +247,37 @@ int main(int argc, char *argv[]) {
                       "analysis; use --backend=cuda or --backend=cpu");
         return 1;
       } else {
-        eig_backend = std::make_unique<vibetran::SpectraEigensolverBackend>();
+        eig_backend = std::make_unique<vibestran::SpectraEigensolverBackend>();
       }
 
       spdlog::info("Solving with: {}", eig_backend->name());
-      vibetran::ModalSolver modal_solver(std::move(eig_backend));
-      vibetran::ModalSolverResults modal_results = modal_solver.solve(model);
+      vibestran::ModalSolver modal_solver(std::move(eig_backend));
+      vibestran::ModalSolverResults modal_results = modal_solver.solve(model);
 
       auto t1 = std::chrono::steady_clock::now();
       double elapsed = std::chrono::duration<double>(t1 - t0).count();
       spdlog::info("Solution complete in {:.3f} s", elapsed);
 
-      vibetran::F06Writer::write_modal(modal_results, model, f06_path);
+      vibestran::F06Writer::write_modal(modal_results, model, f06_path);
       spdlog::info("F06 written: {}", f06_path.string());
 
-      vibetran::Op2Writer::write_modal(modal_results, model, op2_path);
+      vibestran::Op2Writer::write_modal(modal_results, model, op2_path);
       spdlog::info("OP2 written: {}", op2_path.string());
 
     } else {
       // ── SOL 101 Linear Static ────────────────────────────────────────────
       spdlog::info("Solving with: {}", backend->name());
-      vibetran::LinearStaticSolver solver(std::move(backend));
-      vibetran::SolverResults results = solver.solve(model);
+      vibestran::LinearStaticSolver solver(std::move(backend));
+      vibestran::SolverResults results = solver.solve(model);
 
       auto t1 = std::chrono::steady_clock::now();
       double elapsed = std::chrono::duration<double>(t1 - t0).count();
       spdlog::info("Solution complete in {:.3f} s", elapsed);
 
-      vibetran::F06Writer::write(results, model, f06_path);
+      vibestran::F06Writer::write(results, model, f06_path);
       spdlog::info("F06 written: {}", f06_path.string());
 
-      vibetran::Op2Writer::write(results, model, op2_path);
+      vibestran::Op2Writer::write(results, model, op2_path);
       spdlog::info("OP2 written: {}", op2_path.string());
 
       // ── Write CSV (if requested via --csv or PARAM,CSVOUT,YES) ──────────
@@ -289,15 +289,15 @@ int main(int argc, char *argv[]) {
       }
       if (write_csv) {
         auto csv_stem = std::filesystem::path(f06_path).replace_extension("");
-        vibetran::CsvWriter::write(results, model, csv_stem);
+        vibestran::CsvWriter::write(results, model, csv_stem);
         spdlog::info("CSV written: {}.node.csv / .elem.csv", csv_stem.string());
       }
     }
 
-  } catch (const vibetran::ParseError &e) {
+  } catch (const vibestran::ParseError &e) {
     spdlog::error("Parse error: {}", e.what());
     return 2;
-  } catch (const vibetran::SolverError &e) {
+  } catch (const vibestran::SolverError &e) {
     spdlog::error("Solver error: {}", e.what());
     return 3;
   } catch (const std::exception &e) {

@@ -14,7 +14,7 @@
 #include <span>
 #include <vector>
 
-namespace vibetran {
+namespace vibestran {
 
 /// A triplet (row, col, value) for sparse matrix assembly
 struct Triplet {
@@ -72,4 +72,4 @@ private:
   std::vector<Triplet> triplets_;
 };
 
-} // namespace vibetran
+} // namespace vibestran

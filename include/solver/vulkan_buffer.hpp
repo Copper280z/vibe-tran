@@ -14,7 +14,7 @@
 #include <vector>
 #include <vulkan/vulkan.h>
 
-namespace vibetran {
+namespace vibestran {
 
 /// A device-local Vulkan buffer.  Move-only, destroyed on scope exit.
 class VulkanBuffer {
@@ -67,6 +67,6 @@ private:
 /// Throws SolverError if queue submission fails.
 void submit_and_wait(const VulkanContext& ctx, VkCommandBuffer cmd);
 
-} // namespace vibetran
+} // namespace vibestran
 
 #endif // HAVE_VULKAN

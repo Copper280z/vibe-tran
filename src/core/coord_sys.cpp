@@ -5,7 +5,7 @@
 #include <cmath>
 #include <stdexcept>
 
-namespace vibetran {
+namespace vibestran {
 
 void build_axes(CoordSys& cs, const Vec3& a_basic, const Vec3& b_basic, const Vec3& c_basic) {
     // Z axis = (B - A) normalized
@@ -155,4 +155,4 @@ Vec3 apply_rotation(const Mat3& M, const Vec3& v) {
     };
 }
 
-} // namespace vibetran
+} // namespace vibestran

@@ -6,7 +6,7 @@
 #include <cstring>
 #include <format>
 
-namespace vibetran {
+namespace vibestran {
 
 // ── Destruction / move ────────────────────────────────────────────────────────
 
@@ -209,6 +209,6 @@ std::vector<std::byte> VulkanBuffer::download_raw(const VulkanContext& ctx, VkDe
     return out;
 }
 
-} // namespace vibetran
+} // namespace vibestran
 
 #endif // HAVE_VULKAN

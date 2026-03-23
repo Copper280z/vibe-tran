@@ -15,7 +15,7 @@
 #include "elements/element_base.hpp"
 #include <array>
 
-namespace vibetran {
+namespace vibestran {
 
 // ── CHEXA8 ───────────────────────────────────────────────────────────────────
 
@@ -284,4 +284,4 @@ private:
     const PSolid& psolid() const;
 };
 
-} // namespace vibetran
+} // namespace vibestran

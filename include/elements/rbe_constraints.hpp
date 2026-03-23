@@ -5,7 +5,7 @@
 #include "core/model.hpp"
 #include <vector>
 
-namespace vibetran {
+namespace vibestran {
 
 /// Expand an RBE2 element into MPC equations.
 /// For each dependent node gm and each constrained DOF d in rbe.cm, generates
@@ -25,4 +25,4 @@ void expand_rbe2(const Rbe2& rbe, const Model& model, std::vector<Mpc>& out);
 /// @param out    Appended with the generated MPC equations.
 void expand_rbe3(const Rbe3& rbe, const Model& model, std::vector<Mpc>& out);
 
-} // namespace vibetran
+} // namespace vibestran

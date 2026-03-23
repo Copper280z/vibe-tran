@@ -18,7 +18,7 @@
 #include <numbers>
 #include <spdlog/spdlog.h>
 
-namespace vibetran {
+namespace vibestran {
 
 LinearStaticSolver::LinearStaticSolver(std::unique_ptr<SolverBackend> backend)
     : backend_(std::move(backend)) {}
@@ -876,4 +876,4 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
   return res;
 }
 
-} // namespace vibetran
+} // namespace vibestran

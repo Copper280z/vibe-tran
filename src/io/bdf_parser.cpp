@@ -11,7 +11,7 @@
 #include <fstream>
 #include <sstream>
 
-namespace vibetran {
+namespace vibestran {
 
 // ── ParseContext
 // ──────────────────────────────────────────────────────────────
@@ -1076,4 +1076,4 @@ void BdfParser::process_eigrl(ParseContext& ctx,
   ctx.model.eigrls[e.sid] = e;
 }
 
-} // namespace vibetran
+} // namespace vibestran

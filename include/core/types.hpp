@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-namespace vibetran {
+namespace vibestran {
 
 // ── Strong integer wrappers ──────────────────────────────────────────────────
 
@@ -194,37 +194,37 @@ enum class SolutionType {
 // They are re-exported from this header so existing code that includes
 // types.hpp continues to work without changes.
 
-} // namespace vibetran
+} // namespace vibestran
 
 // Hash support for strong ID types
 namespace std {
-template <> struct hash<vibetran::NodeId> {
-  size_t operator()(vibetran::NodeId id) const noexcept {
+template <> struct hash<vibestran::NodeId> {
+  size_t operator()(vibestran::NodeId id) const noexcept {
     return hash<int>{}(id.value);
   }
 };
-template <> struct hash<vibetran::ElementId> {
-  size_t operator()(vibetran::ElementId id) const noexcept {
+template <> struct hash<vibestran::ElementId> {
+  size_t operator()(vibestran::ElementId id) const noexcept {
     return hash<int>{}(id.value);
   }
 };
-template <> struct hash<vibetran::PropertyId> {
-  size_t operator()(vibetran::PropertyId id) const noexcept {
+template <> struct hash<vibestran::PropertyId> {
+  size_t operator()(vibestran::PropertyId id) const noexcept {
     return hash<int>{}(id.value);
   }
 };
-template <> struct hash<vibetran::MaterialId> {
-  size_t operator()(vibetran::MaterialId id) const noexcept {
+template <> struct hash<vibestran::MaterialId> {
+  size_t operator()(vibestran::MaterialId id) const noexcept {
     return hash<int>{}(id.value);
   }
 };
-template <> struct hash<vibetran::CoordId> {
-  size_t operator()(vibetran::CoordId id) const noexcept {
+template <> struct hash<vibestran::CoordId> {
+  size_t operator()(vibestran::CoordId id) const noexcept {
     return hash<int>{}(id.value);
   }
 };
-template <> struct hash<vibetran::MpcSetId> {
-  size_t operator()(vibetran::MpcSetId id) const noexcept {
+template <> struct hash<vibestran::MpcSetId> {
+  size_t operator()(vibestran::MpcSetId id) const noexcept {
     return hash<int>{}(id.value);
   }
 };

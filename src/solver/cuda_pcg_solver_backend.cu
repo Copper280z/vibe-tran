@@ -63,12 +63,12 @@ static void log_mem(const char* label, std::size_t extra_bytes = 0) {
                       ", total=" + std::to_string(total_bytes / kMiB) + " MiB";
     if (extra_bytes > 0)
         msg += ", allocating=" + std::to_string(extra_bytes / kMiB) + " MiB";
-    vibetran::log_debug(msg);
+    vibestran::log_debug(msg);
 }
 
 } // anonymous namespace
 
-namespace vibetran {
+namespace vibestran {
 
 // ── RAII device buffer ────────────────────────────────────────────────────────
 
@@ -352,7 +352,7 @@ static bool setup_ic0(
       + static_cast<std::size_t>(n)   * sizeof(T)   // d_tmp
       + static_cast<std::size_t>(buf_size > 0 ? buf_size : 1);
     log_mem("IC0 factor alloc", precond_bytes);
-    vibetran::log_debug("[cuda-pcg] IC0 factor scratch=" +
+    vibestran::log_debug("[cuda-pcg] IC0 factor scratch=" +
                         std::to_string(static_cast<std::size_t>(buf_size) / kMiB) + " MiB");
 
     tp.d_factor_buf = PCGDeviceBuffer<char>(buf_size > 0 ? buf_size : 1);
@@ -364,7 +364,7 @@ static bool setup_ic0(
     int structural_zero = -1;
     cusparseXcsric02_zeroPivot(cusparse, info, &structural_zero);
     if (structural_zero >= 0 || cs != CUSPARSE_STATUS_SUCCESS) {
-        vibetran::log_warn("[cuda-pcg] IC0: structural zero at row " +
+        vibestran::log_warn("[cuda-pcg] IC0: structural zero at row " +
                            std::to_string(structural_zero) + " -- retrying with ILU0");
         cusparseDestroyCsric02Info(info);
         cusparseDestroyMatDescr(descr);
@@ -381,7 +381,7 @@ static bool setup_ic0(
     cusparseDestroyMatDescr(descr);
 
     if (numerical_zero >= 0 || cs != CUSPARSE_STATUS_SUCCESS) {
-        vibetran::log_warn("[cuda-pcg] IC0: numerical zero at row " +
+        vibestran::log_warn("[cuda-pcg] IC0: numerical zero at row " +
                            std::to_string(numerical_zero) + " -- retrying with ILU0");
         return false;
     }
@@ -417,7 +417,7 @@ static bool setup_ic0(
     cusparseSpSV_bufferSize(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
         tp.mat_L, tp.vec_r, tp.vec_tmp,
         Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_L, &sz);
-    vibetran::log_debug("[cuda-pcg] IC0 SpSV forward scratch=" +
+    vibestran::log_debug("[cuda-pcg] IC0 SpSV forward scratch=" +
                         std::to_string(sz / kMiB) + " MiB");
     tp.d_sv_L_buf = PCGDeviceBuffer<char>(sz > 0 ? sz : 1);
     cusparseSpSV_analysis(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
@@ -428,7 +428,7 @@ static bool setup_ic0(
     cusparseSpSV_bufferSize(cusparse, CUSPARSE_OPERATION_TRANSPOSE, &one,
         tp.mat_L, tp.vec_tmp, tp.vec_z,
         Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, &sz);
-    vibetran::log_debug("[cuda-pcg] IC0 SpSV backward scratch=" +
+    vibestran::log_debug("[cuda-pcg] IC0 SpSV backward scratch=" +
                         std::to_string(sz / kMiB) + " MiB");
     tp.d_sv_UT_buf = PCGDeviceBuffer<char>(sz > 0 ? sz : 1);
     cusparseSpSV_analysis(cusparse, CUSPARSE_OPERATION_TRANSPOSE, &one,
@@ -436,7 +436,7 @@ static bool setup_ic0(
         Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, tp.d_sv_UT_buf.ptr);
 
     log_mem("after IC0 setup");
-    vibetran::log_debug("[cuda-pcg] IC0 preconditioner setup successful");
+    vibestran::log_debug("[cuda-pcg] IC0 preconditioner setup successful");
     return true;
 }
 
@@ -483,7 +483,7 @@ static bool setup_ilu0(
       + static_cast<std::size_t>(n)   * sizeof(T)
       + static_cast<std::size_t>(buf_size > 0 ? buf_size : 1);
     log_mem("ILU0 factor alloc", precond_bytes);
-    vibetran::log_debug("[cuda-pcg] ILU0 factor scratch=" +
+    vibestran::log_debug("[cuda-pcg] ILU0 factor scratch=" +
                         std::to_string(static_cast<std::size_t>(buf_size) / kMiB) + " MiB");
 
     tp.d_factor_buf = PCGDeviceBuffer<char>(buf_size > 0 ? buf_size : 1);
@@ -495,7 +495,7 @@ static bool setup_ilu0(
     int structural_zero = -1;
     cusparseXcsrilu02_zeroPivot(cusparse, info, &structural_zero);
     if (structural_zero >= 0) {
-        vibetran::log_warn("[cuda-pcg] ILU0: structural zero at row " +
+        vibestran::log_warn("[cuda-pcg] ILU0: structural zero at row " +
                            std::to_string(structural_zero) + " -- falling back to Jacobi");
         cusparseDestroyCsrilu02Info(info);
         cusparseDestroyMatDescr(descr);
@@ -512,7 +512,7 @@ static bool setup_ilu0(
     cusparseDestroyMatDescr(descr);
 
     if (numerical_zero >= 0 || cs != CUSPARSE_STATUS_SUCCESS) {
-        vibetran::log_warn("[cuda-pcg] ILU0: numerical zero at row " +
+        vibestran::log_warn("[cuda-pcg] ILU0: numerical zero at row " +
                            std::to_string(numerical_zero) + " -- falling back to Jacobi");
         return false;
     }
@@ -563,7 +563,7 @@ static bool setup_ilu0(
     cusparseSpSV_bufferSize(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
         tp.mat_L, tp.vec_r, tp.vec_tmp,
         Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_L, &sz);
-    vibetran::log_debug("[cuda-pcg] ILU0 SpSV forward scratch=" +
+    vibestran::log_debug("[cuda-pcg] ILU0 SpSV forward scratch=" +
                         std::to_string(sz / kMiB) + " MiB");
     tp.d_sv_L_buf = PCGDeviceBuffer<char>(sz > 0 ? sz : 1);
     cusparseSpSV_analysis(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
@@ -574,7 +574,7 @@ static bool setup_ilu0(
     cusparseSpSV_bufferSize(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
         tp.mat_U, tp.vec_tmp, tp.vec_z,
         Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, &sz);
-    vibetran::log_debug("[cuda-pcg] ILU0 SpSV backward scratch=" +
+    vibestran::log_debug("[cuda-pcg] ILU0 SpSV backward scratch=" +
                         std::to_string(sz / kMiB) + " MiB");
     tp.d_sv_UT_buf = PCGDeviceBuffer<char>(sz > 0 ? sz : 1);
     cusparseSpSV_analysis(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
@@ -582,7 +582,7 @@ static bool setup_ilu0(
         Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp.sv_UT, tp.d_sv_UT_buf.ptr);
 
     log_mem("after ILU0 setup");
-    vibetran::log_debug("[cuda-pcg] ILU0 preconditioner setup successful");
+    vibestran::log_debug("[cuda-pcg] ILU0 preconditioner setup successful");
     return true;
 }
 
@@ -621,24 +621,24 @@ static std::vector<double> solve_pcg(
     {
         std::size_t free_bytes = 0, total_bytes = 0;
         cudaMemGetInfo(&free_bytes, &total_bytes);
-        vibetran::log_debug(
+        vibestran::log_debug(
             std::string("[cuda-pcg] VRAM estimate (lower bound, ") + Tr::name() + "): " +
             std::to_string(bytes_estimate / kMiB) + " MiB"
             "  (matrix=" + std::to_string(bytes_matrix / kMiB) + " MiB"
             ", vectors=" + std::to_string(bytes_vectors / kMiB) + " MiB"
             ", precond=" + std::to_string(bytes_precond / kMiB) + " MiB)");
-        vibetran::log_debug(
+        vibestran::log_debug(
             "[cuda-pcg] device: free=" + std::to_string(free_bytes / kMiB) + " MiB"
             ", total=" + std::to_string(total_bytes / kMiB) + " MiB"
             ", n=" + std::to_string(n) + ", nnz=" + std::to_string(nnz));
         if (bytes_estimate > free_bytes)
-            vibetran::log_warn(
+            vibestran::log_warn(
                 "[cuda-pcg] WARNING: estimate exceeds available VRAM (" +
                 std::to_string(free_bytes / kMiB) + " MiB free) -- solve may fail");
     }
 
     log_mem("before PCG alloc", bytes_matrix + bytes_vectors);
-    vibetran::log_debug("[cuda-pcg] matrix=" + std::to_string(bytes_matrix / kMiB) + " MiB"
+    vibestran::log_debug("[cuda-pcg] matrix=" + std::to_string(bytes_matrix / kMiB) + " MiB"
                         ", vectors=" + std::to_string(bytes_vectors / kMiB) + " MiB");
 
     PCGDeviceBuffer<T>   d_values(nnz);
@@ -679,7 +679,7 @@ static std::vector<double> solve_pcg(
                 precond_kind = PrecondKind::ILU0;
                 tp = std::move(try_ilu);
             } else {
-                vibetran::log_debug("[cuda-pcg] Using Jacobi preconditioner");
+                vibestran::log_debug("[cuda-pcg] Using Jacobi preconditioner");
             }
         }
     }
@@ -717,7 +717,7 @@ static std::vector<double> solve_pcg(
     cusparseSpMV_bufferSize(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE,
         &one, mat_K, vec_p, &zero, vec_Ap,
         Tr::cuda_dtype, CUSPARSE_SPMV_ALG_DEFAULT, &spmv_sz);
-    vibetran::log_debug("[cuda-pcg] SpMV scratch=" + std::to_string(spmv_sz / kMiB) + " MiB");
+    vibestran::log_debug("[cuda-pcg] SpMV scratch=" + std::to_string(spmv_sz / kMiB) + " MiB");
     log_mem("after all PCG allocs");
     PCGDeviceBuffer<char> d_spmv_buf(spmv_sz > 0 ? spmv_sz : 1);
 
@@ -782,7 +782,7 @@ static std::vector<double> solve_pcg(
         const double pAp = static_cast<double>(pAp_T);
 
         if (pAp <= 0.0) {
-            vibetran::log_warn(
+            vibestran::log_warn(
                 "[cuda-pcg] non-positive p*Ap=" + std::to_string(pAp) +
                 " at iteration " + std::to_string(iter) +
                 " -- matrix may not be positive definite or"
@@ -829,7 +829,7 @@ static std::vector<double> solve_pcg(
             std::to_string(tolerance) +
             "). Consider increasing max iterations or using a direct solver.");
 
-    vibetran::log_info(
+    vibestran::log_info(
         std::string("[cuda-pcg] ") + precond_name +
         " (" + Tr::name() + ") converged in " + std::to_string(out_iters) +
         " iterations, rel_res=" + std::to_string(out_rel_res) +
@@ -983,4 +983,4 @@ CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
         ctx_->last_iters, ctx_->last_rel_res);
 }
 
-} // namespace vibetran
+} // namespace vibestran

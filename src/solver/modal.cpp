@@ -15,7 +15,7 @@
 #include <numbers>
 #include <spdlog/spdlog.h>
 
-namespace vibetran {
+namespace vibestran {
 
 ModalSolver::ModalSolver(std::unique_ptr<EigensolverBackend> backend)
     : backend_(std::move(backend)) {}
@@ -411,4 +411,4 @@ ModalSolver::recover_mode_shape(const Model& model,
     return shape;
 }
 
-} // namespace vibetran
+} // namespace vibestran

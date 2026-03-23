@@ -16,7 +16,7 @@
 #include <algorithm>
 #include <numeric>
 
-using namespace vibetran;
+using namespace vibestran;
 
 // ── Test fixture ──────────────────────────────────────────────────────────────
 
@@ -276,7 +276,7 @@ TEST_F(VulkanTest, NameContainsVulkan) {
 // (float32 stagnates → triggers float64 fallback).
 
 TEST_F(VulkanTest, LargeStiffDiagonalSucceedsWithDefaultConfig) {
-    auto tmp_ctx = vibetran::VulkanContext::create();
+    auto tmp_ctx = vibestran::VulkanContext::create();
     if (!tmp_ctx || !tmp_ctx->device_info().supports_float64)
         GTEST_SKIP() << "GPU lacks shaderFloat64; float32→float64 fallback unavailable";
 
@@ -364,7 +364,7 @@ TEST_F(VulkanTest, Float64PathAgreesWithEigenToDoublePrecision) {
         GTEST_SKIP() << "Vulkan unavailable";
 
     // Check device support before trying (backend will also throw, but skip is cleaner)
-    auto ctx = vibetran::VulkanContext::create();
+    auto ctx = vibestran::VulkanContext::create();
     if (!ctx || !ctx->device_info().supports_float64)
         GTEST_SKIP() << "GPU does not support shaderFloat64 — skipping float64 test";
 
@@ -452,7 +452,7 @@ TEST_F(VulkanTest, StiffSystemDoesNotFalseConverge) {
 
 TEST_F(VulkanTest, VulkanContextHandlesAreValid) {
     // Reach into the context via try_create to verify handle accessors
-    auto ctx = vibetran::VulkanContext::create();
+    auto ctx = vibestran::VulkanContext::create();
     ASSERT_TRUE(ctx.has_value()) << "Vulkan must be available since SetUp() did not skip";
 
     EXPECT_NE(ctx->physical_device(), static_cast<VkPhysicalDevice>(VK_NULL_HANDLE))
@@ -496,7 +496,7 @@ TEST_F(VulkanTest, IllConditionedTridiagonalConverges) {
     auto u_eigen = eigen_backend.solve(csr, F);
 
     // Use float64 to avoid float32 precision issues on this ill-conditioned system.
-    auto ctx = vibetran::VulkanContext::create();
+    auto ctx = vibestran::VulkanContext::create();
     if (!ctx || !ctx->device_info().supports_float64)
         GTEST_SKIP() << "GPU lacks shaderFloat64";
 

@@ -19,7 +19,7 @@
 #include <string>
 #include <cmath>
 
-using namespace vibetran;
+using namespace vibestran;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

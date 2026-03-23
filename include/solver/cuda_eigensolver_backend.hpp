@@ -36,7 +36,7 @@
 #include <memory>
 #include <optional>
 
-namespace vibetran {
+namespace vibestran {
 
 // Opaque RAII context holding cuDSS, cuBLAS, and cuSPARSE handles.
 // Defined in cuda_eigensolver_backend.cu to keep CUDA headers out of this file.
@@ -72,6 +72,6 @@ private:
     std::unique_ptr<CudaEigenContext> ctx_;
 };
 
-} // namespace vibetran
+} // namespace vibestran
 
 #endif // HAVE_CUDA_EIGENSOLVER

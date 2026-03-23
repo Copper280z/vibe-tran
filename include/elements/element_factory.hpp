@@ -6,11 +6,11 @@
 #include "core/model.hpp"
 #include <memory>
 
-namespace vibetran {
+namespace vibestran {
 
 /// Create the appropriate element object for the given ElementData.
 /// Throws SolverError if the element type is unsupported.
 std::unique_ptr<ElementBase> make_element(const ElementData& data,
                                            const Model& model);
 
-} // namespace vibetran
+} // namespace vibestran

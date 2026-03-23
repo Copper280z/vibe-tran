@@ -13,7 +13,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace vibetran {
+namespace vibestran {
 
 /// Index into the global (assembled) equation system
 using EqIndex = int32_t;
@@ -77,4 +77,4 @@ private:
   int num_total_{0};
 };
 
-} // namespace vibetran
+} // namespace vibestran

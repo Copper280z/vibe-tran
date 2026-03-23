@@ -8,7 +8,7 @@
 #include <format>
 #include <algorithm>
 
-namespace vibetran {
+namespace vibestran {
 
 // ── Principal stress helpers ──────────────────────────────────────────────────
 
@@ -148,7 +148,7 @@ void F06Writer::write_header(std::ostream& out) {
     char date_buf[32];
     std::strftime(date_buf, sizeof(date_buf), "%B %e, %Y", std::localtime(&t));
 
-    out << "1                           N A S T R A N - C O M P A T I B L E   S O L V E R"
+    out << "1                                             V I B E S T R A N"
         << "                                                          " << date_buf << "\n";
     out << "0                                                                         \n";
     out << "         S O L   1 0 1   L I N E A R   S T A T I C   A N A L Y S I S\n";
@@ -306,7 +306,7 @@ void F06Writer::write_modal_header(std::ostream& out) {
     char date_buf[32];
     std::strftime(date_buf, sizeof(date_buf), "%B %e, %Y", std::localtime(&t));
 
-    out << "1                           N A S T R A N - C O M P A T I B L E   S O L V E R"
+    out << "1                                             V I B E S T R A N"
         << "                                                          " << date_buf << "\n";
     out << "0                                                                         \n";
     out << "         S O L   1 0 3   N O R M A L   M O D E S   A N A L Y S I S\n";
@@ -363,4 +363,4 @@ void F06Writer::write_eigenvector_table(const ModeResult& mode,
     }
 }
 
-} // namespace vibetran
+} // namespace vibestran

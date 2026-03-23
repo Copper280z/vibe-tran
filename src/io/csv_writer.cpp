@@ -15,7 +15,7 @@
 #include <iomanip>
 #include <format>
 
-namespace vibetran {
+namespace vibestran {
 
 void CsvWriter::write(const SolverResults& results, const Model& model,
                       const std::filesystem::path& stem) {
@@ -92,4 +92,4 @@ void CsvWriter::write(const SolverResults& results, const Model& model,
     }
 }
 
-} // namespace vibetran
+} // namespace vibestran

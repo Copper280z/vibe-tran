@@ -17,7 +17,7 @@
 #include "solver/eigensolver_backend.hpp"
 #include <memory>
 
-namespace vibetran {
+namespace vibestran {
 
 class ModalSolver {
 public:
@@ -55,4 +55,4 @@ private:
                        const Eigen::VectorXd& phi_reduced) const;
 };
 
-} // namespace vibetran
+} // namespace vibestran

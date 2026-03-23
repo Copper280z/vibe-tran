@@ -28,7 +28,7 @@
 #include <numbers>
 #include <sstream>
 
-using namespace vibetran;
+using namespace vibestran;
 
 // Helper: run a modal analysis from BDF string
 static ModalSolverResults run_modal(const std::string& bdf) {

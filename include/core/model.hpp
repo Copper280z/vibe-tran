@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <variant>
 
-namespace vibetran {
+namespace vibestran {
 
 // ── Grid point ───────────────────────────────────────────────────────────────
 
@@ -320,4 +320,4 @@ public:
   void validate() const;
 };
 
-} // namespace vibetran
+} // namespace vibestran

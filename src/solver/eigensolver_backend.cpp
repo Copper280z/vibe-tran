@@ -22,7 +22,7 @@
 #include <algorithm>
 #include <format>
 
-namespace vibetran {
+namespace vibestran {
 
 std::vector<EigenPair> SpectraEigensolverBackend::solve(
     const Eigen::SparseMatrix<double>& K,
@@ -78,4 +78,4 @@ std::vector<EigenPair> SpectraEigensolverBackend::solve(
     return results;
 }
 
-} // namespace vibetran
+} // namespace vibestran

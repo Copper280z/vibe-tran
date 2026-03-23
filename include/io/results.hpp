@@ -9,7 +9,7 @@
 #include <ostream>
 #include <unordered_map>
 
-namespace vibetran {
+namespace vibestran {
 
 // ── Result data ───────────────────────────────────────────────────────────────
 
@@ -160,4 +160,4 @@ public:
                     const std::filesystem::path &stem);
 };
 
-} // namespace vibetran
+} // namespace vibestran

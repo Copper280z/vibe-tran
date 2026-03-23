@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <unordered_set>
 
-namespace vibetran {
+namespace vibestran {
 
 void Model::validate() const {
     // Check all element nodes exist
@@ -148,4 +148,4 @@ void Model::resolve_coordinates() {
     }
 }
 
-} // namespace vibetran
+} // namespace vibestran

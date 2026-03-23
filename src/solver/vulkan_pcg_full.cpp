@@ -18,7 +18,7 @@
 #include <numeric>
 #include <vector>
 
-namespace vibetran {
+namespace vibestran {
 
 // ── Float conversion ──────────────────────────────────────────────────────────
 
@@ -506,6 +506,6 @@ solve_full_gpu_double(VulkanContext& ctx, Pipelines& pl,
     return x_buf.download<double>(ctx, n);
 }
 
-} // namespace vibetran
+} // namespace vibestran
 
 #endif // HAVE_VULKAN

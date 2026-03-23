@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <vector>
 
-namespace vibetran {
+namespace vibestran {
 
 void DofMap::build(const std::unordered_map<NodeId, GridPoint>& nodes,
                    int default_dofs_per_node) {
@@ -126,4 +126,4 @@ std::vector<EqIndex> DofMap::global_indices_subset(
     return result;
 }
 
-} // namespace vibetran
+} // namespace vibestran

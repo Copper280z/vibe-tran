@@ -10,7 +10,7 @@
 #include <chrono>
 #include <spdlog/spdlog.h>
 
-namespace vibetran {
+namespace vibestran {
 
 // ── Constructor / destructor ──────────────────────────────────────────────────
 
@@ -201,6 +201,6 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
     }
 }
 
-} // namespace vibetran
+} // namespace vibestran
 
 #endif // HAVE_VULKAN

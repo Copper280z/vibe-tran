@@ -15,7 +15,7 @@
 #include <string>
 #include <vulkan/vulkan.h>
 
-namespace vibetran {
+namespace vibestran {
 
 struct VulkanDeviceInfo {
     uint64_t    vram_bytes;       // Largest device-local memory heap
@@ -64,6 +64,6 @@ private:
     VulkanDeviceInfo device_info_{};
 };
 
-} // namespace vibetran
+} // namespace vibestran
 
 #endif // HAVE_VULKAN

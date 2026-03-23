@@ -1,4 +1,4 @@
-# Vibetran
+# Vibestran
 
 A finite element solver written in modern C++20 that attempts to be
 Nastran/Mystran-compatible.
@@ -7,7 +7,7 @@ Nastran/Mystran-compatible.
 
 I was curious how feasible it would be to create something this complex with an AI agent. It's a well documented field, but it also requires that the math is precisely correct. I also wanted to experiment with seeing how fast a FEM solver could be when written in a language I understand (well, within the limits of one's ability to understand C++), and using GPU acceleration. I was prepared to do the benchmarking and optimization myself, but it turned out that Claude was quite capable with some guidance. 
 
-Vibetran draws significant inspiration from the [Mystran](https://github.com/MYSTRANsolver/MYSTRAN)
+Vibestran draws significant inspiration from the [Mystran](https://github.com/MYSTRANsolver/MYSTRAN)
 project. If you're unfamiliar with the Mystran project you should go look at it first. It should be considered the reference for open source Nastran-compatible solvers. Without it, as an introduction to OSS FEM Solvers, there's zero chance I would have tried this.
 
 The OpenJFEM project, which is another solver, written in Julia, was also an inspiration for trying this with an agent.
@@ -19,7 +19,7 @@ More coming soon. 84k elem/170k node hex mesh model solves in 2.6sec on M2 macbo
 ## Architecture
 
 ```
-vibetran/
+vibestran/
 ├── include/
 │   ├── core/           # Matrix, DOF, Mesh data structures
 │   ├── elements/       # Element formulations (CQUAD4, CTRIA3, CHEXA, CTETRA, CPENTA)
@@ -30,7 +30,7 @@ vibetran/
 ├── tests/
 │   ├── unit/           # Unit tests per module
 │   ├── integration/    # Integration tests with hand-calculated solutions
-│   └── e2e/            # End-to-end analysis cases (BDF + expected JSON, run against vibetran binary)
+│   └── e2e/            # End-to-end analysis cases (BDF + expected JSON, run against vibestran binary)
 └── third_party/        # Eigen (header-only)
 ```
 
@@ -58,7 +58,7 @@ Compute natural frequencies and mode shapes using a generalized eigensolver. Act
 by `SOL 103` in the BDF case control deck.
 
 ```
-vibetran model.bdf
+vibestran model.bdf
 ```
 
 Eigensolvers are selected via `--backend`:
@@ -86,7 +86,7 @@ Optional solver backends are detected automatically at configure time.
 ## Usage
 
 ```
-vibetran [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg>]
+vibestran [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg>]
          [--cuda-single-precision] [--csv]
          <input.bdf|input.inp> [output.f06]
 ```
@@ -124,7 +124,7 @@ See `include/io/inp_parser.hpp` for full details on design decisions and limitat
 Eigen sparse Cholesky. Always available, no extra dependencies. Uses CHOLMOD or Apple Accelerate when available.
 
 ```bash
-vibetran --backend=cpu model.bdf
+vibestran --backend=cpu model.bdf
 ```
 
 ### CPU — PCG
@@ -134,7 +134,7 @@ Iterative solver with O(nnz) memory — suitable for very large systems where th
 direct Cholesky fill-in would exhaust RAM. This is slower than the direct (Cholesky) solution.
 
 ```bash
-vibetran --backend=cpu-pcg model.bdf
+vibestran --backend=cpu-pcg model.bdf
 ```
 
 ### CUDA — cuDSS
@@ -155,7 +155,7 @@ shift-and-invert linear solver inside the IRL eigensolver for SOL 103.
 - In theory Hybrid mode allows for very large systems to be solved, but in practice that hasn't been achieved (yet).
 
 ```bash
-vibetran --backend=cuda model.bdf
+vibestran --backend=cuda model.bdf
 ```
 
 **Single-precision mode** halves GPU memory usage by downcasting to float32 before the
@@ -163,7 +163,7 @@ solve and upcasting the result. Useful for very large models that exhaust device
 even with hybrid mode. Applies to both `--backend=cuda` and `--backend=cuda-pcg`:
 
 ```bash
-vibetran --backend=cuda --cuda-single-precision model.bdf
+vibestran --backend=cuda --cuda-single-precision model.bdf
 ```
 
 #### Installing cuDSS (Ubuntu 24.04)
@@ -184,13 +184,13 @@ O(nnz) device memory — no factorization fill-in — making it suitable for sys
 for cuDSS even with hybrid host/device memory mode. This is slower than the cuDSS direct solve for most cases.
 
 ```bash
-vibetran --backend=cuda-pcg model.bdf
+vibestran --backend=cuda-pcg model.bdf
 ```
 
 **Single-precision mode** halves VRAM usage by performing the entire PCG solve in float32:
 
 ```bash
-vibetran --backend=cuda-pcg --cuda-single-precision model.bdf
+vibestran --backend=cuda-pcg --cuda-single-precision model.bdf
 ```
 
 Requires CUDA toolkit ≥ 11 with cuBLAS and cuSPARSE (both included in the standard toolkit).
@@ -200,7 +200,7 @@ Requires CUDA toolkit ≥ 11 with cuBLAS and cuSPARSE (both included in the stan
 PCG iterative solver using Vulkan compute shaders. Requires Vulkan SDK, `glslc`, and `xxd`. Unfortunately performance is terrible right now, it's orders of magnitude slower than the base Eigen Cholesky CPU solver.
 
 ```bash
-vibetran --backend=vulkan model.bdf
+vibestran --backend=vulkan model.bdf
 ```
 
 ## Dependencies

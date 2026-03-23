@@ -60,7 +60,7 @@
 #include <string>
 #include <vector>
 
-namespace vibetran {
+namespace vibestran {
 
 // ── RAII helpers (anonymous namespace) ───────────────────────────────────────
 
@@ -1061,4 +1061,4 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
   return results;
 }
 
-} // namespace vibetran
+} // namespace vibestran

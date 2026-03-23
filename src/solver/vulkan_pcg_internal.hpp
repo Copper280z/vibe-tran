@@ -8,7 +8,7 @@
 #include "vulkan_pipelines.hpp"
 #include <vector>
 
-namespace vibetran {
+namespace vibestran {
 
 // Defined in vulkan_pcg_full.cpp
 // Returns solution vector u.  Throws SolverError on failure.
@@ -35,6 +35,6 @@ std::vector<double> solve_tiled(VulkanContext& ctx, Pipelines& pl,
                                  uint64_t available_vram_bytes,
                                  int& out_iters, double& out_residual);
 
-} // namespace vibetran
+} // namespace vibestran
 
 #endif // HAVE_VULKAN
