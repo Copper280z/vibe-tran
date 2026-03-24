@@ -1,0 +1,21 @@
+{
+  "description": "Refined CQUAD4 in-plane cantilever bending with Mindlin. Tip y displacement should match Euler-Bernoulli beam theory.",
+  "checks": [
+    {
+      "type": "node_displacement",
+      "subcase": 1,
+      "node_id": 25,
+      "dof": "T2",
+      "expected": 4.0,
+      "rel_tol": 0.08
+    },
+    {
+      "type": "node_displacement",
+      "subcase": 1,
+      "node_id": 175,
+      "dof": "T2",
+      "expected": 4.0,
+      "rel_tol": 0.08
+    }
+  ]
+}

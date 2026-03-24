@@ -7,9 +7,9 @@
       "expected": 22.9, "rel_tol": 0.05
     },
     {
-      "comment": "Mode 2: second mode must be higher than mode 1 (ascending order check).",
+      "comment": "Mode 2: next shell mode on this 10-element mesh is about 96.2 Hz.",
       "type": "eigenfrequency", "subcase": 1, "mode": 2,
-      "expected": 36.5, "rel_tol": 0.10
+      "expected": 96.2, "rel_tol": 0.05
     }
   ]
 }

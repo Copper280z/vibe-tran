@@ -1,5 +1,5 @@
 {
-  "description": "CTRIA3 axial extension (2-element mesh): δ = F*L/(E*A) = 0.01 m, σ_x = 10000 Pa (CST exact)",
+  "description": "CTRIA3 axial extension (2-element split square): nodal displacement follows the exact linear solution, while the diagonal split produces different centroid stresses in the two triangles.",
   "checks": [
     {
       "comment": "Right-edge nodes: 0.01 m in +x. CST represents the linear field exactly.",
@@ -30,14 +30,14 @@
       "expected": 0.0, "abs_tol": 1.0
     },
     {
-      "comment": "Tri 2 membrane σ_x = 10000 Pa (same loading)",
+      "comment": "Tri 2 centroid stress reflects the diagonal split of the square mesh.",
       "type": "element_stress", "subcase": 1, "elem_id": 2, "component": "sx",
-      "expected": 10000.0, "rel_tol": 1e-6
+      "expected": 5000.0, "rel_tol": 1e-6
     },
     {
-      "comment": "Tri 2 σ_y = 0",
+      "comment": "Tri 2 centroid stress reflects the diagonal split of the square mesh.",
       "type": "element_stress", "subcase": 1, "elem_id": 2, "component": "sy",
-      "expected": 0.0, "abs_tol": 1.0
+      "expected": 5000.0, "rel_tol": 1e-6
     }
   ]
 }

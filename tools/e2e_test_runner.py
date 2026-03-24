@@ -90,7 +90,9 @@ eigenfrequency:
 """
 
 import argparse
+import csv
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -186,6 +188,97 @@ def _load_op2(op2_path: Path) -> tuple[dict, dict, dict]:
             }
 
     return node_data, elem_data, modal_data
+
+
+def _load_csv_f06_results(op2_path: Path) -> tuple[dict, dict, dict]:
+    """
+    Fallback loader when pyNastran is unavailable.
+
+    Static checks are read from the solver's CSV outputs and modal frequencies
+    are read from the F06 eigenvalue table.
+    """
+    base = op2_path.with_suffix("")
+
+    node_data: dict = {}
+    node_csv = base.with_suffix(".node.csv")
+    if node_csv.exists():
+        with open(node_csv, encoding="utf-8") as fh:
+            for row in csv.reader(fh, skipinitialspace=True):
+                if not row or row[0].startswith("#"):
+                    continue
+                node_id = int(row[0])
+                subcase = int(row[1])
+                node_data[(node_id, subcase)] = {
+                    dof: float(row[2 + i]) for i, dof in enumerate(_NODE_DOFS)
+                }
+
+    elem_data: dict = {}
+    elem_csv = base.with_suffix(".elem.csv")
+    if elem_csv.exists():
+        with open(elem_csv, encoding="utf-8") as fh:
+            for row in csv.reader(fh, skipinitialspace=True):
+                if not row or row[0].startswith("#"):
+                    continue
+                elem_id = int(row[0])
+                subcase = int(row[1])
+                elem_data[(elem_id, subcase)] = {
+                    "sx": float(row[2]),
+                    "sy": float(row[3]),
+                    "sxy": float(row[4]),
+                    "sz": float(row[5]),
+                    "syz": float(row[6]),
+                    "szx": float(row[7]),
+                    "mx": float(row[8]),
+                    "my": float(row[9]),
+                    "mxy": float(row[10]),
+                    "von_mises": float(row[11]),
+                }
+
+    modal_data: dict = {}
+    f06_path = base.with_suffix(".f06")
+    if f06_path.exists():
+        in_eigen_table = False
+        with open(f06_path, encoding="utf-8") as fh:
+            for line in fh:
+                if "R E A L   E I G E N V A L U E S" in line:
+                    in_eigen_table = True
+                    continue
+                if not in_eigen_table:
+                    continue
+
+                parts = line.strip().split()
+                if len(parts) >= 7 and parts[0].isdigit() and parts[1].isdigit():
+                    mode = int(parts[0])
+                    modal_data[mode] = {
+                        "cycles": float(parts[4]),
+                        "eigenvalue": float(parts[2]),
+                        "radians": float(parts[3]),
+                        "gen_mass": float(parts[5]),
+                    }
+                elif modal_data and line.strip().startswith("OUTPUT FOR EIGENVECTOR"):
+                    in_eigen_table = False
+
+    return node_data, elem_data, modal_data
+
+
+def _load_results(op2_path: Path) -> tuple[dict, dict, dict]:
+    """
+    Prefer OP2 loading via pyNastran and fall back to CSV/F06 when pyNastran
+    is not installed in the local environment.
+    """
+    errors: list[str] = []
+
+    try:
+        return _load_op2(op2_path)
+    except Exception as exc:
+        errors.append(f"OP2: {exc}")
+
+    try:
+        return _load_csv_f06_results(op2_path)
+    except Exception as exc:
+        errors.append(f"CSV/F06: {exc}")
+
+    raise RuntimeError(" ; ".join(errors))
 
 
 def _extract_plate_stress(table, isubcase: int, elem_data: dict) -> None:
@@ -418,9 +511,9 @@ def check_results(
         return False, [f"  ERROR: OP2 not found: {op2_path}"]
 
     try:
-        node_data, elem_data, modal_data = _load_op2(op2_path)
+        node_data, elem_data, modal_data = _load_results(op2_path)
     except Exception as exc:
-        return False, [f"  ERROR loading OP2: {exc}"]
+        return False, [f"  ERROR loading results: {exc}"]
 
     with open(expected_path, encoding="utf-8") as fh:
         expected = json.load(fh)

@@ -1,0 +1,21 @@
+{
+  "description": "Refined closed square-tube shell cantilever with Mindlin. Free-end z displacement should match thin-wall midsurface beam theory.",
+  "checks": [
+    {
+      "type": "node_displacement",
+      "subcase": 1,
+      "node_id": 1345,
+      "dof": "T3",
+      "expected": 0.17857142857142855,
+      "rel_tol": 0.08
+    },
+    {
+      "type": "node_displacement",
+      "subcase": 1,
+      "node_id": 1357,
+      "dof": "T3",
+      "expected": 0.17857142857142855,
+      "rel_tol": 0.08
+    }
+  ]
+}

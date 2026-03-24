@@ -93,6 +93,200 @@ static double get_disp(const SolverResults& res, int node_id, int dof_0based) {
     throw std::runtime_error("Node not found in results");
 }
 
+static const char* shellform_param(ShellFormulation formulation) {
+    return (formulation == ShellFormulation::MITC4) ? "MITC4" : "MINDLIN";
+}
+
+static std::string make_cquad4_cantilever_bdf(ShellFormulation formulation,
+                                              int nx, int ny) {
+    constexpr double L = 10.0;
+    constexpr double H = 1.0;
+    constexpr double T = 0.1;
+    constexpr double E = 1.0e6;
+    constexpr double nu = 0.3;
+    constexpr double total_force = 100.0;
+
+    auto node_id = [nx](int ix, int iy) { return iy * (nx + 1) + ix + 1; };
+
+    std::ostringstream bdf;
+    bdf << "SOL 101\n"
+        << "CEND\n"
+        << "SUBCASE 1\n"
+        << "  LOAD = 1\n"
+        << "  SPC  = 1\n"
+        << "BEGIN BULK\n"
+        << "PARAM,SHELLFORM," << shellform_param(formulation) << "\n"
+        << "MAT1,1," << E << ",," << nu << "\n"
+        << "PSHELL,1,1," << T << "\n";
+
+    for (int iy = 0; iy <= ny; ++iy) {
+        const double y = H * static_cast<double>(iy) / ny;
+        for (int ix = 0; ix <= nx; ++ix) {
+            const double x = L * static_cast<double>(ix) / nx;
+            bdf << "GRID," << node_id(ix, iy) << ",," << x << "," << y
+                << ",0.0\n";
+        }
+    }
+
+    int eid = 1;
+    for (int iy = 0; iy < ny; ++iy) {
+        for (int ix = 0; ix < nx; ++ix) {
+            bdf << "CQUAD4," << eid++ << ",1,"
+                << node_id(ix, iy) << ","
+                << node_id(ix + 1, iy) << ","
+                << node_id(ix + 1, iy + 1) << ","
+                << node_id(ix, iy + 1) << "\n";
+        }
+    }
+
+    for (int iy = 0; iy <= ny; ++iy)
+        bdf << "SPC1,1,123456," << node_id(0, iy) << "\n";
+
+    const double nodal_force = total_force / 2.0;
+    bdf << "FORCE,1," << node_id(nx, 0) << ",0," << nodal_force
+        << ",0.0,1.0,0.0\n";
+    bdf << "FORCE,1," << node_id(nx, ny) << ",0," << nodal_force
+        << ",0.0,1.0,0.0\n";
+    bdf << "ENDDATA\n";
+
+    return bdf.str();
+}
+
+static std::string make_closed_tube_cantilever_bdf(
+    ShellFormulation formulation, int nx, int perimeter_divisions_per_face) {
+    constexpr double L = 1.0;
+    constexpr double W = 0.02;
+    constexpr double T = 0.0005;
+    constexpr double E = 7.0e10;
+    constexpr double nu = 0.33;
+    constexpr double total_force = 100.0;
+
+    const int nper = 4 * perimeter_divisions_per_face;
+    auto node_id = [nper](int ix, int ic) { return ix * nper + ic + 1; };
+    auto yz_pos = [=](int ic) -> std::pair<double, double> {
+        const double dw = W / perimeter_divisions_per_face;
+        const int face = ic / perimeter_divisions_per_face;
+        const int pos  = ic % perimeter_divisions_per_face;
+        if (face == 0) return {pos * dw, 0.0};
+        if (face == 1) return {W, pos * dw};
+        if (face == 2) return {W - pos * dw, W};
+        return {0.0, W - pos * dw};
+    };
+
+    std::ostringstream bdf;
+    bdf << "SOL 101\n"
+        << "CEND\n"
+        << "SUBCASE 1\n"
+        << "  LOAD = 1\n"
+        << "  SPC  = 1\n"
+        << "BEGIN BULK\n"
+        << "PARAM,SHELLFORM," << shellform_param(formulation) << "\n"
+        << "MAT1,1," << E << ",," << nu << "\n"
+        << "PSHELL,1,1," << T << "\n";
+
+    for (int ix = 0; ix <= nx; ++ix) {
+        const double x = L * static_cast<double>(ix) / nx;
+        for (int ic = 0; ic < nper; ++ic) {
+            const auto [y, z] = yz_pos(ic);
+            bdf << "GRID," << node_id(ix, ic) << ",," << x << "," << y
+                << "," << z << "\n";
+        }
+    }
+
+    int eid = 1;
+    for (int ix = 0; ix < nx; ++ix) {
+        for (int ic = 0; ic < nper; ++ic) {
+            const int ic_next = (ic + 1) % nper;
+            bdf << "CQUAD4," << eid++ << ",1,"
+                << node_id(ix, ic) << ","
+                << node_id(ix, ic_next) << ","
+                << node_id(ix + 1, ic_next) << ","
+                << node_id(ix + 1, ic) << "\n";
+        }
+    }
+
+    bdf << "SPC1,1,123456,1,THRU," << nper << "\n";
+    const double nodal_force = total_force / nper;
+    for (int ic = 0; ic < nper; ++ic) {
+        bdf << "FORCE,1," << node_id(nx, ic) << ",0," << nodal_force
+            << ",0.0,0.0,1.0\n";
+    }
+    bdf << "ENDDATA\n";
+
+    return bdf.str();
+}
+
+static void expect_cquad4_cantilever_matches_beam_theory(
+    ShellFormulation formulation, int nx, int ny, double rel_tol) {
+    constexpr double L = 10.0;
+    constexpr double H = 1.0;
+    constexpr double T = 0.1;
+    constexpr double E = 1.0e6;
+    constexpr double total_force = 100.0;
+
+    auto node_id = [nx](int ix, int iy) { return iy * (nx + 1) + ix + 1; };
+
+    SolverResults res =
+        run_analysis(make_cquad4_cantilever_bdf(formulation, nx, ny));
+
+    const double expected = total_force * std::pow(L, 3) /
+                            (3.0 * E * (T * std::pow(H, 3) / 12.0));
+    const double tip_bottom = get_disp(res, node_id(nx, 0), 1);
+    const double tip_top = get_disp(res, node_id(nx, ny), 1);
+
+    EXPECT_GT(tip_bottom, 0.0) << "Tip should displace in +y";
+    EXPECT_NEAR(tip_bottom, expected, rel_tol * expected)
+        << "formulation=" << shellform_param(formulation)
+        << " tip y-disp=" << tip_bottom
+        << " beam theory=" << expected;
+    EXPECT_NEAR(tip_top, expected, rel_tol * expected)
+        << "formulation=" << shellform_param(formulation)
+        << " tip y-disp=" << tip_top
+        << " beam theory=" << expected;
+    EXPECT_NEAR(tip_bottom, tip_top, 1e-6 * expected)
+        << "Top and bottom tip displacements should match";
+}
+
+static void expect_closed_tube_matches_beam_theory(
+    ShellFormulation formulation, int nx, int perimeter_divisions_per_face,
+    double rel_tol) {
+    constexpr double L = 1.0;
+    constexpr double W = 0.02;
+    constexpr double T = 0.0005;
+    constexpr double E = 7.0e10;
+    constexpr double total_force = 100.0;
+
+    const int nper = 4 * perimeter_divisions_per_face;
+    auto node_id = [nper](int ix, int ic) { return ix * nper + ic + 1; };
+
+    SolverResults res = run_analysis(
+        make_closed_tube_cantilever_bdf(formulation, nx,
+                                        perimeter_divisions_per_face));
+
+    double tip_sum = 0.0;
+    double tip_min = std::numeric_limits<double>::infinity();
+    for (int ic = 0; ic < nper; ++ic) {
+        const double uz = get_disp(res, node_id(nx, ic), 2);
+        tip_sum += uz;
+        tip_min = std::min(tip_min, uz);
+    }
+    const double tip_avg = tip_sum / nper;
+
+    // Shell nodes lie on the wall midsurfaces, so the consistent beam
+    // comparison uses the midsurface thin-wall box inertia rather than an
+    // outer-minus-inner solid-section inertia.
+    const double midsurface_I = (2.0 / 3.0) * T * std::pow(W, 3);
+    const double expected = total_force * std::pow(L, 3) /
+                            (3.0 * E * midsurface_I);
+
+    EXPECT_GT(tip_min, 0.15)
+        << "Closed tube should show substantial +Z tip motion";
+    EXPECT_NEAR(tip_avg, expected, rel_tol * expected)
+        << "formulation=" << shellform_param(formulation)
+        << " tip avg=" << tip_avg
+        << " beam theory=" << expected;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Test 1: Axial extension of a rectangular plate (CQUAD4)
 //
@@ -164,76 +358,25 @@ ENDDATA
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test 2: Cantilever beam — CQUAD4 mesh
+// Test 2: Cantilever beam — CQUAD4 mesh, both shell formulations
 //
-// Model:  Beam of 4 elements: 10 × 1 m, t = 0.1 m
-//         Left end fully fixed; tip load P = 100 N downward (z-direction)
+// Model: 10 × 1 m strip, t = 0.1 m, clamped on the left and loaded in +y.
+// This is an in-plane beam-bending problem, so the analytical reference is the
+// Euler-Bernoulli strip solution using I = t*h^3/12.
 //
-// Beam theory:
-//   I = t * h^3 / 12 = 0.1 * 1^3 / 12 = 1/120
-//   δ_tip = P*L^3 / (3*E*I) = 100 * 10^3 / (3 * 1e6 * 1/120)
-//         = 100000 / 25000 = 4.0 m
-//
-// Note: A single CQUAD4 with linear displacement field underestimates bending.
-// With 4 elements it converges. We check the result is within 5% of beam theory
-// to account for shear deformation (Mindlin).
+// The coarse 4×1 mesh that originally lived here was good enough for Mindlin
+// but not for MITC4+, which converges more slowly on this membrane-dominated
+// bending case. Both formulations match beam theory once the mesh is refined.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-TEST(Integration, CantileverBeamBending) {
-    // 4-element cantilever, each element 2.5 m long × 1 m tall
-    const std::string bdf = R"(
-SOL 101
-CEND
-SUBCASE 1
-  LOAD = 1
-  SPC  = 1
-BEGIN BULK
-GRID,1,,0.0,0.0,0.0
-GRID,2,,2.5,0.0,0.0
-GRID,3,,5.0,0.0,0.0
-GRID,4,,7.5,0.0,0.0
-GRID,5,,10.0,0.0,0.0
-GRID,6,,0.0,1.0,0.0
-GRID,7,,2.5,1.0,0.0
-GRID,8,,5.0,1.0,0.0
-GRID,9,,7.5,1.0,0.0
-GRID,10,,10.0,1.0,0.0
-MAT1,1,1.0E6,,0.3
-PSHELL,1,1,0.1
-CQUAD4,1,1,1,2,7,6
-CQUAD4,2,1,2,3,8,7
-CQUAD4,3,1,3,4,9,8
-CQUAD4,4,1,4,5,10,9
-$ Fix left edge (nodes 1 and 6) — all DOFs
-SPC1,1,123456,1
-SPC1,1,123456,6
-$ Tip load: 50 N downward at each tip node (total 100 N, but shell uses in-plane)
-$ For an in-plane bending test we apply moment/force in the element plane
-$ Here we apply shear load in y-direction simulating beam bending
-FORCE,1,5,0,50.0,0.0,1.0,0.0
-FORCE,1,10,0,50.0,0.0,1.0,0.0
-ENDDATA
-)";
+TEST(Integration, CantileverBeamBendingMitc4) {
+    expect_cquad4_cantilever_matches_beam_theory(
+        ShellFormulation::MITC4, 24, 6, 0.08);
+}
 
-    Model model = BdfParser::parse_string(bdf);
-    model.analysis.subcases.clear();
-    model.analysis.subcases.push_back({1, "CANTILEVER", LoadSetId{1}, SpcSetId{1}});
-
-    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
-    SolverResults res = solver.solve(model);
-
-    // In-plane bending: tip y-displacement
-    // Hand calc: δ = F*L^3 / (3*E*I) = 100 * 1000 / (3*1e6 * 1/120) = 4.0
-    double expected = 4.0;
-    double v_node5  = get_disp(res, 5, 1);
-    double v_node10 = get_disp(res, 10, 1);
-
-    // Allow 10% error for coarse mesh + Poisson effects
-    EXPECT_GT(v_node5, 0.0) << "Tip should displace in +y";
-    EXPECT_NEAR(v_node5, expected, 0.15 * expected)
-        << "Tip y-disp = " << v_node5 << ", beam theory = " << expected;
-    EXPECT_NEAR(v_node5, v_node10, 1e-6 * expected)
-        << "Top and bottom tip displacements should match (symmetric)";
+TEST(Integration, CantileverBeamBendingMindlin) {
+    expect_cquad4_cantilever_matches_beam_theory(
+        ShellFormulation::MINDLIN, 24, 6, 0.08);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1829,101 +1972,25 @@ ENDDATA
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test: Closed square tube cantilever — MITC4 drilling stabilization
+// Test: Closed square tube cantilever — both shell formulations
 //
-// Geometry: 1 m long, 20 mm × 20 mm thin-walled square tube, t = 0.5 mm.
-// Mesh:     8 axial divisions, 2 shell elements per face around the perimeter
-//           (64 CQUAD4 elements total; 8 nodes per section so midside wall
-//           nodes are present).
+// Geometry: 1 m long, 20 mm × 20 mm shell midsurface square tube, t = 0.5 mm.
+// The beam-theory comparison must use the shell midsurface idealization:
+//   I = 2 * (t*W)*(W/2)^2 + 2 * (t*W^3/12) = 2/3 * t * W^3
+// rather than an outer-minus-inner solid box inertia, because the shell nodes
+// lie on wall midsurfaces rather than the physical outer skin.
 //
-// This is a regression for an overly stiff response caused by scaling the
-// artificial drilling stiffness from the membrane diagonal. That made thin
-// closed-shell beams orders of magnitude too stiff. The corrected MITC4
-// regularization keeps the free-end deflection near the Euler-Bernoulli
-// reference instead of collapsing to a few millimetres.
+// The original 8×2 mesh was only good enough as a qualitative drilling
+// regularization regression. A denser mesh is required to make both MITC4+
+// and Mindlin quantitatively match beam theory.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-TEST(Integration, ClosedTubeCantileverBending) {
-    constexpr int NX = 8;
-    constexpr int NC = 2;
-    constexpr int NPER = 4 * NC;
-    constexpr double L = 1.0;
-    constexpr double W = 0.02;
-    constexpr double T = 0.0005;
-    constexpr double E = 7.0e10;
-    constexpr double nu = 0.33;
-    constexpr double rho = 2700.0;
-    constexpr double alpha = 2.3e-5;
-    constexpr double total_force = 100.0;
+TEST(Integration, ClosedTubeCantileverBendingMitc4) {
+    expect_closed_tube_matches_beam_theory(
+        ShellFormulation::MITC4, 56, 6, 0.08);
+}
 
-    auto node_id = [](int ix, int ic) { return ix * NPER + ic + 1; };
-    auto yz_pos = [=](int ic) -> std::pair<double, double> {
-        const double dw = W / NC;
-        const int face = ic / NC;
-        const int pos  = ic % NC;
-        if (face == 0) return {pos * dw, 0.0};
-        if (face == 1) return {W, pos * dw};
-        if (face == 2) return {W - pos * dw, W};
-        return {0.0, W - pos * dw};
-    };
-
-    std::ostringstream bdf;
-    bdf << "SOL 101\n"
-        << "CEND\n"
-        << "SUBCASE 1\n"
-        << "  LOAD = 1\n"
-        << "  SPC  = 1\n"
-        << "BEGIN BULK\n"
-        << "MAT1,1," << E << ",," << nu << "," << rho << "," << alpha << ",0.0\n"
-        << "PSHELL,1,1," << T << "\n";
-
-    for (int ix = 0; ix <= NX; ++ix) {
-        const double x = L * static_cast<double>(ix) / NX;
-        for (int ic = 0; ic < NPER; ++ic) {
-            const auto [y, z] = yz_pos(ic);
-            bdf << "GRID," << node_id(ix, ic) << ",," << x << "," << y << ","
-                << z << "\n";
-        }
-    }
-
-    int eid = 1;
-    for (int ix = 0; ix < NX; ++ix) {
-        for (int ic = 0; ic < NPER; ++ic) {
-            const int ic_next = (ic + 1) % NPER;
-            bdf << "CQUAD4," << eid++ << ",1,"
-                << node_id(ix, ic) << ","
-                << node_id(ix, ic_next) << ","
-                << node_id(ix + 1, ic_next) << ","
-                << node_id(ix + 1, ic) << "\n";
-        }
-    }
-
-    bdf << "SPC1,1,123456,1,THRU," << NPER << "\n";
-    const double nodal_force = total_force / NPER;
-    for (int ic = 0; ic < NPER; ++ic)
-        bdf << "FORCE,1," << node_id(NX, ic) << ",0," << nodal_force
-            << ",0.0,0.0,1.0\n";
-    bdf << "ENDDATA\n";
-
-    SolverResults res = run_analysis(bdf.str());
-
-    double tip_sum = 0.0;
-    double tip_min = std::numeric_limits<double>::infinity();
-    for (int ic = 0; ic < NPER; ++ic) {
-        const double uz = get_disp(res, node_id(NX, ic), 2);
-        tip_sum += uz;
-        tip_min = std::min(tip_min, uz);
-    }
-    const double tip_avg = tip_sum / NPER;
-
-    const double Wi = W - 2.0 * T;
-    const double I = (std::pow(W, 4) - std::pow(Wi, 4)) / 12.0;
-    const double eb_tip = total_force * std::pow(L, 3) / (3.0 * E * I);
-
-    EXPECT_GT(tip_min, 0.15)
-        << "Closed tube should show substantial +Z tip motion; response is too "
-           "stiff and likely over-constrained";
-    EXPECT_NEAR(tip_avg, eb_tip, 0.15 * eb_tip)
-        << "Closed thin-walled tube tip deflection should stay close to beam "
-           "theory; large underprediction indicates shell over-stiffening";
+TEST(Integration, ClosedTubeCantileverBendingMindlin) {
+    expect_closed_tube_matches_beam_theory(
+        ShellFormulation::MINDLIN, 56, 6, 0.08);
 }

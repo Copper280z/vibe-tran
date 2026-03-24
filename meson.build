@@ -480,6 +480,17 @@ test('integration_tests', integration_tests,
   args    : ['--gtest_output=xml:' + meson.project_build_root() + '/integration_test_results.xml'],
 )
 
+test('e2e_tests', python,
+  timeout : 300,
+  suite   : 'e2e',
+  args    : [
+    files('tools/e2e_test_runner.py'),
+    '--solver', vibestran_exe.full_path(),
+    '--bdf-dir', join_paths(meson.project_source_root(), 'tests', 'e2e', 'cases'),
+    '--results-dir', join_paths(meson.project_build_root(), 'e2e_results'),
+  ],
+)
+
 # ── Vulkan unit tests (built only when Vulkan backend is available) ────────────
 if have_vulkan_backend
   vulkan_tests = executable(

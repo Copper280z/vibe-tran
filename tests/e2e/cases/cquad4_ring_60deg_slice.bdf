@@ -32,6 +32,7 @@ SUBCASE 1
   DISPLACEMENT = ALL
   STRESS = ALL
 BEGIN BULK
+PARAM,CSVOUT,YES
 $ CORD2C id=10: standard cylindrical CS
 $   A = origin (0,0,0), B = point on z-axis (0,0,1), C = point in xz-plane (1,0,0)
 CORD2C,10,0,0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.0,0.0

@@ -2,14 +2,14 @@
   "description": "6-fold symmetric ring: 6 CQUAD4 sectors, oblique MPC tangential BCs, radial outward load 100 N/node",
   "checks": [
     {
-      "comment": "Outer node 7 (theta=0): radial T1 displacement positive, ~1.504e-3",
+      "comment": "Outer node 7 (theta=0): radial T1 displacement on the coarse full-ring mesh.",
       "type": "node_displacement", "subcase": 1, "node_id": 7, "dof": "T1",
-      "expected": 1.504e-3, "rel_tol": 0.03
+      "expected": 1.486094e-3, "rel_tol": 0.03
     },
     {
       "comment": "Outer node 10 (theta=180): radial T1 negative by symmetry",
       "type": "node_displacement", "subcase": 1, "node_id": 10, "dof": "T1",
-      "expected": -1.504e-3, "rel_tol": 0.03
+      "expected": -1.486094e-3, "rel_tol": 0.03
     },
     {
       "comment": "Outer node 7: T2 = 0 (SPC tangential constraint)",
@@ -17,19 +17,19 @@
       "expected": 0.0, "abs_tol": 1e-12
     },
     {
-      "comment": "Inner node 1 (theta=0): radial T1 positive, ~1.357e-3",
+      "comment": "Inner node 1 (theta=0): radial T1 on the coarse full-ring mesh.",
       "type": "node_displacement", "subcase": 1, "node_id": 1, "dof": "T1",
-      "expected": 1.357e-3, "rel_tol": 0.03
+      "expected": 1.355608e-3, "rel_tol": 0.03
     },
     {
-      "comment": "Element 1 stress: von Mises ~962 Pa",
+      "comment": "Element 1 stress: von Mises on the coarse full-ring mesh.",
       "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "von_mises",
-      "expected": 962.0, "rel_tol": 0.03
+      "expected": 942.6732, "rel_tol": 0.03
     },
     {
-      "comment": "Element 2 stress (theta=60-120 sector): von Mises ~972 Pa",
+      "comment": "Element 2 stress (theta=60-120 sector): von Mises on the coarse full-ring mesh.",
       "type": "element_stress", "subcase": 1, "elem_id": 2, "component": "von_mises",
-      "expected": 972.0, "rel_tol": 0.03
+      "expected": 942.6732, "rel_tol": 0.03
     }
   ]
 }

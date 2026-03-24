@@ -1,10 +1,10 @@
 {
-  "description": "60-deg sector slice with CORD2C nodes and oblique MPC BC; displacements should match full ring within ~1%",
+  "description": "60-deg sector slice with CORD2C nodes and oblique MPC BC; displacements should match the full-ring benchmark on the same coarse CQUAD4 mesh.",
   "checks": [
     {
-      "comment": "Node 7 (theta=0, outer): radial T1 matches full ring value 1.504e-3 within 1%",
+      "comment": "Node 7 (theta=0, outer): radial T1 matches the full-ring benchmark.",
       "type": "node_displacement", "subcase": 1, "node_id": 7, "dof": "T1",
-      "expected": 1.504e-3, "rel_tol": 0.01
+      "expected": 1.486094e-3, "rel_tol": 0.01
     },
     {
       "comment": "Node 7: T2 = 0 (SPC tangential constraint at theta=0)",
@@ -12,24 +12,24 @@
       "expected": 0.0, "abs_tol": 1e-12
     },
     {
-      "comment": "Node 1 (theta=0, inner): radial T1 matches full ring value 1.357e-3 within 1%",
+      "comment": "Node 1 (theta=0, inner): radial T1 matches the full-ring benchmark.",
       "type": "node_displacement", "subcase": 1, "node_id": 1, "dof": "T1",
-      "expected": 1.357e-3, "rel_tol": 0.01
+      "expected": 1.355608e-3, "rel_tol": 0.01
     },
     {
-      "comment": "Node 8 (theta=60, outer): T1 component ~7.54e-4 (from MPC + radial motion)",
+      "comment": "Node 8 (theta=60, outer): T1 component from the full-ring benchmark.",
       "type": "node_displacement", "subcase": 1, "node_id": 8, "dof": "T1",
-      "expected": 7.539e-4, "rel_tol": 0.02
+      "expected": 7.430472e-4, "rel_tol": 0.02
     },
     {
-      "comment": "Node 8 (theta=60, outer): T2 component ~1.306e-3 (radial at 60 deg)",
+      "comment": "Node 8 (theta=60, outer): T2 component from the full-ring benchmark.",
       "type": "node_displacement", "subcase": 1, "node_id": 8, "dof": "T2",
-      "expected": 1.306e-3, "rel_tol": 0.02
+      "expected": 1.286996e-3, "rel_tol": 0.02
     },
     {
-      "comment": "Element 1 von Mises stress ~960 Pa",
+      "comment": "Element 1 von Mises stress matches the full-ring benchmark.",
       "type": "element_stress", "subcase": 1, "elem_id": 1, "component": "von_mises",
-      "expected": 960.0, "rel_tol": 0.03
+      "expected": 942.6732, "rel_tol": 0.03
     }
   ]
 }

@@ -30,6 +30,7 @@ SUBCASE 1
   DISPLACEMENT = ALL
   STRESS = ALL
 BEGIN BULK
+PARAM,CSVOUT,YES
 $ Inner ring (r=1): nodes 1-6
 $ sin(60) = sqrt(3)/2 = 0.8660254037844386 (IEEE 754 exact double)
 $ Outer ring y-coords = 2 * inner (exact in IEEE 754 via multiply-by-2)
