@@ -552,77 +552,29 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
       ps.etype = elem_data.type;
 
       if (elem_data.type == ElementType::CQUAD4) {
-        auto node_c = [&]() -> std::array<Vec3, 4> {
-          std::array<Vec3, 4> c;
-          for (int i = 0; i < 4; ++i)
-            c[i] = model.node(elem_data.nodes[i]).position;
-          return c;
-        }();
-        // Build local shell frame so the Jacobian is computed in the element
-        // plane.  Using raw global X,Y fails for elements whose normal is not
-        // along Z (e.g. side-wall elements in the XZ plane have constant Y,
-        // which makes the global-XY Jacobian singular → NaN stresses).
-        Vec3 v12 = node_c[1] - node_c[0];
-        Vec3 v14 = node_c[3] - node_c[0];
-        Vec3 e3_rec = v12.cross(v14).normalized();
-        Vec3 e1_rec = v12.normalized();
-        Vec3 e2_rec = e3_rec.cross(e1_rec);
-        std::array<double, 4> xl_rec{}, yl_rec{};
-        for (int n = 0; n < 4; ++n) {
-          xl_rec[n] = node_c[n].dot(e1_rec);
-          yl_rec[n] = node_c[n].dot(e2_rec);
-        }
-
-        auto sd = CQuad4::shape_functions(0.0, 0.0);
-        Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
-        for (int n = 0; n < 4; ++n) {
-          J(0, 0) += sd.dNdxi[n] * xl_rec[n];
-          J(0, 1) += sd.dNdxi[n] * yl_rec[n];
-          J(1, 0) += sd.dNdeta[n] * xl_rec[n];
-          J(1, 1) += sd.dNdeta[n] * yl_rec[n];
-        }
-        Eigen::Matrix2d Jinv = J.inverse();
-        Eigen::MatrixXd dNdx(2, 4);
-        for (int n = 0; n < 4; ++n) {
-          dNdx(0, n) = Jinv(0, 0) * sd.dNdxi[n] + Jinv(0, 1) * sd.dNdeta[n];
-          dNdx(1, n) = Jinv(1, 0) * sd.dNdxi[n] + Jinv(1, 1) * sd.dNdeta[n];
-        }
-        Eigen::MatrixXd Bm(3, 8);
-        Bm.setZero();
-        for (int n = 0; n < 4; ++n) {
-          Bm(0, 2 * n) = dNdx(0, n);
-          Bm(1, 2 * n + 1) = dNdx(1, n);
-          Bm(2, 2 * n) = dNdx(1, n);
-          Bm(2, 2 * n + 1) = dNdx(0, n);
-        }
-        // Project global displacements onto the local element axes so that
-        // u_mem contains the in-plane components regardless of orientation.
-        Eigen::VectorXd u_mem(8);
-        for (int n = 0; n < 4; ++n) {
-          Vec3 u_glob(ue(6 * n), ue(6 * n + 1), ue(6 * n + 2));
-          u_mem(2 * n)     = u_glob.dot(e1_rec);
-          u_mem(2 * n + 1) = u_glob.dot(e2_rec);
-        }
         const auto &pshell_ = std::get<PShell>(model.property(elem_data.pid));
         const Mat1 &mat_ = model.material(pshell_.mid1);
-        double E_ = mat_.E, nu_ = mat_.nu;
-        double c_ = E_ / (1 - nu_ * nu_);
-        Eigen::Matrix3d Dm_;
-        Dm_ << c_, c_ * nu_, 0, c_ * nu_, c_, 0, 0, 0, c_ * (1 - nu_) / 2;
-
         double T_avg4 = 0.0;
         for (int n = 0; n < 4; ++n) {
           auto it = nodal_temps_rec.find(elem_data.nodes[n]);
           T_avg4 += (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
         }
         T_avg4 /= 4.0;
-        double dT4 = T_avg4 - mat_.ref_temp;
-        double alpha4 = mat_.A;
-        Eigen::Vector3d eps_th4{alpha4 * dT4, alpha4 * dT4, 0.0};
 
-        Eigen::Vector3d sigma = Dm_ * (Bm * u_mem - eps_th4);
-        ps.sx = sigma(0); ps.sy = sigma(1); ps.sxy = sigma(2);
-        ps.mx = 0; ps.my = 0; ps.mxy = 0;
+        std::array<NodeId, 4> nodes{
+            elem_data.nodes[0], elem_data.nodes[1], elem_data.nodes[2],
+            elem_data.nodes[3]};
+        const auto response = CQuad4::recover_centroid_response(
+            elem_data.id, elem_data.pid, nodes, model,
+            std::span<const double>(ue.data(), static_cast<size_t>(ue.size())),
+            T_avg4, mat_.ref_temp);
+
+        ps.sx = response.membrane_stress(0);
+        ps.sy = response.membrane_stress(1);
+        ps.sxy = response.membrane_stress(2);
+        ps.mx = response.bending_moment(0);
+        ps.my = response.bending_moment(1);
+        ps.mxy = response.bending_moment(2);
         ps.von_mises = std::sqrt(ps.sx * ps.sx - ps.sx * ps.sy + ps.sy * ps.sy +
                                  3 * ps.sxy * ps.sxy);
       } else {

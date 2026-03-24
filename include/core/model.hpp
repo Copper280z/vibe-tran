@@ -6,6 +6,7 @@
 #include "core/types.hpp"
 #include "core/coord_sys.hpp"
 #include <memory>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <variant>
@@ -46,6 +47,9 @@ struct PShell {
   double twelveI_t3{1.0}; // 12I/t^3 bending stiffness factor
   MaterialId mid3{0};     // transverse shear material
   double tst{0.833333};   // transverse shear thickness ratio
+  double nsm{0.0};        // non-structural mass / unit area
+  double z1{std::numeric_limits<double>::quiet_NaN()}; // stress recovery fiber distance 1
+  double z2{std::numeric_limits<double>::quiet_NaN()}; // stress recovery fiber distance 2
   MaterialId mid4{0};     // membrane-bending coupling
   ShellFormulation shell_form{ShellFormulation::MITC4};
 };
@@ -76,6 +80,9 @@ struct ElementData {
   ElementType type{0};
   PropertyId pid{0};
   std::vector<NodeId> nodes;
+  std::optional<double> theta{std::nullopt};
+  std::optional<CoordId> mcid{std::nullopt};
+  double zoffs{0.0};
 };
 
 // ── Loads

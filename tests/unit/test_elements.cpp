@@ -66,6 +66,18 @@ static void add_grid(Model &m, int id, double x, double y, double z = 0) {
   m.nodes[g.id] = g;
 }
 
+static void add_mat1(Model &m, int id, double E, double nu, double rho = 0.0,
+                     double alpha = 0.0) {
+  Mat1 mat;
+  mat.id = MaterialId{id};
+  mat.E = E;
+  mat.nu = nu;
+  mat.G = E / (2 * (1 + nu));
+  mat.rho = rho;
+  mat.A = alpha;
+  m.materials[mat.id] = mat;
+}
+
 // ── CQUAD4 tests
 // ──────────────────────────────────────────────────────────────
 
@@ -162,6 +174,105 @@ TEST(CQuad4, ThermalLoadSymmetricHeating) {
     sum_fx += fe(6 * i); // sum of x-forces
   EXPECT_NEAR(sum_fx, 0.0, 1e-6 * fe.norm())
       << "Sum of x-forces from uniform thermal should be zero";
+}
+
+TEST(CQuad4, RecoveryUsesSeparateSectionMaterialsAndReportsMoments) {
+  auto check_formulation = [](ShellFormulation formulation) {
+    Model m;
+    add_mat1(m, 1, 10.0, 0.0);
+    add_mat1(m, 2, 120.0, 0.0);
+    add_mat1(m, 3, 30.0, 0.0);
+
+    PShell ps;
+    ps.pid = PropertyId{1};
+    ps.mid1 = MaterialId{1};
+    ps.mid2 = MaterialId{2};
+    ps.mid3 = MaterialId{3};
+    ps.t = 1.0;
+    ps.twelveI_t3 = 2.0;
+    ps.shell_form = formulation;
+    m.properties[ps.pid] = ps;
+
+    add_grid(m, 1, 0.0, 0.0, 0.0);
+    add_grid(m, 2, 1.0, 0.0, 0.0);
+    add_grid(m, 3, 1.0, 1.0, 0.0);
+    add_grid(m, 4, 0.0, 1.0, 0.0);
+
+    std::array<NodeId, 4> nodes{NodeId{1}, NodeId{2}, NodeId{3}, NodeId{4}};
+    Eigen::Matrix<double, 24, 1> u = Eigen::Matrix<double, 24, 1>::Zero();
+
+    // Membrane patch: u_x = x  ->  ε_xx = 1.
+    u(6) = 1.0;   // node 2 Tx
+    u(12) = 1.0;  // node 3 Tx
+
+    // Curvature patch: θx_local = x  ->  κ_xx = 1.
+    // For a horizontal element DOF3_local = -Ry_global.
+    u(10) = -1.0; // node 2 Ry
+    u(16) = -1.0; // node 3 Ry
+
+    const auto response = CQuad4::recover_centroid_response(
+        ElementId{1}, PropertyId{1}, nodes, m,
+        std::span<const double>(u.data(), static_cast<size_t>(u.size())), 0.0,
+        0.0);
+
+    EXPECT_NEAR(response.membrane_strain(0), 1.0, 1e-12);
+    EXPECT_NEAR(response.curvature(0), 1.0, 1e-12);
+    EXPECT_NEAR(response.membrane_stress(0), 10.0, 1e-12);
+    EXPECT_NEAR(response.membrane_stress(1), 0.0, 1e-12);
+    EXPECT_NEAR(response.membrane_stress(2), 0.0, 1e-12);
+
+    // D_xx = E_bend * (12I/t^3) * t^3 / 12 = 120 * 2 / 12 = 20.
+    EXPECT_NEAR(response.bending_moment(0), 20.0, 1e-12);
+    EXPECT_NEAR(response.bending_moment(1), 0.0, 1e-12);
+    EXPECT_NEAR(response.bending_moment(2), 0.0, 1e-12);
+  };
+
+  check_formulation(ShellFormulation::MINDLIN);
+  check_formulation(ShellFormulation::MITC4);
+}
+
+TEST(CQuad4, ShearEnergyUsesMid3AndTst) {
+  auto check_formulation = [](ShellFormulation formulation) {
+    Model m;
+    add_mat1(m, 1, 10.0, 0.0);
+    add_mat1(m, 2, 10.0, 0.0);
+    add_mat1(m, 3, 30.0, 0.0);
+
+    PShell ps;
+    ps.pid = PropertyId{1};
+    ps.mid1 = MaterialId{1};
+    ps.mid2 = MaterialId{2};
+    ps.mid3 = MaterialId{3};
+    ps.t = 1.0;
+    ps.tst = 0.5;
+    ps.shell_form = formulation;
+    m.properties[ps.pid] = ps;
+
+    add_grid(m, 1, 0.0, 0.0, 0.0);
+    add_grid(m, 2, 1.0, 0.0, 0.0);
+    add_grid(m, 3, 1.0, 1.0, 0.0);
+    add_grid(m, 4, 0.0, 1.0, 0.0);
+
+    std::array<NodeId, 4> nodes{NodeId{1}, NodeId{2}, NodeId{3}, NodeId{4}};
+    LocalKe Ke =
+        (formulation == ShellFormulation::MITC4)
+            ? CQuad4Mitc4(ElementId{1}, PropertyId{1}, nodes, m)
+                  .stiffness_matrix()
+            : CQuad4(ElementId{1}, PropertyId{1}, nodes, m).stiffness_matrix();
+
+    // Pure transverse shear patch: w = x, rotations = 0  ->  γ_xz = 1.
+    Eigen::VectorXd u = Eigen::VectorXd::Zero(24);
+    u(8) = 1.0;   // node 2 Tz
+    u(14) = 1.0;  // node 3 Tz
+
+    const double energy = u.dot(Ke * u);
+    const double G = 15.0; // MAT1 3 with nu=0
+    const double expected = 0.5 * G * 1.0 * 1.0; // k*t*A*γ^2
+    EXPECT_NEAR(energy, expected, 1e-10 * expected);
+  };
+
+  check_formulation(ShellFormulation::MINDLIN);
+  check_formulation(ShellFormulation::MITC4);
 }
 
 // ── CTRIA3 tests
@@ -1069,6 +1180,26 @@ TEST(MassMatrix, CQuad4DrillingInertiaIsTiny) {
       << "Artificial drilling inertia should stay tiny relative to physical "
          "shell rotational inertia so drill modes do not pollute the low "
          "modal spectrum";
+}
+
+TEST(MassMatrix, CQuad4IncludesNonStructuralMass) {
+  Model m = make_shell_model_rho(2.0e11, 0.3, 0.01, 0.0);
+  auto &ps = std::get<PShell>(m.properties.at(PropertyId{1}));
+  ps.nsm = 2.5;
+
+  add_grid(m, 1, 0.0, 0.0, 0.0);
+  add_grid(m, 2, 1.0, 0.0, 0.0);
+  add_grid(m, 3, 1.0, 1.0, 0.0);
+  add_grid(m, 4, 0.0, 1.0, 0.0);
+  std::array<NodeId, 4> nodes{NodeId{1}, NodeId{2}, NodeId{3}, NodeId{4}};
+  CQuad4 elem(ElementId{1}, PropertyId{1}, nodes, m);
+
+  LocalKe Me = elem.mass_matrix();
+  Eigen::VectorXd u_x = Eigen::VectorXd::Zero(24);
+  for (int i = 0; i < 4; ++i)
+    u_x(6 * i) = 1.0;
+
+  EXPECT_NEAR(u_x.transpose() * Me * u_x, 2.5, 1e-12);
 }
 
 TEST(MassMatrix, CTria3Symmetry) {

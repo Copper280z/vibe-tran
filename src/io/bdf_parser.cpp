@@ -607,6 +607,24 @@ int BdfParser::parse_int(const std::string &s, int line) {
   }
 }
 
+namespace {
+
+bool field_is_integer_like(const std::string &s) {
+  if (s.empty())
+    return false;
+  size_t i = 0;
+  if (s[i] == '+' || s[i] == '-')
+    ++i;
+  if (i >= s.size())
+    return false;
+  for (; i < s.size(); ++i)
+    if (!std::isdigit(static_cast<unsigned char>(s[i])))
+      return false;
+  return true;
+}
+
+} // namespace
+
 // ── Card processors
 // ───────────────────────────────────────────────────────────
 
@@ -654,6 +672,14 @@ void BdfParser::process_pshell(ParseContext &ctx,
   p.mid3 =
       f[6].empty() ? MaterialId{0} : MaterialId(parse_int(f[6], ctx.line_num));
   p.tst = f[7].empty() ? 0.833333 : parse_double(f[7], ctx.line_num);
+  p.nsm = f[8].empty() ? 0.0 : parse_double(f[8], ctx.line_num);
+  p.z1 = (f.size() > 9 && !f[9].empty()) ? parse_double(f[9], ctx.line_num)
+                                         : -0.5 * p.t;
+  p.z2 = (f.size() > 10 && !f[10].empty()) ? parse_double(f[10], ctx.line_num)
+                                           : 0.5 * p.t;
+  p.mid4 = (f.size() > 11 && !f[11].empty())
+               ? MaterialId(parse_int(f[11], ctx.line_num))
+               : MaterialId{0};
   ctx.model.properties[p.pid] = p;
 }
 
@@ -685,6 +711,14 @@ void BdfParser::process_cquad4(ParseContext &ctx,
   e.type = ElementType::CQUAD4;
   for (int i = 0; i < 4; ++i)
     e.nodes.push_back(NodeId(parse_int(f[3 + i], ctx.line_num)));
+  if (f.size() > 7 && !f[7].empty()) {
+    if (field_is_integer_like(f[7]))
+      e.mcid = CoordId(parse_int(f[7], ctx.line_num));
+    else
+      e.theta = parse_double(f[7], ctx.line_num);
+  }
+  if (f.size() > 8 && !f[8].empty())
+    e.zoffs = parse_double(f[8], ctx.line_num);
   ctx.model.elements.push_back(std::move(e));
 }
 
@@ -697,6 +731,14 @@ void BdfParser::process_ctria3(ParseContext &ctx,
   e.type = ElementType::CTRIA3;
   for (int i = 0; i < 3; ++i)
     e.nodes.push_back(NodeId(parse_int(f[3 + i], ctx.line_num)));
+  if (f.size() > 6 && !f[6].empty()) {
+    if (field_is_integer_like(f[6]))
+      e.mcid = CoordId(parse_int(f[6], ctx.line_num));
+    else
+      e.theta = parse_double(f[6], ctx.line_num);
+  }
+  if (f.size() > 7 && !f[7].empty())
+    e.zoffs = parse_double(f[7], ctx.line_num);
   ctx.model.elements.push_back(std::move(e));
 }
 

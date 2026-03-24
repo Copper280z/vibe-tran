@@ -1,45 +1,112 @@
 // src/elements/cquad4.cpp
-// CQUAD4 isoparametric quadrilateral shell element.
-// Membrane: Q4 bilinear plane-stress, 2x2 Gauss
-// Bending: Mindlin-Reissner DKQ, 2x2 Gauss
-// The element frame is aligned with the element plane.
 
 #include "elements/cquad4.hpp"
 #include <Eigen/Dense>
+#include <algorithm>
 #include <cmath>
 #include <format>
-#include <stdexcept>
 
 namespace vibestran {
 
-// Gauss points for 2x2 quadrature
-static constexpr double GP2 = 1.0 / std::numbers::sqrt3; // ≈ 0.5773502692
-static const double GAUSS2[2] = {-GP2, GP2};
-static const double GAUSS2_W[2] = {1.0, 1.0};
-static constexpr double DRILL_INERTIA_SCALE = 1e-4;
+namespace {
 
-// ── Shell local coordinate frame ─────────────────────────────────────────────
-// Shell elements in 3D space require a local element frame so that the 2D
-// isoparametric Jacobian is computed in the plane of the element.  When all
-// nodes lie in the global XY-plane this reduces to the identity (no change to
-// existing results).  For arbitrarily-oriented elements:
-//   e1 — along the first edge (node1→node2, local x)
-//   e3 — element normal (e1 × edge14, normalised)
-//   e2 — e3 × e1  (local y, completes right-hand frame)
-// xl[n], yl[n] are the projections of each node onto (e1, e2).
-// T (24×24) transforms global DOFs to local DOFs: u_local = T * u_global.
-// The assembled element matrix in global frame is T^T * K_local * T.
+static constexpr double GP2 = 1.0 / std::numbers::sqrt3;
+static constexpr double GAUSS2[2] = {-GP2, GP2};
+static constexpr double GAUSS2_W[2] = {1.0, 1.0};
+static constexpr double DRILL_INERTIA_SCALE = 1e-4;
+static constexpr std::array<int, 2> MEMBRANE_DOF_MAP{0, 1};
+static constexpr std::array<int, 3> PLATE_DOF_MAP{3, 4, 2}; // [theta_x, theta_y, w]
+
 struct ShellFrame {
   Vec3 e1, e2, e3;
-  std::array<double, 4> xl;
-  std::array<double, 4> yl;
-  Eigen::Matrix<double, 24, 24> T;
+  std::array<double, 4> xl{};
+  std::array<double, 4> yl{};
+  Eigen::Matrix<double, 24, 24> T{Eigen::Matrix<double, 24, 24>::Zero()};
 };
 
-static double compute_drilling_stiffness(const LocalKe &Ke) {
-  // Drilling DOF is artificial; regularize it off the physical rotational
-  // stiffness scale, not the membrane translational scale. Using the global
-  // max diagonal can make thin closed-shell structures far too stiff.
+struct QuadPointData {
+  double xi{0.0};
+  double eta{0.0};
+  CQuad4::ShapeData shape;
+  Eigen::Matrix2d J{Eigen::Matrix2d::Zero()};
+  Eigen::Matrix2d Jinv{Eigen::Matrix2d::Zero()};
+  Eigen::Matrix<double, 2, 4> dNdx{Eigen::Matrix<double, 2, 4>::Zero()};
+  Eigen::Vector2d g_r{Eigen::Vector2d::Zero()};
+  Eigen::Vector2d g_s{Eigen::Vector2d::Zero()};
+  Eigen::Matrix2d contravariant{Eigen::Matrix2d::Zero()};
+  double detJ{0.0};
+};
+
+struct ShellSection {
+  Eigen::Matrix3d membrane_D{Eigen::Matrix3d::Zero()};
+  Eigen::Matrix3d bending_material_D{Eigen::Matrix3d::Zero()};
+  Eigen::Matrix3d coupling_D{Eigen::Matrix3d::Zero()};
+  Eigen::Matrix2d shear_material_D{Eigen::Matrix2d::Zero()};
+
+  Eigen::Matrix3d A{Eigen::Matrix3d::Zero()};
+  Eigen::Matrix3d B{Eigen::Matrix3d::Zero()};
+  Eigen::Matrix3d D{Eigen::Matrix3d::Zero()};
+  Eigen::Matrix2d T{Eigen::Matrix2d::Zero()};
+
+  Eigen::Vector3d membrane_alpha{Eigen::Vector3d::Zero()};
+  double thickness{0.0};
+  double mass_per_area{0.0};
+  double rotary_mass_per_area{0.0};
+};
+
+using MembraneB = Eigen::Matrix<double, 3, 8>;
+using BendingB = Eigen::Matrix<double, 3, 12>;
+using ShearB = Eigen::Matrix<double, 2, 12>;
+using Row8 = Eigen::Matrix<double, 1, 8>;
+using Row12 = Eigen::Matrix<double, 1, 12>;
+
+struct CovariantMembraneRows {
+  Row8 rr{Row8::Zero()};
+  Row8 ss{Row8::Zero()};
+  Row8 rs{Row8::Zero()};
+};
+
+struct Mitc4PlusMembraneData {
+  CovariantMembraneRows top;
+  CovariantMembraneRows bottom;
+  CovariantMembraneRows right;
+  CovariantMembraneRows left;
+  CovariantMembraneRows center;
+  double a_top{0.0};
+  double a_bottom{0.0};
+  double a_right{0.0};
+  double a_left{0.0};
+  double a_center{0.0};
+};
+
+struct Mitc4PlusShearData {
+  Row12 xi_bottom{Row12::Zero()};
+  Row12 xi_top{Row12::Zero()};
+  Row12 eta_right{Row12::Zero()};
+  Row12 eta_left{Row12::Zero()};
+  Row12 xi_center{Row12::Zero()};
+  Row12 eta_center{Row12::Zero()};
+};
+
+const PShell &lookup_pshell(const Model &model, ElementId eid, PropertyId pid,
+                            std::string_view owner) {
+  const auto &prop = model.property(pid);
+  if (!std::holds_alternative<PShell>(prop)) {
+    throw SolverError(std::format("{} {}: property {} is not PSHELL", owner,
+                                  eid.value, pid.value));
+  }
+  return std::get<PShell>(prop);
+}
+
+std::array<Vec3, 4> lookup_node_coords(const Model &model,
+                                       const std::array<NodeId, 4> &nodes) {
+  std::array<Vec3, 4> coords;
+  for (int i = 0; i < 4; ++i)
+    coords[i] = model.node(nodes[i]).position;
+  return coords;
+}
+
+double compute_drilling_stiffness(const LocalKe &Ke) {
   double max_rot_diag = 0.0;
   for (int i = 0; i < 4; ++i) {
     max_rot_diag =
@@ -52,59 +119,688 @@ static double compute_drilling_stiffness(const LocalKe &Ke) {
     return 1e-6 * max_rot_diag;
 
   double max_diag = Ke.diagonal().cwiseAbs().maxCoeff();
-  if (max_diag < 1e-10)
+  if (max_diag < 1e-10) {
     throw SolverError(std::format(
         "CQUAD4: stiffness matrix diagonal is near-zero (max={:.3e}); "
         "check material, thickness, and geometry",
         max_diag));
+  }
   return 1e-12 * max_diag;
 }
 
-static ShellFrame compute_shell_frame(const std::array<Vec3, 4> &g) {
+ShellFrame compute_shell_frame(const std::array<Vec3, 4> &g) {
   ShellFrame fr;
-  Vec3 v12 = g[1] - g[0];
-  Vec3 v14 = g[3] - g[0];
+  const Vec3 v12 = g[1] - g[0];
+  const Vec3 v14 = g[3] - g[0];
   fr.e3 = v12.cross(v14).normalized();
   fr.e1 = v12.normalized();
-  fr.e2 = fr.e3.cross(fr.e1); // unit: e3 ⊥ e1 → |e2|=1
+  fr.e2 = fr.e3.cross(fr.e1);
+
   for (int n = 0; n < 4; ++n) {
     fr.xl[n] = g[n].dot(fr.e1);
     fr.yl[n] = g[n].dot(fr.e2);
   }
-  // R rows = local axes expressed in global frame.
-  // Translational DOFs: u_local = R * u_global  (R transforms global to local)
+
   Eigen::Matrix3d R;
   R << fr.e1.x, fr.e1.y, fr.e1.z, fr.e2.x, fr.e2.y, fr.e2.z, fr.e3.x, fr.e3.y,
       fr.e3.z;
-  // Rotational DOFs correction:
-  // The code uses "slope" convention: DOF3 = θx = slope-in-x (γ_xz = ∂w/∂x - θx
-  // = 0 for no shear), DOF4 = θy = slope-in-y (γ_yz = ∂w/∂y - θy = 0 for no
-  // shear). For a rigid-body rotation ω_global, the transverse displacement at
-  // local (x,0,0) is:
-  //   w = -(e2·ω_global)*x  →  ∂w/∂x = -(e2·ω_global)  →  DOF3 = -(e2·ω_global)
-  // Similarly: ∂w/∂y = (e1·ω_global) → DOF4 = (e1·ω_global)
-  // Therefore T_rot rows are: [-e2, e1, e3] (row 0 of M*R = -row1(R), etc.)
-  fr.T.setZero();
+
   for (int n = 0; n < 4; ++n) {
-    fr.T.template block<3, 3>(6 * n, 6 * n) = R; // translations
+    fr.T.template block<3, 3>(6 * n, 6 * n) = R;
     auto Tr = fr.T.template block<3, 3>(6 * n + 3, 6 * n + 3);
-    Tr.row(0) = -R.row(1); // DOF3 = -(e2·ω)
-    Tr.row(1) = R.row(0);  // DOF4 = +(e1·ω)
-    Tr.row(2) = R.row(2);  // DOF5 = drilling
+    Tr.row(0) = -R.row(1);
+    Tr.row(1) = R.row(0);
+    Tr.row(2) = R.row(2);
   }
   return fr;
 }
+
+Eigen::Matrix3d plane_stress_D(const Mat1 &mat) {
+  const double E = mat.E;
+  const double nu = mat.nu;
+  const double c = E / (1.0 - nu * nu);
+  Eigen::Matrix3d D;
+  D << c, c * nu, 0.0, c * nu, c, 0.0, 0.0, 0.0, c * (1.0 - nu) / 2.0;
+  return D;
+}
+
+Eigen::Matrix2d transverse_shear_D(const Mat1 &mat) {
+  const double G =
+      (mat.G > 0.0) ? mat.G : mat.E / (2.0 * (1.0 + mat.nu));
+  Eigen::Matrix2d D = Eigen::Matrix2d::Zero();
+  D(0, 0) = G;
+  D(1, 1) = G;
+  return D;
+}
+
+const Mat1 &resolve_pshell_material(const Model &model, ElementId eid,
+                                    PropertyId pid, MaterialId preferred,
+                                    MaterialId fallback,
+                                    std::string_view role) {
+  const MaterialId effective =
+      (preferred.value != 0) ? preferred : fallback;
+  if (effective.value == 0) {
+    throw SolverError(std::format("CQUAD4 {}: PSHELL {} has no {} material",
+                                  eid.value, pid.value, role));
+  }
+  return model.material(effective);
+}
+
+ShellSection build_shell_section(const Model &model, ElementId eid,
+                                 PropertyId pid) {
+  const PShell &ps = lookup_pshell(model, eid, pid, "CQUAD4");
+
+  const Mat1 &membrane = model.material(ps.mid1);
+  const Mat1 &bending =
+      resolve_pshell_material(model, eid, pid, ps.mid2, ps.mid1, "bending");
+  const MaterialId bending_mid =
+      (ps.mid2.value != 0) ? ps.mid2 : ps.mid1;
+  const Mat1 &shear = resolve_pshell_material(model, eid, pid, ps.mid3,
+                                              bending_mid, "shear");
+
+  ShellSection section;
+  section.thickness = ps.t;
+  section.membrane_D = plane_stress_D(membrane);
+  section.bending_material_D = plane_stress_D(bending);
+  section.shear_material_D = transverse_shear_D(shear);
+  if (ps.mid4.value != 0)
+    section.coupling_D = plane_stress_D(model.material(ps.mid4));
+
+  const double ib = ps.twelveI_t3 * ps.t * ps.t * ps.t / 12.0;
+  section.A = ps.t * section.membrane_D;
+  section.B = ps.t * ps.t * section.coupling_D;
+  section.D = ib * section.bending_material_D;
+  section.T = (ps.tst * ps.t) * section.shear_material_D;
+  section.membrane_alpha << membrane.A, membrane.A, 0.0;
+  section.mass_per_area = membrane.rho * ps.t + ps.nsm;
+  section.rotary_mass_per_area = membrane.rho * ps.t * ps.t * ps.t / 12.0;
+  return section;
+}
+
+QuadPointData evaluate_quad_point(ElementId eid, const std::array<double, 4> &xl,
+                                  const std::array<double, 4> &yl, double xi,
+                                  double eta) {
+  QuadPointData q;
+  q.xi = xi;
+  q.eta = eta;
+  q.shape = CQuad4::shape_functions(xi, eta);
+
+  for (int n = 0; n < 4; ++n) {
+    q.J(0, 0) += q.shape.dNdxi[n] * xl[n];
+    q.J(0, 1) += q.shape.dNdxi[n] * yl[n];
+    q.J(1, 0) += q.shape.dNdeta[n] * xl[n];
+    q.J(1, 1) += q.shape.dNdeta[n] * yl[n];
+  }
+
+  q.detJ = q.J.determinant();
+  if (q.detJ <= 0.0) {
+    throw SolverError(std::format("CQUAD4 {}: negative Jacobian det={:.6g}",
+                                  eid.value, q.detJ));
+  }
+
+  q.Jinv = q.J.inverse();
+  q.contravariant = q.Jinv;
+  q.g_r << q.J(0, 0), q.J(0, 1);
+  q.g_s << q.J(1, 0), q.J(1, 1);
+  for (int n = 0; n < 4; ++n) {
+    q.dNdx(0, n) =
+        q.Jinv(0, 0) * q.shape.dNdxi[n] + q.Jinv(0, 1) * q.shape.dNdeta[n];
+    q.dNdx(1, n) =
+        q.Jinv(1, 0) * q.shape.dNdxi[n] + q.Jinv(1, 1) * q.shape.dNdeta[n];
+  }
+  return q;
+}
+
+MembraneB standard_membrane_B(const QuadPointData &q) {
+  MembraneB B = MembraneB::Zero();
+  for (int n = 0; n < 4; ++n) {
+    B(0, 2 * n) = q.dNdx(0, n);
+    B(1, 2 * n + 1) = q.dNdx(1, n);
+    B(2, 2 * n) = q.dNdx(1, n);
+    B(2, 2 * n + 1) = q.dNdx(0, n);
+  }
+  return B;
+}
+
+BendingB bending_B(const QuadPointData &q) {
+  BendingB B = BendingB::Zero();
+  for (int n = 0; n < 4; ++n) {
+    B(0, 3 * n) = q.dNdx(0, n);
+    B(1, 3 * n + 1) = q.dNdx(1, n);
+    B(2, 3 * n) = q.dNdx(1, n);
+    B(2, 3 * n + 1) = q.dNdx(0, n);
+  }
+  return B;
+}
+
+ShearB mindlin_shear_B(const QuadPointData &q) {
+  ShearB B = ShearB::Zero();
+  for (int n = 0; n < 4; ++n) {
+    B(0, 3 * n + 2) = q.dNdx(0, n);
+    B(0, 3 * n) = -q.shape.N[n];
+    B(1, 3 * n + 2) = q.dNdx(1, n);
+    B(1, 3 * n + 1) = -q.shape.N[n];
+  }
+  return B;
+}
+
+CovariantMembraneRows direct_covariant_membrane_rows(
+    ElementId eid, const std::array<double, 4> &xl,
+    const std::array<double, 4> &yl, double xi, double eta) {
+  const QuadPointData q = evaluate_quad_point(eid, xl, yl, xi, eta);
+
+  CovariantMembraneRows rows;
+  for (int n = 0; n < 4; ++n) {
+    rows.rr(2 * n) = q.g_r.x() * q.shape.dNdxi[n];
+    rows.rr(2 * n + 1) = q.g_r.y() * q.shape.dNdxi[n];
+
+    rows.ss(2 * n) = q.g_s.x() * q.shape.dNdeta[n];
+    rows.ss(2 * n + 1) = q.g_s.y() * q.shape.dNdeta[n];
+
+    rows.rs(2 * n) =
+        0.5 *
+        (q.g_r.x() * q.shape.dNdeta[n] + q.g_s.x() * q.shape.dNdxi[n]);
+    rows.rs(2 * n + 1) =
+        0.5 *
+        (q.g_r.y() * q.shape.dNdeta[n] + q.g_s.y() * q.shape.dNdxi[n]);
+  }
+
+  return rows;
+}
+
+Mitc4PlusMembraneData build_mitc4plus_membrane_data(
+    ElementId eid, const std::array<double, 4> &xl,
+    const std::array<double, 4> &yl) {
+  Mitc4PlusMembraneData data;
+
+  data.top = direct_covariant_membrane_rows(eid, xl, yl, 0.0, 1.0);
+  data.bottom = direct_covariant_membrane_rows(eid, xl, yl, 0.0, -1.0);
+  data.right = direct_covariant_membrane_rows(eid, xl, yl, 1.0, 0.0);
+  data.left = direct_covariant_membrane_rows(eid, xl, yl, -1.0, 0.0);
+  data.center = direct_covariant_membrane_rows(eid, xl, yl, 0.0, 0.0);
+
+  Eigen::Vector2d x_r = Eigen::Vector2d::Zero();
+  Eigen::Vector2d x_s = Eigen::Vector2d::Zero();
+  Eigen::Vector2d x_d = Eigen::Vector2d::Zero();
+  static constexpr int R_SIGN[4] = {-1, 1, 1, -1};
+  static constexpr int S_SIGN[4] = {-1, -1, 1, 1};
+
+  for (int n = 0; n < 4; ++n) {
+    const Eigen::Vector2d xn{xl[n], yl[n]};
+    x_r += 0.25 * static_cast<double>(R_SIGN[n]) * xn;
+    x_s += 0.25 * static_cast<double>(S_SIGN[n]) * xn;
+    x_d +=
+        0.25 * static_cast<double>(R_SIGN[n] * S_SIGN[n]) * xn;
+  }
+
+  Eigen::Matrix2d xr_xs;
+  xr_xs.col(0) = x_r;
+  xr_xs.col(1) = x_s;
+  const double dual_det = xr_xs.determinant();
+  if (std::abs(dual_det) < 1e-12) {
+    throw SolverError(std::format(
+        "CQUAD4 {}: MITC4+ characteristic geometry is singular", eid.value));
+  }
+
+  const Eigen::Matrix2d dual = xr_xs.inverse();
+  const Eigen::Vector2d m_r = dual.row(0).transpose();
+  const Eigen::Vector2d m_s = dual.row(1).transpose();
+
+  const double c_r = x_d.dot(m_r);
+  const double c_s = x_d.dot(m_s);
+  const double d = c_r * c_r + c_s * c_s - 1.0;
+  if (std::abs(d) < 1e-12) {
+    throw SolverError(std::format(
+        "CQUAD4 {}: MITC4+ distortion denominator is near zero", eid.value));
+  }
+
+  data.a_top = c_r * (c_r - 1.0) / (2.0 * d);
+  data.a_bottom = c_r * (c_r + 1.0) / (2.0 * d);
+  data.a_right = c_s * (c_s - 1.0) / (2.0 * d);
+  data.a_left = c_s * (c_s + 1.0) / (2.0 * d);
+  data.a_center = 2.0 * c_r * c_s / d;
+
+  return data;
+}
+
+MembraneB mitc4plus_membrane_B(const Mitc4PlusMembraneData &data,
+                               const QuadPointData &q) {
+  const double r = q.xi;
+  const double s = q.eta;
+
+  const Row8 e_rr =
+      0.5 * (1.0 - 2.0 * data.a_top + s + 2.0 * data.a_top * s * s) *
+          data.top.rr +
+      0.5 *
+          (1.0 - 2.0 * data.a_bottom - s +
+           2.0 * data.a_bottom * s * s) *
+          data.bottom.rr +
+      data.a_right * (-1.0 + s * s) * data.right.ss +
+      data.a_left * (-1.0 + s * s) * data.left.ss +
+      data.a_center * (-1.0 + s * s) * data.center.rs;
+
+  const Row8 e_ss =
+      data.a_top * (-1.0 + r * r) * data.top.rr +
+      data.a_bottom * (-1.0 + r * r) * data.bottom.rr +
+      0.5 * (1.0 - 2.0 * data.a_right + r + 2.0 * data.a_right * r * r) *
+          data.right.ss +
+      0.5 * (1.0 - 2.0 * data.a_left - r + 2.0 * data.a_left * r * r) *
+          data.left.ss +
+      data.a_center * (-1.0 + r * r) * data.center.rs;
+
+  const Row8 eps_rs =
+      0.25 * (r + 4.0 * data.a_top * r * s) * data.top.rr +
+      0.25 * (-r + 4.0 * data.a_bottom * r * s) * data.bottom.rr +
+      0.25 * (s + 4.0 * data.a_right * r * s) * data.right.ss +
+      0.25 * (-s + 4.0 * data.a_left * r * s) * data.left.ss +
+      (1.0 + data.a_center * r * s) * data.center.rs;
+
+  const double a = q.contravariant(0, 0);
+  const double b = q.contravariant(1, 0);
+  const double c = q.contravariant(0, 1);
+  const double d = q.contravariant(1, 1);
+
+  MembraneB B = MembraneB::Zero();
+  B.row(0) = a * a * e_rr + c * c * e_ss + 2.0 * a * c * eps_rs;
+  B.row(1) = b * b * e_rr + d * d * e_ss + 2.0 * b * d * eps_rs;
+  B.row(2) =
+      2.0 * a * b * e_rr + 2.0 * c * d * e_ss +
+      2.0 * (a * d + b * c) * eps_rs;
+  return B;
+}
+
+Mitc4PlusShearData build_mitc4plus_shear_data(
+    const std::array<double, 4> &xl, const std::array<double, 4> &yl) {
+  auto covariant_shear = [&](double xi0, double eta0)
+      -> std::pair<Row12, Row12> {
+    const auto shape = CQuad4::shape_functions(xi0, eta0);
+    double gxi_x = 0.0, gxi_y = 0.0, geta_x = 0.0, geta_y = 0.0;
+    for (int n = 0; n < 4; ++n) {
+      gxi_x += shape.dNdxi[n] * xl[n];
+      gxi_y += shape.dNdxi[n] * yl[n];
+      geta_x += shape.dNdeta[n] * xl[n];
+      geta_y += shape.dNdeta[n] * yl[n];
+    }
+
+    Row12 Bxi = Row12::Zero();
+    Row12 Beta = Row12::Zero();
+    for (int n = 0; n < 4; ++n) {
+      Bxi(3 * n + 2) = shape.dNdxi[n];
+      Bxi(3 * n) = -shape.N[n] * gxi_x;
+      Bxi(3 * n + 1) = -shape.N[n] * gxi_y;
+
+      Beta(3 * n + 2) = shape.dNdeta[n];
+      Beta(3 * n) = -shape.N[n] * geta_x;
+      Beta(3 * n + 1) = -shape.N[n] * geta_y;
+    }
+    return {Bxi, Beta};
+  };
+
+  Mitc4PlusShearData data;
+  {
+    auto [row_xi, row_eta] = covariant_shear(0.0, -1.0);
+    data.xi_bottom = row_xi;
+    (void)row_eta;
+  }
+  {
+    auto [row_xi, row_eta] = covariant_shear(0.0, 1.0);
+    data.xi_top = row_xi;
+    (void)row_eta;
+  }
+  {
+    auto [row_xi, row_eta] = covariant_shear(1.0, 0.0);
+    data.eta_right = row_eta;
+    (void)row_xi;
+  }
+  {
+    auto [row_xi, row_eta] = covariant_shear(-1.0, 0.0);
+    data.eta_left = row_eta;
+    (void)row_xi;
+  }
+  {
+    auto [row_xi, row_eta] = covariant_shear(0.0, 0.0);
+    data.xi_center = row_xi;
+    data.eta_center = row_eta;
+  }
+  return data;
+}
+
+ShearB mitc4plus_shear_B(const Mitc4PlusShearData &data,
+                         const QuadPointData &q) {
+  const Row12 cov_xi =
+      0.5 * (1.0 - q.eta) * data.xi_bottom +
+      0.5 * (1.0 + q.eta) * data.xi_top +
+      q.xi * (data.xi_center - 0.5 * (data.xi_bottom + data.xi_top));
+
+  const Row12 cov_eta =
+      0.5 * (1.0 - q.xi) * data.eta_left +
+      0.5 * (1.0 + q.xi) * data.eta_right +
+      q.eta * (data.eta_center - 0.5 * (data.eta_left + data.eta_right));
+
+  Eigen::Matrix<double, 2, 12> cov = Eigen::Matrix<double, 2, 12>::Zero();
+  cov.row(0) = cov_xi;
+  cov.row(1) = cov_eta;
+  return q.Jinv * cov;
+}
+
+Eigen::Matrix<double, 24, 1>
+to_local_displacements(const ShellFrame &frame,
+                       std::span<const double> global_displacements) {
+  if (global_displacements.size() != 24) {
+    throw SolverError(std::format(
+        "CQUAD4 recovery expects 24 DOFs, got {}", global_displacements.size()));
+  }
+
+  Eigen::Matrix<double, 24, 1> u_global = Eigen::Matrix<double, 24, 1>::Zero();
+  for (int i = 0; i < 24; ++i)
+    u_global(i) = global_displacements[static_cast<size_t>(i)];
+  return frame.T * u_global;
+}
+
+Eigen::Matrix<double, 8, 1>
+gather_membrane_dofs(const Eigen::Matrix<double, 24, 1> &u_local) {
+  Eigen::Matrix<double, 8, 1> u = Eigen::Matrix<double, 8, 1>::Zero();
+  for (int n = 0; n < 4; ++n) {
+    u(2 * n) = u_local(6 * n);
+    u(2 * n + 1) = u_local(6 * n + 1);
+  }
+  return u;
+}
+
+Eigen::Matrix<double, 12, 1>
+gather_plate_dofs(const Eigen::Matrix<double, 24, 1> &u_local) {
+  Eigen::Matrix<double, 12, 1> u = Eigen::Matrix<double, 12, 1>::Zero();
+  for (int n = 0; n < 4; ++n) {
+    u(3 * n) = u_local(6 * n + 3);
+    u(3 * n + 1) = u_local(6 * n + 4);
+    u(3 * n + 2) = u_local(6 * n + 2);
+  }
+  return u;
+}
+
+template <std::size_t DofPerNode>
+void assemble_square_submatrix(LocalKe &Ke, const Eigen::MatrixXd &submatrix,
+                               const std::array<int, DofPerNode> &dof_map) {
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) {
+      for (std::size_t a = 0; a < DofPerNode; ++a) {
+        for (std::size_t b = 0; b < DofPerNode; ++b) {
+          Ke(6 * i + dof_map[a], 6 * j + dof_map[b]) +=
+              submatrix(static_cast<int>(DofPerNode) * i + static_cast<int>(a),
+                        static_cast<int>(DofPerNode) * j + static_cast<int>(b));
+        }
+      }
+    }
+  }
+}
+
+void assemble_coupling_submatrix(LocalKe &Ke,
+                                 const Eigen::Matrix<double, 8, 12> &submatrix) {
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) {
+      for (int a = 0; a < 2; ++a) {
+        for (int b = 0; b < 3; ++b) {
+          Ke(6 * i + MEMBRANE_DOF_MAP[a], 6 * j + PLATE_DOF_MAP[b]) +=
+              submatrix(2 * i + a, 3 * j + b);
+        }
+      }
+    }
+  }
+}
+
+void assemble_coupling_transpose_submatrix(
+    LocalKe &Ke, const Eigen::Matrix<double, 8, 12> &submatrix) {
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) {
+      for (int a = 0; a < 2; ++a) {
+        for (int b = 0; b < 3; ++b) {
+          Ke(6 * j + PLATE_DOF_MAP[b], 6 * i + MEMBRANE_DOF_MAP[a]) +=
+              submatrix(2 * i + a, 3 * j + b);
+        }
+      }
+    }
+  }
+}
+
+void assemble_membrane_force(LocalFe &fe, const Eigen::Matrix<double, 8, 1> &f) {
+  for (int n = 0; n < 4; ++n) {
+    fe(6 * n) += f(2 * n);
+    fe(6 * n + 1) += f(2 * n + 1);
+  }
+}
+
+LocalKe compute_shell_stiffness(ElementId eid, PropertyId pid,
+                                const std::array<NodeId, 4> &nodes,
+                                const Model &model,
+                                ShellFormulation formulation) {
+  LocalKe Ke = LocalKe::Zero(24, 24);
+  const auto coords = lookup_node_coords(model, nodes);
+  const ShellFrame frame = compute_shell_frame(coords);
+  const ShellSection section = build_shell_section(model, eid, pid);
+
+  const Mitc4PlusMembraneData mitc_membrane =
+      (formulation == ShellFormulation::MITC4)
+          ? build_mitc4plus_membrane_data(eid, frame.xl, frame.yl)
+          : Mitc4PlusMembraneData{};
+  const Mitc4PlusShearData mitc_shear =
+      (formulation == ShellFormulation::MITC4)
+          ? build_mitc4plus_shear_data(frame.xl, frame.yl)
+          : Mitc4PlusShearData{};
+
+  const Eigen::Matrix3d A_normal = [&]() {
+    Eigen::Matrix3d A = section.A;
+    A(2, 2) = 0.0;
+    return A;
+  }();
+  const Eigen::Matrix3d A_shear = [&]() {
+    Eigen::Matrix3d A = Eigen::Matrix3d::Zero();
+    A(2, 2) = section.A(2, 2);
+    return A;
+  }();
+
+  for (int gi = 0; gi < 2; ++gi) {
+    for (int gj = 0; gj < 2; ++gj) {
+      const QuadPointData q =
+          evaluate_quad_point(eid, frame.xl, frame.yl, GAUSS2[gi], GAUSS2[gj]);
+      const double weight = q.detJ * GAUSS2_W[gi] * GAUSS2_W[gj];
+
+      const MembraneB Bm =
+          (formulation == ShellFormulation::MITC4)
+              ? mitc4plus_membrane_B(mitc_membrane, q)
+              : standard_membrane_B(q);
+      const BendingB Bb = bending_B(q);
+      const ShearB Bs =
+          (formulation == ShellFormulation::MITC4)
+              ? mitc4plus_shear_B(mitc_shear, q)
+              : mindlin_shear_B(q);
+
+      const Eigen::Matrix<double, 8, 8> Kmm =
+          Bm.transpose() *
+          ((formulation == ShellFormulation::MITC4) ? section.A : A_normal) *
+          Bm * weight;
+      const Eigen::Matrix<double, 12, 12> Kbb =
+          Bb.transpose() * section.D * Bb * weight;
+      const Eigen::Matrix<double, 12, 12> Kss =
+          Bs.transpose() * section.T * Bs * weight;
+
+      assemble_square_submatrix(Ke, Kmm, MEMBRANE_DOF_MAP);
+      assemble_square_submatrix(Ke, Kbb, PLATE_DOF_MAP);
+      assemble_square_submatrix(Ke, Kss, PLATE_DOF_MAP);
+
+      if (!section.B.isZero(0.0)) {
+        const Eigen::Matrix<double, 8, 12> Kmb =
+            Bm.transpose() * section.B * Bb * weight;
+        assemble_coupling_submatrix(Ke, Kmb);
+        assemble_coupling_transpose_submatrix(Ke, Kmb);
+      }
+    }
+  }
+
+  if (formulation == ShellFormulation::MINDLIN &&
+      std::abs(section.A(2, 2)) > 0.0) {
+    const QuadPointData q0 =
+        evaluate_quad_point(eid, frame.xl, frame.yl, 0.0, 0.0);
+    const MembraneB Bm0 = standard_membrane_B(q0);
+    const Eigen::Matrix<double, 8, 8> Kxy =
+        Bm0.transpose() * A_shear * Bm0 * q0.detJ * 4.0;
+    assemble_square_submatrix(Ke, Kxy, MEMBRANE_DOF_MAP);
+  }
+
+  const double max_diag = Ke.diagonal().cwiseAbs().maxCoeff();
+  if (max_diag < 1e-10) {
+    throw SolverError(std::format(
+        "CQUAD4 {}: stiffness matrix diagonal is near-zero (max={:.3e}); "
+        "check material, thickness, and geometry",
+        eid.value, max_diag));
+  }
+
+  const double drill_stiffness = compute_drilling_stiffness(Ke);
+  for (int i = 0; i < 4; ++i)
+    Ke(6 * i + 5, 6 * i + 5) += drill_stiffness;
+
+  return frame.T.transpose() * Ke * frame.T;
+}
+
+LocalKe compute_shell_mass(ElementId eid, PropertyId pid,
+                           const std::array<NodeId, 4> &nodes,
+                           const Model &model) {
+  LocalKe Me = LocalKe::Zero(24, 24);
+  const auto coords = lookup_node_coords(model, nodes);
+  const ShellFrame frame = compute_shell_frame(coords);
+  const ShellSection section = build_shell_section(model, eid, pid);
+
+  if (section.mass_per_area == 0.0 && section.rotary_mass_per_area == 0.0)
+    return Me;
+
+  const double drill_mass_scale =
+      DRILL_INERTIA_SCALE * section.rotary_mass_per_area / 100.0;
+
+  for (int gi = 0; gi < 2; ++gi) {
+    for (int gj = 0; gj < 2; ++gj) {
+      const QuadPointData q =
+          evaluate_quad_point(eid, frame.xl, frame.yl, GAUSS2[gi], GAUSS2[gj]);
+      const double weight = q.detJ * GAUSS2_W[gi] * GAUSS2_W[gj];
+
+      for (int a = 0; a < 4; ++a) {
+        for (int b = 0; b < 4; ++b) {
+          const double mab = q.shape.N[a] * q.shape.N[b] * weight;
+          for (int d = 0; d < 3; ++d)
+            Me(6 * a + d, 6 * b + d) += section.mass_per_area * mab;
+          for (int d = 0; d < 2; ++d)
+            Me(6 * a + 3 + d, 6 * b + 3 + d) +=
+                section.rotary_mass_per_area * mab;
+        }
+        Me(6 * a + 5, 6 * a + 5) +=
+            drill_mass_scale * q.shape.N[a] * q.shape.N[a] * weight;
+      }
+    }
+  }
+
+  return frame.T.transpose() * Me * frame.T;
+}
+
+LocalFe compute_shell_thermal_load(ElementId eid, PropertyId pid,
+                                   const std::array<NodeId, 4> &nodes,
+                                   const Model &model,
+                                   std::span<const double> temperatures,
+                                   double t_ref,
+                                   ShellFormulation formulation) {
+  LocalFe fe = LocalFe::Zero(24);
+  const auto coords = lookup_node_coords(model, nodes);
+  const ShellFrame frame = compute_shell_frame(coords);
+  const ShellSection section = build_shell_section(model, eid, pid);
+
+  if (section.membrane_alpha.isZero(0.0))
+    return fe;
+
+  const Mitc4PlusMembraneData mitc_membrane =
+      (formulation == ShellFormulation::MITC4)
+          ? build_mitc4plus_membrane_data(eid, frame.xl, frame.yl)
+          : Mitc4PlusMembraneData{};
+
+  for (int gi = 0; gi < 2; ++gi) {
+    for (int gj = 0; gj < 2; ++gj) {
+      const QuadPointData q =
+          evaluate_quad_point(eid, frame.xl, frame.yl, GAUSS2[gi], GAUSS2[gj]);
+      const double weight = q.detJ * GAUSS2_W[gi] * GAUSS2_W[gj];
+
+      double temperature = 0.0;
+      for (int n = 0; n < 4; ++n)
+        temperature += q.shape.N[n] * temperatures[static_cast<size_t>(n)];
+      const double dT = temperature - t_ref;
+      if (std::abs(dT) < 1e-15)
+        continue;
+
+      const MembraneB Bm =
+          (formulation == ShellFormulation::MITC4)
+              ? mitc4plus_membrane_B(mitc_membrane, q)
+              : standard_membrane_B(q);
+      const Eigen::Vector3d thermal_resultant =
+          section.A * (section.membrane_alpha * dT);
+      const Eigen::Matrix<double, 8, 1> f_mem =
+          Bm.transpose() * thermal_resultant * weight;
+      assemble_membrane_force(fe, f_mem);
+    }
+  }
+
+  return frame.T.transpose() * fe;
+}
+
+CQuad4::CentroidResponse
+recover_shell_centroid_response(ElementId eid, PropertyId pid,
+                                const std::array<NodeId, 4> &nodes,
+                                const Model &model,
+                                std::span<const double> global_displacements,
+                                double avg_temperature,
+                                double reference_temperature) {
+  const auto coords = lookup_node_coords(model, nodes);
+  const ShellFrame frame = compute_shell_frame(coords);
+  const ShellSection section = build_shell_section(model, eid, pid);
+  const PShell &ps = lookup_pshell(model, eid, pid, "CQUAD4");
+  const ShellFormulation formulation = ps.shell_form;
+
+  const auto u_local = to_local_displacements(frame, global_displacements);
+  const auto u_membrane = gather_membrane_dofs(u_local);
+  const auto u_plate = gather_plate_dofs(u_local);
+
+  const QuadPointData q0 =
+      evaluate_quad_point(eid, frame.xl, frame.yl, 0.0, 0.0);
+  const Mitc4PlusMembraneData mitc_membrane =
+      (formulation == ShellFormulation::MITC4)
+          ? build_mitc4plus_membrane_data(eid, frame.xl, frame.yl)
+          : Mitc4PlusMembraneData{};
+
+  const MembraneB Bm =
+      (formulation == ShellFormulation::MITC4)
+          ? mitc4plus_membrane_B(mitc_membrane, q0)
+          : standard_membrane_B(q0);
+  const BendingB Bb = bending_B(q0);
+
+  CQuad4::CentroidResponse response;
+  response.membrane_strain = Bm * u_membrane;
+  response.curvature = Bb * u_plate;
+
+  const double dT = avg_temperature - reference_temperature;
+  const Eigen::Vector3d mechanical_membrane =
+      response.membrane_strain - section.membrane_alpha * dT;
+
+  response.membrane_stress = section.membrane_D * mechanical_membrane;
+  response.membrane_resultant =
+      section.A * mechanical_membrane + section.B * response.curvature;
+  response.bending_moment =
+      section.B.transpose() * mechanical_membrane +
+      section.D * response.curvature;
+  return response;
+}
+
+} // namespace
 
 CQuad4::CQuad4(ElementId eid, PropertyId pid, std::array<NodeId, 4> node_ids,
                const Model &model)
     : eid_(eid), pid_(pid), nodes_(node_ids), model_(model) {}
 
 const PShell &CQuad4::pshell() const {
-  const auto &prop = model_.property(pid_);
-  if (!std::holds_alternative<PShell>(prop))
-    throw SolverError(std::format("CQUAD4 {}: property {} is not PSHELL",
-                                  eid_.value, pid_.value));
-  return std::get<PShell>(prop);
+  return lookup_pshell(model_, eid_, pid_, "CQUAD4");
 }
 
 const Mat1 &CQuad4::material() const { return model_.material(pshell().mid1); }
@@ -112,15 +808,11 @@ const Mat1 &CQuad4::material() const { return model_.material(pshell().mid1); }
 double CQuad4::thickness() const { return pshell().t; }
 
 std::array<Vec3, 4> CQuad4::node_coords() const {
-  std::array<Vec3, 4> coords;
-  for (int i = 0; i < 4; ++i)
-    coords[i] = model_.node(nodes_[i]).position;
-  return coords;
+  return lookup_node_coords(model_, nodes_);
 }
 
 CQuad4::ShapeData CQuad4::shape_functions(double xi, double eta) noexcept {
   ShapeData s;
-  // Q4 bilinear shape functions
   s.N[0] = 0.25 * (1 - xi) * (1 - eta);
   s.N[1] = 0.25 * (1 + xi) * (1 - eta);
   s.N[2] = 0.25 * (1 + xi) * (1 + eta);
@@ -139,381 +831,31 @@ CQuad4::ShapeData CQuad4::shape_functions(double xi, double eta) noexcept {
 }
 
 Eigen::Matrix3d CQuad4::membrane_D() const {
-  const Mat1 &mat = material();
-  double E = mat.E;
-  double nu = mat.nu;
-  double c = E / (1.0 - nu * nu);
-  Eigen::Matrix3d D;
-  D << c, c * nu, 0, c * nu, c, 0, 0, 0, c * (1 - nu) / 2.0;
-  return D;
+  return build_shell_section(model_, eid_, pid_).membrane_D;
 }
 
 Eigen::Matrix3d CQuad4::bending_D() const {
-  // Same constitutive law, scaled by t^3/12
-  double t = thickness();
-  return (t * t * t / 12.0) * membrane_D();
+  return build_shell_section(model_, eid_, pid_).D;
 }
 
 LocalKe CQuad4::stiffness_matrix() const {
-  LocalKe Ke = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
-  auto coords = node_coords();
-  auto frame = compute_shell_frame(coords);
-  const auto &xl = frame.xl;
-  const auto &yl = frame.yl;
-  const double t = thickness();
-
-  Eigen::Matrix3d Dm = membrane_D();
-  Eigen::Matrix3d Db = bending_D();
-
-  // Selective Reduced Integration for membrane:
-  // Normal strains (ε_xx, ε_yy) use full 2x2 Gauss to prevent hourglass modes.
-  // Shear strain (γ_xy) uses 1-point centroidal integration to eliminate
-  // membrane shear locking in bending, which otherwise causes severe
-  // under-prediction of in-plane bending deflections.
-  Eigen::Matrix3d Dm_normal = Dm;
-  Dm_normal(2, 2) = 0.0; // zero out shear-shear term for 2x2 integration
-  Eigen::Matrix3d Dm_shear = Eigen::Matrix3d::Zero();
-  Dm_shear(2, 2) =
-      Dm(2, 2); // only in-plane shear stiffness for centroidal integration
-
-  // ── Membrane part (DOFs: u1,v1, u2,v2, u3,v3, u4,v4 → local indices
-  // 0,1,6,7,12,13,18,19) We compute membrane and bending separately then
-  // overlay into 24x24 Ke.
-
-  for (int gi = 0; gi < 2; ++gi) {
-    for (int gj = 0; gj < 2; ++gj) {
-      double xi = GAUSS2[gi];
-      double eta = GAUSS2[gj];
-      double wi = GAUSS2_W[gi];
-      double wj = GAUSS2_W[gj];
-
-      auto sd = shape_functions(xi, eta);
-
-      // Jacobian J = dX/d(xi,eta) [2x2] in local element frame
-      Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
-      for (int n = 0; n < 4; ++n) {
-        J(0, 0) += sd.dNdxi[n] * xl[n];
-        J(0, 1) += sd.dNdxi[n] * yl[n];
-        J(1, 0) += sd.dNdeta[n] * xl[n];
-        J(1, 1) += sd.dNdeta[n] * yl[n];
-      }
-      double detJ = J.determinant();
-      if (detJ <= 0)
-        throw SolverError(std::format("CQUAD4 {}: negative Jacobian det={:.6g}",
-                                      eid_.value, detJ));
-      Eigen::Matrix2d Jinv = J.inverse();
-
-      // Shape fn physical derivatives
-      // [dN/dx; dN/dy] = Jinv * [dN/dxi; dN/deta]
-      Eigen::MatrixXd dNdx(2, 4);
-      for (int n = 0; n < 4; ++n) {
-        dNdx(0, n) = Jinv(0, 0) * sd.dNdxi[n] + Jinv(0, 1) * sd.dNdeta[n];
-        dNdx(1, n) = Jinv(1, 0) * sd.dNdxi[n] + Jinv(1, 1) * sd.dNdeta[n];
-      }
-
-      // ── Membrane strain-displacement B_m [3x8]
-      Eigen::MatrixXd Bm(3, 8);
-      Bm.setZero();
-      for (int n = 0; n < 4; ++n) {
-        Bm(0, 2 * n) = dNdx(0, n);     // ε_xx = du/dx
-        Bm(1, 2 * n + 1) = dNdx(1, n); // ε_yy = dv/dy
-        Bm(2, 2 * n) = dNdx(1, n);     // γ_xy = du/dy + dv/dx
-        Bm(2, 2 * n + 1) = dNdx(0, n);
-      }
-
-      // Membrane normal stiffness contribution (2x2 Gauss, no shear)
-      Eigen::MatrixXd Km_contrib =
-          t * Bm.transpose() * Dm_normal * Bm * detJ * wi * wj;
-
-      // Map membrane DOFs into global 24-DOF Ke
-      // Node i has DOFs: u=6i+0, v=6i+1, w=6i+2, θx=6i+3, θy=6i+4, θz=6i+5
-      // Membrane uses u,v (DOFs 0,1 per node)
-      for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-          Ke(6 * i + 0, 6 * j + 0) += Km_contrib(2 * i + 0, 2 * j + 0);
-          Ke(6 * i + 0, 6 * j + 1) += Km_contrib(2 * i + 0, 2 * j + 1);
-          Ke(6 * i + 1, 6 * j + 0) += Km_contrib(2 * i + 1, 2 * j + 0);
-          Ke(6 * i + 1, 6 * j + 1) += Km_contrib(2 * i + 1, 2 * j + 1);
-        }
-      }
-
-      // ── Bending (Mindlin): uses w, θx, θy (DOFs 2,3,4 per node)
-      // Bending curvature: κ = [∂θx/∂x, ∂θy/∂y, ∂θx/∂y + ∂θy/∂x]
-      // Here θx = rotation about x axis, θy = rotation about y axis
-      Eigen::MatrixXd Bb(3,
-                         12); // 3 curvature strains x 4 nodes x 3 bending DOF
-      Bb.setZero();
-      for (int n = 0; n < 4; ++n) {
-        // DOF layout per node in bending subspace: θx(0), θy(1), w(2)
-        Bb(0, 3 * n + 0) = dNdx(0, n); // ∂θx/∂x
-        Bb(1, 3 * n + 1) = dNdx(1, n); // ∂θy/∂y
-        Bb(2, 3 * n + 0) = dNdx(1, n); // ∂θx/∂y + ∂θy/∂x
-        Bb(2, 3 * n + 1) = dNdx(0, n);
-      }
-
-      Eigen::MatrixXd Kb_contrib = Bb.transpose() * Db * Bb * detJ * wi * wj;
-
-      // Map bending DOFs (w=2, θx=3, θy=4 per node) into global Ke
-      // Local bending dof for node i: θx=3*i+0, θy=3*i+1, (w not in Bb above)
-      // Ke structure: node i: [u=0,v=1,w=2,θx=3,θy=4,θz=5]
-      // Bending DOF mapping: bending_dof 3*i+0 → Ke row 6*i+3, 3*i+1 → 6*i+4
-      for (int i = 0; i < 4; ++i) {
-        int ki_x = 6 * i + 3, ki_y = 6 * i + 4;
-        for (int j = 0; j < 4; ++j) {
-          int kj_x = 6 * j + 3, kj_y = 6 * j + 4;
-          Ke(ki_x, kj_x) += Kb_contrib(3 * i + 0, 3 * j + 0);
-          Ke(ki_x, kj_y) += Kb_contrib(3 * i + 0, 3 * j + 1);
-          Ke(ki_y, kj_x) += Kb_contrib(3 * i + 1, 3 * j + 0);
-          Ke(ki_y, kj_y) += Kb_contrib(3 * i + 1, 3 * j + 1);
-        }
-      }
-
-      // ── Transverse shear: included at full 2x2
-      // Note: reduced integration for thin-plate transverse shear (Mindlin Ks)
-      // is a future improvement; for current tests (in-plane bending) Ks is not
-      // exercised. Shear strains: γ_xz = dw/dx - θx, γ_yz = dw/dy - θy (Mindlin
-      // assumption)
-      double kappa = pshell().tst; // shear correction factor (~5/6)
-      double G = material().G > 0 ? material().G
-                                  : material().E / (2 * (1 + material().nu));
-      double Gts = kappa * G * t;
-
-      Eigen::MatrixXd Bs(2,
-                         12); // 2 shear strains x 12 DOF (w,θx,θy for 4 nodes)
-      Bs.setZero();
-      for (int n = 0; n < 4; ++n) {
-        // shear DOF per node local: 0=θx, 1=θy, 2=w
-        Bs(0, 3 * n + 2) = dNdx(0, n); // dw/dx
-        Bs(0, 3 * n + 0) = -sd.N[n];   // -θx
-        Bs(1, 3 * n + 2) = dNdx(1, n); // dw/dy
-        Bs(1, 3 * n + 1) = -sd.N[n];   // -θy
-      }
-
-      Eigen::Matrix2d Ds_mat;
-      Ds_mat << Gts, 0, 0, Gts;
-
-      Eigen::MatrixXd Ks_contrib =
-          Bs.transpose() * Ds_mat * Bs * detJ * wi * wj;
-
-      // Map: θx→3, θy→4, w→2 per node
-      const int bmap[3] = {3, 4, 2}; // local bend dof → Ke dof offset
-      for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-          for (int a = 0; a < 3; ++a) {
-            for (int b = 0; b < 3; ++b) {
-              Ke(6 * i + bmap[a], 6 * j + bmap[b]) +=
-                  Ks_contrib(3 * i + a, 3 * j + b);
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // ── Membrane shear SRI: 1-point centroidal integration for γ_xy term.
-  // Evaluated at (xi=0,eta=0) with quadrature weight 4.0 (full reference
-  // element area).
-  {
-    auto sd0 = shape_functions(0.0, 0.0);
-    Eigen::Matrix2d J0 = Eigen::Matrix2d::Zero();
-    for (int n = 0; n < 4; ++n) {
-      J0(0, 0) += sd0.dNdxi[n] * xl[n];
-      J0(0, 1) += sd0.dNdxi[n] * yl[n];
-      J0(1, 0) += sd0.dNdeta[n] * xl[n];
-      J0(1, 1) += sd0.dNdeta[n] * yl[n];
-    }
-    double detJ0 = J0.determinant();
-    Eigen::Matrix2d Jinv0 = J0.inverse();
-
-    Eigen::MatrixXd dNdx0(2, 4);
-    for (int n = 0; n < 4; ++n) {
-      dNdx0(0, n) = Jinv0(0, 0) * sd0.dNdxi[n] + Jinv0(0, 1) * sd0.dNdeta[n];
-      dNdx0(1, n) = Jinv0(1, 0) * sd0.dNdxi[n] + Jinv0(1, 1) * sd0.dNdeta[n];
-    }
-
-    Eigen::MatrixXd Bm0(3, 8);
-    Bm0.setZero();
-    for (int n = 0; n < 4; ++n) {
-      Bm0(0, 2 * n) = dNdx0(0, n);
-      Bm0(1, 2 * n + 1) = dNdx0(1, n);
-      Bm0(2, 2 * n) = dNdx0(1, n);
-      Bm0(2, 2 * n + 1) = dNdx0(0, n);
-    }
-
-    Eigen::MatrixXd Km_shear =
-        t * Bm0.transpose() * Dm_shear * Bm0 * detJ0 * 4.0;
-
-    for (int i = 0; i < 4; ++i) {
-      for (int j = 0; j < 4; ++j) {
-        Ke(6 * i + 0, 6 * j + 0) += Km_shear(2 * i + 0, 2 * j + 0);
-        Ke(6 * i + 0, 6 * j + 1) += Km_shear(2 * i + 0, 2 * j + 1);
-        Ke(6 * i + 1, 6 * j + 0) += Km_shear(2 * i + 1, 2 * j + 0);
-        Ke(6 * i + 1, 6 * j + 1) += Km_shear(2 * i + 1, 2 * j + 1);
-      }
-    }
-  }
-
-  // Add small drilling stiffness (θz) to prevent singularity.
-  // A near-zero diagonal max indicates a degenerate element (zero material,
-  // zero thickness, or collapsed geometry) — that is an input error, not a
-  // case to paper over with an arbitrary fallback.
-  double max_diag = Ke.diagonal().cwiseAbs().maxCoeff();
-  if (max_diag < 1e-10)
-    throw SolverError(std::format(
-        "CQUAD4 {}: stiffness matrix diagonal is near-zero (max={:.3e}); "
-        "check material, thickness, and geometry",
-        eid_.value, max_diag));
-  double drill_stiff = compute_drilling_stiffness(Ke);
-  for (int i = 0; i < 4; ++i)
-    Ke(6 * i + 5, 6 * i + 5) += drill_stiff;
-
-  // Transform from local element frame to global frame: K_global = T^T K_local
-  // T
-  return frame.T.transpose() * Ke * frame.T;
+  return compute_shell_stiffness(eid_, pid_, nodes_, model_,
+                                 ShellFormulation::MINDLIN);
 }
 
 LocalKe CQuad4::mass_matrix() const {
-  LocalKe Me = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
-  const Mat1 &mat = material();
-  const double rho = mat.rho;
-  if (rho == 0.0)
-    return Me;
-  const double t = thickness();
-  auto coords = node_coords();
-  auto frame = compute_shell_frame(coords);
-  const auto &xl = frame.xl;
-  const auto &yl = frame.yl;
-
-  // 2×2 Gauss quadrature over element area.
-  // DOF layout per node: [T1, T2, T3, R1, R2, R3] = [u,v,w,θx,θy,θz]
-  // Translational (T1,T2,T3): rho*t * N[a]*N[b] * detJ * w
-  // Bending rotational (R1,R2): rho*t^3/12 * N[a]*N[b] * detJ * w
-  // Drilling (R3): artificial DOF with tiny rotary inertia. Keeping this much
-  // smaller than the physical shell inertia prevents spurious drill-dominated
-  // modes from polluting the low-frequency spectrum.
-  // = DRILL_INERTIA_SCALE * rho*t^3/1200 * N[a]^2 * detJ * w
-  const double t3_12 = t * t * t / 12.0;
-  const double t3_1200 = t * t * t / 1200.0;
-
-  // Track diagonal translational contributions for reference (not needed since
-  // we accumulate drilling directly with the rho*t^3/1200 factor)
-  for (int gi = 0; gi < 2; ++gi) {
-    for (int gj = 0; gj < 2; ++gj) {
-      double xi = GAUSS2[gi];
-      double eta = GAUSS2[gj];
-      double wi = GAUSS2_W[gi];
-      double wj = GAUSS2_W[gj];
-
-      auto sd = shape_functions(xi, eta);
-
-      Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
-      for (int n = 0; n < 4; ++n) {
-        J(0, 0) += sd.dNdxi[n] * xl[n];
-        J(0, 1) += sd.dNdxi[n] * yl[n];
-        J(1, 0) += sd.dNdeta[n] * xl[n];
-        J(1, 1) += sd.dNdeta[n] * yl[n];
-      }
-      double detJ = J.determinant();
-      double w = wi * wj * detJ;
-
-      for (int a = 0; a < 4; ++a) {
-        for (int b = 0; b < 4; ++b) {
-          double mab = sd.N[a] * sd.N[b] * w;
-          // Translational (T1,T2,T3): indices 6a+0,1,2
-          for (int d = 0; d < 3; ++d)
-            Me(6 * a + d, 6 * b + d) += rho * t * mab;
-          // Rotational bending (R1,R2): indices 6a+3,4
-          for (int d = 0; d < 2; ++d)
-            Me(6 * a + 3 + d, 6 * b + 3 + d) += rho * t3_12 * mab;
-        }
-        // Drilling (R3): index 6a+5, diagonal only
-        Me(6 * a + 5, 6 * a + 5) +=
-            DRILL_INERTIA_SCALE * rho * t3_1200 * sd.N[a] * sd.N[a] * w;
-      }
-    }
-  }
-  return frame.T.transpose() * Me * frame.T;
+  return compute_shell_mass(eid_, pid_, nodes_, model_);
 }
 
 LocalFe CQuad4::thermal_load(std::span<const double> temperatures,
                              double t_ref) const {
-  LocalFe fe = LocalFe::Zero(NUM_DOFS);
-  auto coords = node_coords();
-  auto frame = compute_shell_frame(coords);
-  const auto &xl = frame.xl;
-  const auto &yl = frame.yl;
-  const double thickness = this->thickness();
-  const Mat1 &mat = material();
-  const double alpha = mat.A;
-  if (alpha == 0.0)
-    return fe; // no thermal expansion
-
-  Eigen::Matrix3d Dm = membrane_D();
-
-  // Thermal strain vector: ε_th = α * ΔT * {1, 1, 0}
-  // fe = ∫ Bᵀ * D * ε_th dA * t
-  for (int gi = 0; gi < 2; ++gi) {
-    for (int gj = 0; gj < 2; ++gj) {
-      double xi = GAUSS2[gi];
-      double eta = GAUSS2[gj];
-      double wi = GAUSS2_W[gi];
-      double wj = GAUSS2_W[gj];
-
-      auto sd = shape_functions(xi, eta);
-
-      // Temperature at this point
-      double T = 0;
-      for (int n = 0; n < 4; ++n)
-        T += sd.N[n] * temperatures[n];
-      double dT = T - t_ref;
-      if (std::abs(dT) < 1e-15)
-        continue;
-
-      // Jacobian in local element frame
-      Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
-      for (int n = 0; n < 4; ++n) {
-        J(0, 0) += sd.dNdxi[n] * xl[n];
-        J(0, 1) += sd.dNdxi[n] * yl[n];
-        J(1, 0) += sd.dNdeta[n] * xl[n];
-        J(1, 1) += sd.dNdeta[n] * yl[n];
-      }
-      double detJ = J.determinant();
-      Eigen::Matrix2d Jinv = J.inverse();
-
-      Eigen::MatrixXd dNdx(2, 4);
-      for (int n = 0; n < 4; ++n) {
-        dNdx(0, n) = Jinv(0, 0) * sd.dNdxi[n] + Jinv(0, 1) * sd.dNdeta[n];
-        dNdx(1, n) = Jinv(1, 0) * sd.dNdxi[n] + Jinv(1, 1) * sd.dNdeta[n];
-      }
-
-      Eigen::MatrixXd Bm(3, 8);
-      Bm.setZero();
-      for (int n = 0; n < 4; ++n) {
-        Bm(0, 2 * n) = dNdx(0, n);
-        Bm(1, 2 * n + 1) = dNdx(1, n);
-        Bm(2, 2 * n) = dNdx(1, n);
-        Bm(2, 2 * n + 1) = dNdx(0, n);
-      }
-
-      Eigen::Vector3d eps_th(alpha * dT, alpha * dT, 0);
-      Eigen::VectorXd fe_mem =
-          thickness * Bm.transpose() * Dm * eps_th * detJ * wi * wj;
-
-      // Map into full 24-DOF vector (local u,v components)
-      for (int n = 0; n < 4; ++n) {
-        fe(6 * n + 0) += fe_mem(2 * n + 0);
-        fe(6 * n + 1) += fe_mem(2 * n + 1);
-      }
-    }
-  }
-  // Transform local thermal force vector to global frame: f_global = T^T
-  // f_local
-  return frame.T.transpose() * fe;
+  return compute_shell_thermal_load(eid_, pid_, nodes_, model_, temperatures,
+                                    t_ref, ShellFormulation::MINDLIN);
 }
 
 std::vector<EqIndex> CQuad4::global_dof_indices(const DofMap &dof_map) const {
   std::vector<EqIndex> result;
-  result.reserve(NUM_DOFS);
+  result.reserve(24);
   for (NodeId nid : nodes_) {
     const auto &blk = dof_map.block(nid);
     for (int d = 0; d < 6; ++d)
@@ -522,20 +864,21 @@ std::vector<EqIndex> CQuad4::global_dof_indices(const DofMap &dof_map) const {
   return result;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// CQuad4Mitc4
-// ═══════════════════════════════════════════════════════════════════════════════
+CQuad4::CentroidResponse CQuad4::recover_centroid_response(
+    ElementId eid, PropertyId pid, std::array<NodeId, NUM_NODES> node_ids,
+    const Model &model, std::span<const double> global_displacements,
+    double avg_temperature, double reference_temperature) {
+  return recover_shell_centroid_response(eid, pid, node_ids, model,
+                                         global_displacements, avg_temperature,
+                                         reference_temperature);
+}
 
 CQuad4Mitc4::CQuad4Mitc4(ElementId eid, PropertyId pid,
                          std::array<NodeId, 4> node_ids, const Model &model)
     : eid_(eid), pid_(pid), nodes_(node_ids), model_(model) {}
 
 const PShell &CQuad4Mitc4::pshell() const {
-  const auto &prop = model_.property(pid_);
-  if (!std::holds_alternative<PShell>(prop))
-    throw SolverError(std::format("CQuad4Mitc4 {}: property {} is not PSHELL",
-                                  eid_.value, pid_.value));
-  return std::get<PShell>(prop);
+  return lookup_pshell(model_, eid_, pid_, "CQuad4Mitc4");
 }
 
 const Mat1 &CQuad4Mitc4::material() const {
@@ -545,385 +888,36 @@ const Mat1 &CQuad4Mitc4::material() const {
 double CQuad4Mitc4::thickness() const { return pshell().t; }
 
 std::array<Vec3, 4> CQuad4Mitc4::node_coords() const {
-  std::array<Vec3, 4> coords;
-  for (int i = 0; i < 4; ++i)
-    coords[i] = model_.node(nodes_[i]).position;
-  return coords;
+  return lookup_node_coords(model_, nodes_);
 }
 
 Eigen::Matrix3d CQuad4Mitc4::membrane_D() const {
-  const Mat1 &mat = material();
-  double E = mat.E, nu = mat.nu;
-  double c = E / (1.0 - nu * nu);
-  Eigen::Matrix3d D;
-  D << c, c * nu, 0, c * nu, c, 0, 0, 0, c * (1 - nu) / 2.0;
-  return D;
+  return build_shell_section(model_, eid_, pid_).membrane_D;
 }
 
 Eigen::Matrix3d CQuad4Mitc4::bending_D() const {
-  double t = thickness();
-  return (t * t * t / 12.0) * membrane_D();
+  return build_shell_section(model_, eid_, pid_).D;
 }
 
 LocalKe CQuad4Mitc4::stiffness_matrix() const {
-  // Membrane + bending: identical to CQuad4.
-  // Transverse shear: MITC4+ tying-point interpolation (Ko, Lee & Bathe 2017).
-
-  LocalKe Ke = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
-  auto coords = node_coords();
-  auto frame = compute_shell_frame(coords);
-  const auto &xl = frame.xl;
-  const auto &yl = frame.yl;
-  const double t = thickness();
-  double kappa = pshell().tst;
-  const Mat1 &mat = material();
-  double G = mat.G > 0 ? mat.G : mat.E / (2 * (1 + mat.nu));
-  double Gts = kappa * G * t;
-
-  Eigen::Matrix3d Dm = membrane_D();
-  Eigen::Matrix3d Db = bending_D();
-
-  // Selective reduced integration for membrane (same as CQuad4)
-  Eigen::Matrix3d Dm_normal = Dm;
-  Dm_normal(2, 2) = 0.0;
-  Eigen::Matrix3d Dm_shear = Eigen::Matrix3d::Zero();
-  Dm_shear(2, 2) = Dm(2, 2);
-
-  // ── MITC4+ tying point shear strains ─────────────────────────────────────
-  // MITC4+ (Ko, Lee & Bathe 2017): adds a center tying point O=(0,0) to the
-  // standard MITC4 edge tying points to include a bubble correction term.
-  //
-  // Tying points: A (xi=0,eta=-1), B (xi=1,eta=0), C (xi=0,eta=1),
-  //               D (xi=-1,eta=0), O (xi=0,eta=0)
-  //
-  // Standard MITC4 interpolation:
-  //   γ_ξζ(ξ,η) = (1-η)/2 * γ_A + (1+η)/2 * γ_C
-  //   γ_ηζ(ξ,η) = (1-ξ)/2 * γ_D + (1+ξ)/2 * γ_B
-  //
-  // MITC4+ adds bubble correction via center point (Eq. 22, Ko et al. 2017):
-  //   γ_ξζ(ξ,η) = (1-η)/2 * γ_A + (1+η)/2 * γ_C + ξ * [γ_O^ξ - (γ_A + γ_C)/2]
-  //   γ_ηζ(ξ,η) = (1-ξ)/2 * γ_D + (1+ξ)/2 * γ_B + η * [γ_O^η - (γ_D + γ_B)/2]
-  //
-  // We build Bs [2×12] (shear strains in nat coords at integration point)
-  // then transform to physical strains.
-
-  // Helper: compute covariant shear strains at a tying point (xi0, eta0)
-  // Returns [γ_ξζ, γ_ηζ] in covariant (natural) coordinates
-  // γ_ξζ = sum_n(dN/dξ * w_n) - sum_n(N_n * θx_n * g_ξ·ex + N_n * θy_n *
-  // g_ξ·ey) For flat element: γ_ξζ_cov = sum_n[ dN/dξ * w_n - N_n*(Jξx*θx_n +
-  // Jξy*θy_n) ]
-  //   where g_ξ = [Jξx, Jξy, Jξz]
-  // Local DOF order in shear subspace: [θx,θy,w] per node → indices 0,1,2
-
-  auto covariant_shear = [&](double xi0, double eta0)
-      -> std::pair<Eigen::Matrix<double, 1, 12>, Eigen::Matrix<double, 1, 12>> {
-    auto sd = CQuad4::shape_functions(xi0, eta0);
-    // Jacobian tangent vectors g_ξ and g_η in local element frame
-    double gxi_x = 0, gxi_y = 0, geta_x = 0, geta_y = 0;
-    for (int n = 0; n < 4; ++n) {
-      gxi_x += sd.dNdxi[n] * xl[n];
-      gxi_y += sd.dNdxi[n] * yl[n];
-      geta_x += sd.dNdeta[n] * xl[n];
-      geta_y += sd.dNdeta[n] * yl[n];
-    }
-    // γ_ξζ_cov[n] = dNdξ_n * w - N_n*(gxi_x*θx + gxi_y*θy)
-    // γ_ηζ_cov[n] = dNdη_n * w - N_n*(geta_x*θx + geta_y*θy)
-    // Local shear DOF per node: [θx=0, θy=1, w=2]
-    Eigen::Matrix<double, 1, 12> Bxi, Beta;
-    Bxi.setZero();
-    Beta.setZero();
-    for (int n = 0; n < 4; ++n) {
-      Bxi(0, 3 * n + 2) = sd.dNdxi[n];
-      Bxi(0, 3 * n + 0) = -sd.N[n] * gxi_x;
-      Bxi(0, 3 * n + 1) = -sd.N[n] * gxi_y;
-      Beta(0, 3 * n + 2) = sd.dNdeta[n];
-      Beta(0, 3 * n + 0) = -sd.N[n] * geta_x;
-      Beta(0, 3 * n + 1) = -sd.N[n] * geta_y;
-    }
-    return {Bxi, Beta};
-  };
-
-  // Evaluate covariant shear rows at 5 tying points (4 edges + center)
-  auto [BxiA, BetaA] = covariant_shear(0.0, -1.0); // A: (xi=0, eta=-1)
-  auto [BxiC, BetaC] = covariant_shear(0.0, 1.0);  // C: (xi=0, eta=+1)
-  auto [BxiB, BetaB] = covariant_shear(1.0, 0.0);  // B: (xi=+1, eta=0)
-  auto [BxiD, BetaD] = covariant_shear(-1.0, 0.0); // D: (xi=-1, eta=0)
-  auto [BxiO, BetaO] = covariant_shear(0.0, 0.0);  // O: center (MITC4+ only)
-
-  // ── Membrane and bending: 2×2 Gauss ──────────────────────────────────────
-  for (int gi = 0; gi < 2; ++gi) {
-    for (int gj = 0; gj < 2; ++gj) {
-      double xi = GAUSS2[gi], eta = GAUSS2[gj];
-      double wi = GAUSS2_W[gi], wj = GAUSS2_W[gj];
-
-      auto sd = CQuad4::shape_functions(xi, eta);
-
-      Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
-      for (int n = 0; n < 4; ++n) {
-        J(0, 0) += sd.dNdxi[n] * xl[n];
-        J(0, 1) += sd.dNdxi[n] * yl[n];
-        J(1, 0) += sd.dNdeta[n] * xl[n];
-        J(1, 1) += sd.dNdeta[n] * yl[n];
-      }
-      double detJ = J.determinant();
-      if (detJ <= 0)
-        throw SolverError(std::format(
-            "CQuad4Mitc4 {}: negative Jacobian det={:.6g}", eid_.value, detJ));
-      Eigen::Matrix2d Jinv = J.inverse();
-
-      Eigen::MatrixXd dNdx(2, 4);
-      for (int n = 0; n < 4; ++n) {
-        dNdx(0, n) = Jinv(0, 0) * sd.dNdxi[n] + Jinv(0, 1) * sd.dNdeta[n];
-        dNdx(1, n) = Jinv(1, 0) * sd.dNdxi[n] + Jinv(1, 1) * sd.dNdeta[n];
-      }
-
-      // Membrane [3×8]
-      Eigen::MatrixXd Bm(3, 8);
-      Bm.setZero();
-      for (int n = 0; n < 4; ++n) {
-        Bm(0, 2 * n) = dNdx(0, n);
-        Bm(1, 2 * n + 1) = dNdx(1, n);
-        Bm(2, 2 * n) = dNdx(1, n);
-        Bm(2, 2 * n + 1) = dNdx(0, n);
-      }
-      Eigen::MatrixXd Km_n =
-          t * Bm.transpose() * Dm_normal * Bm * detJ * wi * wj;
-      for (int i = 0; i < 4; ++i)
-        for (int j = 0; j < 4; ++j) {
-          Ke(6 * i + 0, 6 * j + 0) += Km_n(2 * i, 2 * j);
-          Ke(6 * i + 0, 6 * j + 1) += Km_n(2 * i, 2 * j + 1);
-          Ke(6 * i + 1, 6 * j + 0) += Km_n(2 * i + 1, 2 * j);
-          Ke(6 * i + 1, 6 * j + 1) += Km_n(2 * i + 1, 2 * j + 1);
-        }
-
-      // Bending [3×12]
-      Eigen::MatrixXd Bb(3, 12);
-      Bb.setZero();
-      for (int n = 0; n < 4; ++n) {
-        Bb(0, 3 * n + 0) = dNdx(0, n);
-        Bb(1, 3 * n + 1) = dNdx(1, n);
-        Bb(2, 3 * n + 0) = dNdx(1, n);
-        Bb(2, 3 * n + 1) = dNdx(0, n);
-      }
-      Eigen::MatrixXd Kb = Bb.transpose() * Db * Bb * detJ * wi * wj;
-      for (int i = 0; i < 4; ++i)
-        for (int j = 0; j < 4; ++j) {
-          Ke(6 * i + 3, 6 * j + 3) += Kb(3 * i + 0, 3 * j + 0);
-          Ke(6 * i + 3, 6 * j + 4) += Kb(3 * i + 0, 3 * j + 1);
-          Ke(6 * i + 4, 6 * j + 3) += Kb(3 * i + 1, 3 * j + 0);
-          Ke(6 * i + 4, 6 * j + 4) += Kb(3 * i + 1, 3 * j + 1);
-        }
-
-      // ── MITC4+ transverse shear ───────────────────────────────────────
-      // Interpolate MITC4+ assumed covariant shear strains at (xi, eta).
-      // Standard MITC4 edge terms plus bubble correction from center point O:
-      //   Bcov_xi  = (1-η)/2*A + (1+η)/2*C + ξ * [O_xi  - (A+C)/2]
-      //   Bcov_eta = (1-ξ)/2*D + (1+ξ)/2*B + η * [O_eta - (D+B)/2]
-      Eigen::Matrix<double, 1, 12> Bcov_xi = 0.5 * (1 - eta) * BxiA +
-                                             0.5 * (1 + eta) * BxiC +
-                                             xi * (BxiO - 0.5 * (BxiA + BxiC));
-      Eigen::Matrix<double, 1, 12> Bcov_eta =
-          0.5 * (1 - xi) * BetaD + 0.5 * (1 + xi) * BetaB +
-          eta * (BetaO - 0.5 * (BetaD + BetaB));
-
-      // Transform covariant → physical shear strains
-      // [γ_xz, γ_yz]^T = J_inv^T * [γ_ξζ, γ_ηζ]^T  (2D metric)
-      // Physical shear: γ_phys = Jinv * γ_cov
-      // Both rows give a 1×12 B; stack into [2×12]
-      Eigen::Matrix<double, 2, 12> Bs_cov;
-      Bs_cov.row(0) = Bcov_xi;
-      Bs_cov.row(1) = Bcov_eta;
-
-      // Physical: Bs_phys = Jinv * Bs_cov
-      Eigen::Matrix<double, 2, 12> Bs = Jinv * Bs_cov;
-
-      Eigen::Matrix2d Ds_mat;
-      Ds_mat << Gts, 0, 0, Gts;
-
-      Eigen::Matrix<double, 12, 12> Ks =
-          Bs.transpose() * Ds_mat * Bs * detJ * wi * wj;
-
-      // Map: θx→3, θy→4, w→2 per node
-      const int bmap[3] = {3, 4, 2};
-      for (int i = 0; i < 4; ++i)
-        for (int j = 0; j < 4; ++j)
-          for (int a = 0; a < 3; ++a)
-            for (int b = 0; b < 3; ++b)
-              Ke(6 * i + bmap[a], 6 * j + bmap[b]) += Ks(3 * i + a, 3 * j + b);
-    }
-  }
-
-  // Membrane shear SRI at centroid
-  {
-    auto sd0 = CQuad4::shape_functions(0.0, 0.0);
-    Eigen::Matrix2d J0 = Eigen::Matrix2d::Zero();
-    for (int n = 0; n < 4; ++n) {
-      J0(0, 0) += sd0.dNdxi[n] * xl[n];
-      J0(0, 1) += sd0.dNdxi[n] * yl[n];
-      J0(1, 0) += sd0.dNdeta[n] * xl[n];
-      J0(1, 1) += sd0.dNdeta[n] * yl[n];
-    }
-    double detJ0 = J0.determinant();
-    Eigen::Matrix2d Jinv0 = J0.inverse();
-    Eigen::MatrixXd dNdx0(2, 4);
-    for (int n = 0; n < 4; ++n) {
-      dNdx0(0, n) = Jinv0(0, 0) * sd0.dNdxi[n] + Jinv0(0, 1) * sd0.dNdeta[n];
-      dNdx0(1, n) = Jinv0(1, 0) * sd0.dNdxi[n] + Jinv0(1, 1) * sd0.dNdeta[n];
-    }
-    Eigen::MatrixXd Bm0(3, 8);
-    Bm0.setZero();
-    for (int n = 0; n < 4; ++n) {
-      Bm0(0, 2 * n) = dNdx0(0, n);
-      Bm0(1, 2 * n + 1) = dNdx0(1, n);
-      Bm0(2, 2 * n) = dNdx0(1, n);
-      Bm0(2, 2 * n + 1) = dNdx0(0, n);
-    }
-    Eigen::MatrixXd Km_shear =
-        t * Bm0.transpose() * Dm_shear * Bm0 * detJ0 * 4.0;
-    for (int i = 0; i < 4; ++i)
-      for (int j = 0; j < 4; ++j) {
-        Ke(6 * i + 0, 6 * j + 0) += Km_shear(2 * i, 2 * j);
-        Ke(6 * i + 0, 6 * j + 1) += Km_shear(2 * i, 2 * j + 1);
-        Ke(6 * i + 1, 6 * j + 0) += Km_shear(2 * i + 1, 2 * j);
-        Ke(6 * i + 1, 6 * j + 1) += Km_shear(2 * i + 1, 2 * j + 1);
-      }
-  }
-
-  // Drilling stabilization (θz). Near-zero diagonal max is an input error.
-  double max_diag = Ke.diagonal().cwiseAbs().maxCoeff();
-  if (max_diag < 1e-10)
-    throw SolverError(std::format(
-        "CQuad4Mitc4 {}: stiffness matrix diagonal is near-zero (max={:.3e}); "
-        "check material, thickness, and geometry",
-        eid_.value, max_diag));
-  double drill_stiff = compute_drilling_stiffness(Ke);
-  for (int i = 0; i < 4; ++i)
-    Ke(6 * i + 5, 6 * i + 5) += drill_stiff;
-
-  return frame.T.transpose() * Ke * frame.T;
+  return compute_shell_stiffness(eid_, pid_, nodes_, model_,
+                                 ShellFormulation::MITC4);
 }
 
 LocalKe CQuad4Mitc4::mass_matrix() const {
-  // MITC4 and standard CQuad4 share the same mass matrix formulation;
-  // the MITC4 modification only affects the transverse shear stiffness.
-  LocalKe Me = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
-  const Mat1 &mat = material();
-  const double rho = mat.rho;
-  if (rho == 0.0)
-    return Me;
-  const double t = thickness();
-  auto coords = node_coords();
-  auto frame = compute_shell_frame(coords);
-  const auto &xl = frame.xl;
-  const auto &yl = frame.yl;
-
-  const double t3_12 = t * t * t / 12.0;
-  const double t3_1200 = t * t * t / 1200.0;
-
-  for (int gi = 0; gi < 2; ++gi) {
-    for (int gj = 0; gj < 2; ++gj) {
-      double xi = GAUSS2[gi];
-      double eta = GAUSS2[gj];
-      double wi = GAUSS2_W[gi];
-      double wj = GAUSS2_W[gj];
-
-      auto sd = CQuad4::shape_functions(xi, eta);
-
-      Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
-      for (int n = 0; n < 4; ++n) {
-        J(0, 0) += sd.dNdxi[n] * xl[n];
-        J(0, 1) += sd.dNdxi[n] * yl[n];
-        J(1, 0) += sd.dNdeta[n] * xl[n];
-        J(1, 1) += sd.dNdeta[n] * yl[n];
-      }
-      double detJ = J.determinant();
-      double w = wi * wj * detJ;
-
-      for (int a = 0; a < 4; ++a) {
-        for (int b = 0; b < 4; ++b) {
-          double mab = sd.N[a] * sd.N[b] * w;
-          for (int d = 0; d < 3; ++d)
-            Me(6 * a + d, 6 * b + d) += rho * t * mab;
-          for (int d = 0; d < 2; ++d)
-            Me(6 * a + 3 + d, 6 * b + 3 + d) += rho * t3_12 * mab;
-        }
-        Me(6 * a + 5, 6 * a + 5) +=
-            DRILL_INERTIA_SCALE * rho * t3_1200 * sd.N[a] * sd.N[a] * w;
-      }
-    }
-  }
-  return frame.T.transpose() * Me * frame.T;
+  return compute_shell_mass(eid_, pid_, nodes_, model_);
 }
 
 LocalFe CQuad4Mitc4::thermal_load(std::span<const double> temperatures,
                                   double t_ref) const {
-  // Identical to CQuad4 — MITC4 only changes transverse shear stiffness, not
-  // thermal load.
-  LocalFe fe = LocalFe::Zero(NUM_DOFS);
-  auto coords = node_coords();
-  auto frame = compute_shell_frame(coords);
-  const auto &xl = frame.xl;
-  const auto &yl = frame.yl;
-  const double th = thickness();
-  const Mat1 &mat = material();
-  const double alpha = mat.A;
-  if (alpha == 0.0)
-    return fe;
-
-  Eigen::Matrix3d Dm = membrane_D();
-
-  for (int gi = 0; gi < 2; ++gi) {
-    for (int gj = 0; gj < 2; ++gj) {
-      double xi = GAUSS2[gi], eta = GAUSS2[gj], wi = GAUSS2_W[gi],
-             wj = GAUSS2_W[gj];
-      auto sd = CQuad4::shape_functions(xi, eta);
-
-      double T = 0;
-      for (int n = 0; n < 4; ++n)
-        T += sd.N[n] * temperatures[n];
-      double dT = T - t_ref;
-      if (std::abs(dT) < 1e-15)
-        continue;
-
-      Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
-      for (int n = 0; n < 4; ++n) {
-        J(0, 0) += sd.dNdxi[n] * xl[n];
-        J(0, 1) += sd.dNdxi[n] * yl[n];
-        J(1, 0) += sd.dNdeta[n] * xl[n];
-        J(1, 1) += sd.dNdeta[n] * yl[n];
-      }
-      double detJ = J.determinant();
-      Eigen::Matrix2d Jinv = J.inverse();
-
-      Eigen::MatrixXd dNdx(2, 4);
-      for (int n = 0; n < 4; ++n) {
-        dNdx(0, n) = Jinv(0, 0) * sd.dNdxi[n] + Jinv(0, 1) * sd.dNdeta[n];
-        dNdx(1, n) = Jinv(1, 0) * sd.dNdxi[n] + Jinv(1, 1) * sd.dNdeta[n];
-      }
-      Eigen::MatrixXd Bm(3, 8);
-      Bm.setZero();
-      for (int n = 0; n < 4; ++n) {
-        Bm(0, 2 * n) = dNdx(0, n);
-        Bm(1, 2 * n + 1) = dNdx(1, n);
-        Bm(2, 2 * n) = dNdx(1, n);
-        Bm(2, 2 * n + 1) = dNdx(0, n);
-      }
-      Eigen::Vector3d eps_th(alpha * dT, alpha * dT, 0);
-      Eigen::VectorXd fe_mem =
-          th * Bm.transpose() * Dm * eps_th * detJ * wi * wj;
-      for (int n = 0; n < 4; ++n) {
-        fe(6 * n + 0) += fe_mem(2 * n + 0);
-        fe(6 * n + 1) += fe_mem(2 * n + 1);
-      }
-    }
-  }
-  return frame.T.transpose() * fe;
+  return compute_shell_thermal_load(eid_, pid_, nodes_, model_, temperatures,
+                                    t_ref, ShellFormulation::MITC4);
 }
 
 std::vector<EqIndex>
 CQuad4Mitc4::global_dof_indices(const DofMap &dof_map) const {
   std::vector<EqIndex> result;
-  result.reserve(NUM_DOFS);
+  result.reserve(24);
   for (NodeId nid : nodes_) {
     const auto &blk = dof_map.block(nid);
     for (int d = 0; d < 6; ++d)

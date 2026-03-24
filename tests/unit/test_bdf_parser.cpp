@@ -527,6 +527,49 @@ ENDDATA
     EXPECT_EQ(ps.shell_form, ShellFormulation::MITC4);
 }
 
+TEST(BdfParser, PshellContinuationAndShellOrientationFields) {
+    const std::string bdf = R"(
+BEGIN BULK
+MAT1,1,2.0E7,,0.3
+MAT1,2,4.0E7,,0.3
+MAT1,3,6.0E7,,0.3
+MAT1,4,8.0E7,,0.3
+PSHELL,10,1,0.2,2,1.5,3,0.9,2.25
++, -0.12, 0.08, 4
+CQUAD4,5,10,1,2,3,4,30.,0.015
+CTRIA3,6,10,1,2,3,42,0.02
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+
+    const PShell& ps = std::get<PShell>(m.properties.at(PropertyId{10}));
+    EXPECT_EQ(ps.mid1, MaterialId{1});
+    EXPECT_EQ(ps.mid2, MaterialId{2});
+    EXPECT_EQ(ps.mid3, MaterialId{3});
+    EXPECT_EQ(ps.mid4, MaterialId{4});
+    EXPECT_DOUBLE_EQ(ps.t, 0.2);
+    EXPECT_DOUBLE_EQ(ps.twelveI_t3, 1.5);
+    EXPECT_DOUBLE_EQ(ps.tst, 0.9);
+    EXPECT_DOUBLE_EQ(ps.nsm, 2.25);
+    EXPECT_DOUBLE_EQ(ps.z1, -0.12);
+    EXPECT_DOUBLE_EQ(ps.z2, 0.08);
+
+    ASSERT_EQ(m.elements.size(), 2u);
+    const ElementData& quad = m.elements[0];
+    EXPECT_EQ(quad.type, ElementType::CQUAD4);
+    ASSERT_TRUE(quad.theta.has_value());
+    EXPECT_NEAR(*quad.theta, 30.0, 1e-12);
+    ASSERT_FALSE(quad.mcid.has_value());
+    EXPECT_DOUBLE_EQ(quad.zoffs, 0.015);
+
+    const ElementData& tria = m.elements[1];
+    EXPECT_EQ(tria.type, ElementType::CTRIA3);
+    ASSERT_FALSE(tria.theta.has_value());
+    ASSERT_TRUE(tria.mcid.has_value());
+    EXPECT_EQ(*tria.mcid, CoordId{42});
+    EXPECT_DOUBLE_EQ(tria.zoffs, 0.02);
+}
+
 // ── Fixed-width (small-field) format tests ──────────────────────────────────
 // These test the more common BDF style seen in production, where cards use
 // fixed 8-character columns and continuation lines have blank first fields.

@@ -50,6 +50,22 @@ public:
     };
     static ShapeData shape_functions(double xi, double eta) noexcept;
 
+    struct CentroidResponse {
+        Eigen::Vector3d membrane_strain{Eigen::Vector3d::Zero()};
+        Eigen::Vector3d curvature{Eigen::Vector3d::Zero()};
+        Eigen::Vector3d membrane_stress{Eigen::Vector3d::Zero()};
+        Eigen::Vector3d membrane_resultant{Eigen::Vector3d::Zero()};
+        Eigen::Vector3d bending_moment{Eigen::Vector3d::Zero()};
+    };
+    static CentroidResponse recover_centroid_response(
+        ElementId eid,
+        PropertyId pid,
+        std::array<NodeId, NUM_NODES> node_ids,
+        const Model& model,
+        std::span<const double> global_displacements,
+        double avg_temperature,
+        double reference_temperature);
+
 private:
     ElementId   eid_;
     PropertyId  pid_;

@@ -28,6 +28,15 @@ void Model::validate() const {
                 if (!materials.count(p.mid1))
                     throw SolverError(std::format(
                         "PSHELL {} references undefined material {}", pid.value, p.mid1.value));
+                if (p.mid2.value != 0 && !materials.count(p.mid2))
+                    throw SolverError(std::format(
+                        "PSHELL {} references undefined bending material {}", pid.value, p.mid2.value));
+                if (p.mid3.value != 0 && !materials.count(p.mid3))
+                    throw SolverError(std::format(
+                        "PSHELL {} references undefined shear material {}", pid.value, p.mid3.value));
+                if (p.mid4.value != 0 && !materials.count(p.mid4))
+                    throw SolverError(std::format(
+                        "PSHELL {} references undefined coupling material {}", pid.value, p.mid4.value));
             } else if constexpr (std::is_same_v<T, PSolid>) {
                 if (!materials.count(p.mid))
                     throw SolverError(std::format(
