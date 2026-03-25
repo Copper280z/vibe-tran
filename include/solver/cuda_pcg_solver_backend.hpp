@@ -8,21 +8,13 @@
 //   - cuBLAS for dot products and axpy operations
 //   - Custom CUDA kernels for Jacobi preconditioner apply and axpby
 //
-// Single-precision mode: pass use_single_precision=true to try_create() to
-// perform the entire solve in float32.  Halves device memory usage vs float64,
-// which is useful for very large problems (hundreds of millions of nnz).
-//
 // Memory footprint: O(nnz + n) device memory — the matrix is stored once on
 // the device and no fill-in factorisation is performed.  This makes the PCG
 // backend suitable for very large systems (millions of DOFs) that would exhaust
 // device memory with cuDSS sparse Cholesky.
 //
 // Convergence: relative residual ||r||_2 / ||b||_2 < tolerance.
-// The default tolerance is chosen automatically by precision:
-//   - float64: 1e-8
-//   - float32: 1e-6
-// This avoids wasting iterations by pushing float32 solves past their useful
-// precision floor.
+// Default tolerance: 1e-8.
 //
 // Use try_create() to construct — returns nullopt when no CUDA device is
 // present so the caller can fall back without exception handling.
@@ -47,13 +39,11 @@ public:
     CudaPCGSolverBackend& operator=(const CudaPCGSolverBackend&) = delete;
 
     /// Factory — returns nullopt when no CUDA device is available.
-    /// @param use_single_precision  Perform the solve in float32 (halves VRAM usage).
     /// @param tolerance             Relative residual convergence threshold
-    ///                               (<=0 selects a precision-specific default).
+    ///                               (<=0 selects the default 1e-8).
     /// @param max_iters             Maximum PCG iterations (0 = default: 10000).
     [[nodiscard]] static std::optional<CudaPCGSolverBackend>
-    try_create(bool use_single_precision = false,
-               double tolerance = 0.0,
+    try_create(double tolerance = 0.0,
                int max_iters = 0) noexcept;
 
     /// Solve K*u = F using PCG with IC0 → ILU0 → Jacobi preconditioning.
@@ -77,9 +67,6 @@ public:
 
     /// GPU device name reported by the CUDA runtime.
     [[nodiscard]] std::string_view device_name() const noexcept;
-
-    /// True when the backend was created with use_single_precision=true.
-    [[nodiscard]] bool uses_single_precision() const noexcept;
 
 private:
     explicit CudaPCGSolverBackend(std::unique_ptr<CudaPCGContext> ctx) noexcept;

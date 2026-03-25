@@ -20,6 +20,7 @@
 #include <vector>
 
 #ifdef HAVE_CUDA
+#include "solver/cuda_mixed_pcg_solver_backend.hpp"
 #include "solver/cuda_pcg_solver_backend.hpp"
 #endif
 
@@ -237,6 +238,18 @@ protected:
     std::optional<CudaPCGSolverBackend> backend_;
 };
 
+class CudaMixedPCGTest : public ::testing::Test {
+protected:
+    // cppcheck-suppress unusedFunction -- called by GTest framework
+    void SetUp() override {
+        backend_ = CudaMixedPCGSolverBackend::try_create();
+        if (!backend_.has_value())
+            GTEST_SKIP() << "CUDA not available on this system — skipping CUDA mixed PCG tests";
+    }
+
+    std::optional<CudaMixedPCGSolverBackend> backend_;
+};
+
 // ── Test 9: 2×2 diagonal system — exact solution ─────────────────────────────
 
 TEST_F(CudaPCGTest, DiagonalSystemExactSolution) {
@@ -376,6 +389,25 @@ TEST_F(CudaPCGTest, NameAndDeviceNameAreNonEmpty) {
         << "Backend name should contain 'CUDA'";
     EXPECT_FALSE(backend_->device_name().empty())
         << "device_name() should return the GPU name";
+}
+
+TEST_F(CudaMixedPCGTest, TridiagonalAgreesWithEigenAfterRefinement) {
+    const int n = 200;
+    auto csr = make_tridiagonal(n, 2.0, -1.0);
+    std::vector<double> F(n, 1.0);
+
+    auto u_cuda = backend_->solve(csr, F);
+
+    EigenSolverBackend eigen;
+    auto u_eigen = eigen.solve(csr, F);
+
+    ASSERT_EQ(static_cast<int>(u_cuda.size()), n);
+    for (int i = 0; i < n; i += 20)
+        EXPECT_NEAR(u_cuda[i], u_eigen[i], 5e-3)
+            << "n=200 tridiagonal mixed PCG component " << i
+            << " disagrees with Eigen";
+
+    EXPECT_LT(backend_->last_estimated_error(), 1e-4);
 }
 
 #endif // HAVE_CUDA

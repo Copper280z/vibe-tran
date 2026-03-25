@@ -303,7 +303,10 @@ if have_cuda_compiler
       cuda_pcg_dep = declare_dependency(
         dependencies: [_cudart_lib, _cublas_lib, _cusparse_lib],
       )
-      cuda_sources      += files('src/solver/cuda_pcg_solver_backend.cu')
+      cuda_sources      += files(
+        'src/solver/cuda_pcg_solver_backend.cu',
+        'src/solver/cuda_mixed_pcg_solver_backend.cu',
+      )
       cuda_lib_deps     += [cuda_pcg_dep]
       message('CUDA PCG solver backend: enabled (cuBLAS + cuSPARSE)')
 

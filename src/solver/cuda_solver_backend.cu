@@ -13,9 +13,8 @@
 // (ANALYSIS → FACTORIZATION → SOLVE), then copy the solution host←device.
 //
 // For large problems where cuDSS's internal workspace exceeds device memory,
-// single-precision mode (try_create(use_single_precision=true)) halves the
-// device memory footprint by downcasting inputs to float before the solve and
-// upcasting the result back to double.
+// fp32 mode halves the device memory footprint by downcasting inputs to float
+// before the solve and upcasting the result back to double.
 //
 // Note: this file is only compiled when the CUDA backend is enabled in
 // meson (have_cuda_backend=true), so HAVE_CUDA is guaranteed to be defined.
@@ -47,7 +46,7 @@ namespace vibestran {
 struct CudaContext {
   cudssHandle_t cudss = nullptr;
   std::string device_name;
-  bool use_single_precision = false;
+  CudaSolverPrecision precision = CudaSolverPrecision::Float64;
 };
 
 // RAII wrapper for device memory allocated with cudaMalloc.
@@ -161,7 +160,7 @@ CudaSolverBackend::operator=(CudaSolverBackend &&) noexcept = default;
 // ───────────────────────────────────────────────────────────────────
 
 std::optional<CudaSolverBackend>
-CudaSolverBackend::try_create(bool use_single_precision) noexcept {
+CudaSolverBackend::try_create(CudaSolverPrecision precision) noexcept {
   int device_count = 0;
   if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0)
     return std::nullopt;
@@ -174,7 +173,7 @@ CudaSolverBackend::try_create(bool use_single_precision) noexcept {
   cudaDeviceProp props{};
   if (cudaGetDeviceProperties(&props, 0) == cudaSuccess)
     ctx->device_name = props.name;
-  ctx->use_single_precision = use_single_precision;
+  ctx->precision = precision;
 
   if (cudssCreate(&ctx->cudss) != CUDSS_STATUS_SUCCESS)
     return std::nullopt;
@@ -197,8 +196,8 @@ std::string_view CudaSolverBackend::device_name() const noexcept {
   return ctx_->device_name;
 }
 
-bool CudaSolverBackend::uses_single_precision() const noexcept {
-  return ctx_->use_single_precision;
+CudaSolverPrecision CudaSolverBackend::precision() const noexcept {
+  return ctx_->precision;
 }
 
 // ── Residual validation
@@ -336,7 +335,7 @@ static bool solve_cudss(cudssHandle_t handle, const std::string &device_name,
       throw SolverError(
           "CUDA solver: cuDSS analysis failed even in hybrid mode (" + label +
           "), status=" + std::to_string(static_cast<int>(st)) +
-          ". Retry with --cuda-single-precision to halve GPU memory usage.");
+          ". Retry with --cuda-precision=fp32 to halve GPU memory usage.");
   } else if (st != CUDSS_STATUS_SUCCESS) {
     throw SolverError("CUDA solver: cuDSS analysis failed (" + label +
                       "), status=" + std::to_string(static_cast<int>(st)));
@@ -380,7 +379,7 @@ static bool solve_cudss(cudssHandle_t handle, const std::string &device_name,
         "CUDA solver: cuDSS factorisation alloc failed -- matrix too large for "
         "device workspace (n=" +
         std::to_string(n) + ", nnz=" + std::to_string(nnz) +
-        "). Retry with --cuda-single-precision to halve GPU memory usage.");
+        "). Retry with --cuda-precision=fp32 to halve GPU memory usage.");
   // Non-success for SPD factorisation likely means matrix is not positive
   // definite; return false so the caller can retry with GENERAL type.
   if (st != CUDSS_STATUS_SUCCESS) {
@@ -532,7 +531,7 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
 
   const int nnz = K_spd->nnz;
 
-  if (ctx_->use_single_precision) {
+  if (ctx_->precision == CudaSolverPrecision::Float32) {
     CudaSolveResult result =
         solve_single_precision(ctx_->cudss, ctx_->device_name, K, F);
     last_cholesky_ = result.used_cholesky;
