@@ -12,6 +12,8 @@ Usage
     python generate_test_cases.py          # write all cases, n=2 (medium mesh)
     python generate_test_cases.py --n 4    # finer mesh
     python generate_test_cases.py --cases cantilever_quad cylinder_pressure
+    python generate_test_cases.py --cases cylinder_shell_pressure sphere_shell_pressure
+    python generate_test_cases.py --mesh-variant both --distortion-seed 7
     python generate_test_cases.py --list   # show available case names
 
 No external dependencies – pure Python 3.6+.
@@ -26,8 +28,8 @@ import os
 import re
 import sys
 import math
+import random
 import argparse
-from collections import namedtuple
 from typing import List, Tuple
 
 # ---------------------------------------------------------------------------
@@ -144,9 +146,25 @@ class BDFWriter:
         return f"EIGRL   {sid:8d}{'':8}{'':8}{nd:8d}"
 
     # --- bulk data cards ---
-    def grid(self, nid: int, x: float, y: float, z: float):
+    def grid(
+        self,
+        nid: int,
+        x: float,
+        y: float,
+        z: float,
+        cp: int = 0,
+        cd: int = 0,
+    ):
         self._lines.append(
-            f"GRID    {nid:8d}{'':8}{self._f(x)}{self._f(y)}{self._f(z)}"
+            self._card(
+                "GRID",
+                nid,
+                "" if cp == 0 else cp,
+                x,
+                y,
+                z,
+                "" if cd == 0 else cd,
+            )
         )
 
     def cquad4(self, eid: int, pid: int, n1, n2, n3, n4):
@@ -176,10 +194,27 @@ class BDFWriter:
     def psolid(self, pid: int, mid: int):
         self._lines.append(f"PSOLID  {pid:8d}{mid:8d}")
 
-    def mat1(self, mid: int, E: float, G_or_blank, nu: float, rho: float = 0.0):
-        g_str = self._f(G_or_blank) if G_or_blank is not None else "        "
+    def mat1(
+        self,
+        mid: int,
+        E: float,
+        G_or_blank,
+        nu: float,
+        rho: float = 0.0,
+        alpha: float = None,
+        tref: float = None,
+    ):
         self._lines.append(
-            f"MAT1    {mid:8d}{self._f(E)}{g_str}{self._f(nu)}{self._f(rho)}"
+            self._card(
+                "MAT1",
+                mid,
+                E,
+                "" if G_or_blank is None else G_or_blank,
+                nu,
+                rho,
+                "" if alpha is None else alpha,
+                "" if tref is None else tref,
+            )
         )
 
     def spc1(self, sid: int, dofs: str, *nids):
@@ -238,9 +273,77 @@ class BDFWriter:
             self._lines.append(line)
             idx += 8
 
-    def pload4(self, sid: int, eid: int, p: float):
-        """Pressure on solid face (simplified: uniform on one face)."""
-        self._lines.append(f"PLOAD4  {sid:8d}{eid:8d}{self._f(p)}")
+    def pload4(
+        self,
+        sid: int,
+        eid: int,
+        p: float,
+        face_node1: int = None,
+        face_node34: int = None,
+    ):
+        """Pressure on an element face, with optional explicit face selection."""
+        self._lines.append(
+            self._card(
+                "PLOAD4",
+                sid,
+                eid,
+                p,
+                "",
+                "",
+                "",
+                "" if face_node1 is None else face_node1,
+                "" if face_node34 is None else face_node34,
+            )
+        )
+
+    def temp(self, sid: int, *node_temps: Tuple[int, float]):
+        """TEMP cards with up to three (nid, temperature) pairs per line."""
+        pairs = list(node_temps)
+        for idx in range(0, len(pairs), 3):
+            chunk = pairs[idx : idx + 3]
+            line = f"TEMP    {sid:8d}"
+            for nid, temp in chunk:
+                line += f"{nid:8d}{self._f(temp)}"
+            self._lines.append(line)
+
+    def tempd(self, sid: int, temp: float):
+        self._lines.append(self._card("TEMPD", sid, temp))
+
+    def cord2c(self, cid: int, rid: int, a, b, c):
+        self._lines.append(
+            self._card(
+                "CORD2C",
+                cid,
+                rid,
+                a[0],
+                a[1],
+                a[2],
+                b[0],
+                b[1],
+                b[2],
+                c[0],
+                c[1],
+                c[2],
+            )
+        )
+
+    def cord2s(self, cid: int, rid: int, a, b, c):
+        self._lines.append(
+            self._card(
+                "CORD2S",
+                cid,
+                rid,
+                a[0],
+                a[1],
+                a[2],
+                b[0],
+                b[1],
+                b[2],
+                c[0],
+                c[1],
+                c[2],
+            )
+        )
 
     def rbe2(self, eid: int, gn: int, cm: str, *gmi):
         """RBE2 rigid element."""
@@ -286,11 +389,18 @@ class BDFWriter:
             self._lines.append(line)
             idx += 8
 
-    def subcase(self, sid: int, label: str, load_sid: int, spc_sid: int):
+    def subcase(
+        self,
+        sid: int,
+        label: str,
+        load_sid: int,
+        spc_sid: int,
+        temp_load_sid: int = None,
+    ):
         """Inject a SUBCASE block into the case-control section."""
         # stored separately, inserted during write
         self._subcases = getattr(self, "_subcases", [])
-        self._subcases.append((sid, label, load_sid, spc_sid))
+        self._subcases.append((sid, label, load_sid, spc_sid, temp_load_sid))
 
     def write(self, path: str):
         subcases = getattr(self, "_subcases", [])
@@ -304,11 +414,13 @@ class BDFWriter:
                 f.write("STRESS(PRINT,SORT1,REAL,VONMISES,BILIN) = ALL\n")
                 f.write("SPCFORCE = ALL\n")
                 if subcases:
-                    for sid, label, lsid, ssid in subcases:
+                    for sid, label, lsid, ssid, tsid in subcases:
                         f.write(f"SUBCASE {sid}\n")
                         f.write(f"  LABEL = {label}\n")
                         f.write(f"  LOAD = {lsid}\n")
                         f.write(f"  SPC = {ssid}\n")
+                        if tsid is not None:
+                            f.write(f"  TEMPERATURE(LOAD) = {tsid}\n")
                 else:
                     f.write("LOAD = 1\n")
                     f.write("SPC = 2\n")
@@ -316,7 +428,7 @@ class BDFWriter:
                 f.write("DISPLACEMENT(PRINT,SORT1,REAL) = ALL\n")
                 f.write("METHOD = 1\n")
                 if subcases:
-                    for sid, label, lsid, ssid in subcases:
+                    for sid, label, lsid, ssid, _ in subcases:
                         f.write(f"SUBCASE {sid}\n")
                         f.write(f"  LABEL = {label}\n")
                         f.write(f"  SPC = {ssid}\n")
@@ -369,6 +481,98 @@ E = 200000.0  # MPa  (steel)
 NU = 0.3
 RHO = 7.85e-9  # tonne/mm^3  (steel, so f in Hz with mm/N/tonne)
 G = E / (2 * (1 + NU))
+THERMAL_ALPHA = 1.2e-5  # 1 / degC
+THERMAL_DT = 50.0  # degC
+
+MESH_VARIANT = "regular"
+DISTORTION_FRACTION = 0.30
+DISTORTION_SEED = 12345
+
+
+def file_stem(name: str, n: int, distorted: bool) -> str:
+    stem = f"{name}_n{n}"
+    return f"{name}_distorted_n{n}" if distorted else stem
+
+
+def active_mesh_variants(case_name: str) -> List[bool]:
+    if case_name not in DISTORTABLE_CASES:
+        return [False]
+    if MESH_VARIANT == "regular":
+        return [False]
+    if MESH_VARIANT == "distorted":
+        return [True]
+    return [False, True]
+
+
+def distortion_rng(case_name: str, n: int, distorted: bool) -> random.Random:
+    seed = DISTORTION_SEED + 97 * n + (1009 if distorted else 0)
+    seed += sum((idx + 1) * ord(ch) for idx, ch in enumerate(case_name))
+    return random.Random(seed)
+
+
+def distorted_value(base: float, step: float, movable: bool, rng: random.Random) -> float:
+    if not movable or step <= 0.0 or DISTORTION_FRACTION <= 0.0:
+        return base
+    span = DISTORTION_FRACTION * step
+    return base + rng.uniform(-span, span)
+
+
+def square_plate_grid(
+    bdf: BDFWriter,
+    case_name: str,
+    n: int,
+    distorted: bool,
+    side_length: float,
+    divisions: int,
+):
+    ds = side_length / divisions
+    rng = distortion_rng(case_name, n, distorted)
+    nids = {}
+    for i in range(divisions + 1):
+        for j in range(divisions + 1):
+            x_base = i * ds
+            y_base = j * ds
+            x = distorted_value(x_base, ds, distorted and 0 < i < divisions, rng)
+            y = distorted_value(y_base, ds, distorted and 0 < j < divisions, rng)
+            nid = bdf.new_nid()
+            nids[(i, j)] = nid
+            bdf.grid(nid, x, y, 0.0)
+    return nids
+
+
+def vec_add(a, b):
+    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+
+def vec_sub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def vec_scale(a, s: float):
+    return (a[0] * s, a[1] * s, a[2] * s)
+
+
+def vec_dot(a, b) -> float:
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def vec_cross(a, b):
+    return (
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    )
+
+
+def vec_norm(a) -> float:
+    return math.sqrt(vec_dot(a, a))
+
+
+def vec_normalize(a):
+    norm = vec_norm(a)
+    if norm <= 0.0:
+        raise ValueError("Cannot normalize zero-length vector")
+    return vec_scale(a, 1.0 / norm)
 
 
 # ===========================================================================
@@ -643,57 +847,58 @@ def case_ss_plate_pressure(n: int, out_dir: str):
         name, "Max deflection w_max", w_ref, "mm", "0.00406*q*a^4/D  (Navier, nu=0.3)"
     )
 
-    bdf = BDFWriter(f"SS Square Plate n={n}", sol=101)
-    pid = bdf.new_pid()
-    mid = bdf.new_mid()
-    bdf.comment(f"Simply supported square plate: a={a} t={t} q={q}")
-    bdf.comment(f"D = {D:.2f} N.mm")
-    bdf.comment(f"ANALYTICAL: w_max = {w_ref:.4f} mm")
-    bdf.blank()
-
-    bdf.mat1(mid, E, None, NU, RHO)
-    bdf.pshell(pid, mid, t)
-    bdf.blank()
-
     nn = 4 * n  # elements per side
-    ds = a / nn
 
-    nids = {}
-    for i in range(nn + 1):
-        for j in range(nn + 1):
-            nid = bdf.new_nid()
-            nids[(i, j)] = nid
-            bdf.grid(nid, i * ds, j * ds, 0.0)
-
-    eids = []
-    for i in range(nn):
-        for j in range(nn):
-            eid = bdf.new_eid()
-            eids.append(eid)
-            bdf.cquad4(
-                eid,
-                pid,
-                nids[(i, j)],
-                nids[(i + 1, j)],
-                nids[(i + 1, j + 1)],
-                nids[(i, j + 1)],
+    for distorted in active_mesh_variants(name):
+        bdf = BDFWriter(
+            f"SS Square Plate {'Distorted ' if distorted else ''}n={n}", sol=101
+        )
+        pid = bdf.new_pid()
+        mid = bdf.new_mid()
+        bdf.comment(f"Simply supported square plate: a={a} t={t} q={q}")
+        bdf.comment(f"D = {D:.2f} N.mm")
+        bdf.comment(f"ANALYTICAL: w_max = {w_ref:.4f} mm")
+        if distorted:
+            bdf.comment(
+                f"Distortion: boundary-preserving in-plane random perturbations, "
+                f"fraction={DISTORTION_FRACTION:.2f}, seed={DISTORTION_SEED}"
             )
+        bdf.blank()
 
-    # SS BCs: simply supported = no out-of-plane displacement on all edges
-    # Also prevent rigid-body translation/rotation in-plane
-    spc_sid = 2
-    edges = []
-    for i in range(nn + 1):
-        edges += [nids[(i, 0)], nids[(i, nn)], nids[(0, i)], nids[(nn, i)]]
-    edges = list(set(edges))
-    bdf.spc1(spc_sid, "3", *edges)
-    # Corner node: pin in-plane to kill RBM
-    bdf.spc1(spc_sid, "12", nids[(0, 0)])
+        bdf.mat1(mid, E, None, NU, RHO)
+        bdf.pshell(pid, mid, t)
+        bdf.blank()
 
-    load_sid = 1
-    bdf.pload2(load_sid, -q, *eids)
+        nids = square_plate_grid(bdf, name, n, distorted, a, nn)
 
-    bdf.write(os.path.join(out_dir, f"{name}_n{n}.bdf"))
+        eids = []
+        for i in range(nn):
+            for j in range(nn):
+                eid = bdf.new_eid()
+                eids.append(eid)
+                bdf.cquad4(
+                    eid,
+                    pid,
+                    nids[(i, j)],
+                    nids[(i + 1, j)],
+                    nids[(i + 1, j + 1)],
+                    nids[(i, j + 1)],
+                )
+
+        # SS BCs: simply supported = no out-of-plane displacement on all edges
+        # Also prevent rigid-body translation/rotation in-plane.
+        spc_sid = 2
+        edges = []
+        for i in range(nn + 1):
+            edges += [nids[(i, 0)], nids[(i, nn)], nids[(0, i)], nids[(nn, i)]]
+        edges = list(set(edges))
+        bdf.spc1(spc_sid, "3", *edges)
+        bdf.spc1(spc_sid, "12", nids[(0, 0)])
+
+        load_sid = 1
+        bdf.pload2(load_sid, -q, *eids)
+
+        bdf.write(os.path.join(out_dir, f"{file_stem(name, n, distorted)}.bdf"))
     return name, w_ref
 
 
@@ -845,20 +1050,17 @@ def case_cylinder_pressure(n: int, out_dir: str):
     Lamé solution:
       sigma_r(r)   = p*Ri^2/(Ro^2-Ri^2) * (1 - Ro^2/r^2)
       sigma_th(r)  = p*Ri^2/(Ro^2-Ri^2) * (1 + Ro^2/r^2)
-    Model as a 15-degree wedge sector (saves elements) with symmetry BCs.
+    Modelled as a cylindrical-coordinate wedge sector with exact symmetry BCs.
     """
-    Ri = 50.0
-    Ro = 100.0
-    p_int = 100.0  # MPa
-    Lz = 20.0  # axial length (short, plane-strain-like)
+    Ri = 100.0
+    Ro = 140.0
+    p_int = 10.0  # MPa
+    Lz = 240.0
+    theta_span_deg = 30.0
     c = Ri**2 / (Ro**2 - Ri**2)
     sig_th_inner = p_int * c * (1 + Ro**2 / Ri**2)  # max hoop
     sig_r_inner = -p_int  # equals -p at inner surface (should be)
     sig_th_outer = p_int * c * 2  # hoop at outer surface
-    u_inner = (p_int * Ri / E) * (
-        Ri**2 / (Ro**2 - Ri**2) * (1 + NU) + (1 - NU) * Ro**2 / (Ro**2 - Ri**2)
-    )
-    # Simplified radial disp at inner wall (plane stress):
     u_inner_ps = (
         (p_int * Ri / E) * ((1 - NU) * Ri**2 + (1 + NU) * Ro**2) / (Ro**2 - Ri**2)
     )
@@ -885,94 +1087,94 @@ def case_cylinder_pressure(n: int, out_dir: str):
         "p*Ri/E*((1-nu)*Ri^2+(1+nu)*Ro^2)/(Ro^2-Ri^2)",
     )
 
-    bdf = BDFWriter(f"Thick-Walled Cylinder n={n}", sol=101)
-    pid = bdf.new_pid()
-    mid = bdf.new_mid()
-    bdf.comment(f"Thick cylinder: Ri={Ri} Ro={Ro} p={p_int} Lz={Lz}")
-    bdf.comment(f"ANALYTICAL: sigma_hoop(inner) = {sig_th_inner:.4f} MPa")
-    bdf.comment(f"ANALYTICAL: sigma_hoop(outer) = {sig_th_outer:.4f} MPa")
-    bdf.comment(f"ANALYTICAL: u_r(inner) = {u_inner_ps:.6f} mm  (plane stress)")
-    bdf.blank()
-
-    bdf.mat1(mid, E, None, NU, RHO)
-    bdf.psolid(pid, mid)
-    bdf.blank()
-
-    # Wedge: theta from 0 to 15 degrees, r from Ri to Ro, z from 0 to Lz
-    theta_span = math.radians(15.0)
     nr = 3 * n
-    ntheta = 2 * n
-    nz = n
+    ntheta = 3 * n
+    nz = 4 * n
+    dr = (Ro - Ri) / nr
+    dtheta = theta_span_deg / ntheta
+    dz = Lz / nz
 
-    def node_xyz(ir, it, iz):
-        frac_r = ir / nr
-        r = Ri + (Ro - Ri) * frac_r
-        theta = theta_span * it / ntheta
-        z = Lz * iz / nz
-        return r * math.cos(theta), r * math.sin(theta), z
+    for distorted in active_mesh_variants(name):
+        bdf = BDFWriter(
+            f"Thick-Walled Cylinder {'Distorted ' if distorted else ''}n={n}",
+            sol=101,
+        )
+        pid = bdf.new_pid()
+        mid = bdf.new_mid()
+        cyl_cid = 10
+        bdf.comment(
+            f"Thick cylinder wedge: Ri={Ri} Ro={Ro} p={p_int} "
+            f"Lz={Lz} theta={theta_span_deg}deg"
+        )
+        bdf.comment("Nodes use CORD2C so wedge-face SPCs constrain exact circumferential DOF.")
+        bdf.comment(f"ANALYTICAL: sigma_hoop(inner) = {sig_th_inner:.4f} MPa")
+        bdf.comment(f"ANALYTICAL: sigma_hoop(outer) = {sig_th_outer:.4f} MPa")
+        bdf.comment(f"ANALYTICAL: u_r(inner) = {u_inner_ps:.6f} mm  (plane stress)")
+        if distorted:
+            bdf.comment(
+                f"Distortion: boundary-preserving random perturbations, "
+                f"fraction={DISTORTION_FRACTION:.2f}, seed={DISTORTION_SEED}"
+            )
+        bdf.blank()
 
-    nids = {}
-    for iz in range(nz + 1):
-        for it in range(ntheta + 1):
-            for ir in range(nr + 1):
-                nid = bdf.new_nid()
-                nids[(ir, it, iz)] = nid
-                x, y, z = node_xyz(ir, it, iz)
-                bdf.grid(nid, x, y, z)
+        bdf.mat1(mid, E, None, NU, RHO)
+        bdf.psolid(pid, mid)
+        bdf.cord2c(cyl_cid, 0, (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0))
+        bdf.blank()
 
-    inner_face_eids = []
-    for iz in range(nz):
-        for it in range(ntheta):
-            for ir in range(nr):
-                eid = bdf.new_eid()
-                # Bottom face (iz), then top face (iz+1) — CHEXA ordering
-                bot = [
-                    nids[(ir, it, iz)],
-                    nids[(ir + 1, it, iz)],
-                    nids[(ir + 1, it + 1, iz)],
-                    nids[(ir, it + 1, iz)],
-                ]
-                top = [
-                    nids[(ir, it, iz + 1)],
-                    nids[(ir + 1, it, iz + 1)],
-                    nids[(ir + 1, it + 1, iz + 1)],
-                    nids[(ir, it + 1, iz + 1)],
-                ]
-                bdf.chexa(eid, pid, bot + top)
-                if ir == 0:
-                    inner_face_eids.append(eid)
+        rng = distortion_rng(name, n, distorted)
+        nids = {}
+        for iz in range(nz + 1):
+            z_base = iz * dz
+            z = distorted_value(z_base, dz, distorted and 0 < iz < nz, rng)
+            for it in range(ntheta + 1):
+                theta_base = it * dtheta
+                theta = distorted_value(
+                    theta_base, dtheta, distorted and 0 < it < ntheta, rng
+                )
+                for ir in range(nr + 1):
+                    r_base = Ri + ir * dr
+                    r = distorted_value(r_base, dr, distorted and 0 < ir < nr, rng)
+                    nid = bdf.new_nid()
+                    nids[(ir, it, iz)] = nid
+                    bdf.grid(nid, r, theta, z, cp=cyl_cid, cd=cyl_cid)
 
-    # BCs
-    spc_sid = 2
-    # Symmetry: theta=0 plane -> fix tangential (UY = dof 2 in global, but need
-    # the direction perpendicular to the face).  For simplicity fix the component
-    # in the direction normal to each symmetry plane.
-    # theta=0 face (it=0): normal is +Y, fix UY
-    theta0_nodes = [nids[(ir, 0, iz)] for ir in range(nr + 1) for iz in range(nz + 1)]
-    bdf.spc1(spc_sid, "2", *theta0_nodes)
-    # theta=15 face (it=ntheta): normal perpendicular to that face
-    # For a 15 deg wedge this is approximately -sin(15)*X + cos(15)*Y
-    # In Nastran we'd need a local coord sys; for simplicity fix equivalent
-    # by constraining the in-plane tangential component with SPC.
-    # Here we just prevent rigid body rotation about Z by fixing the node
-    # at the outer radius of the theta=max face in the tangential direction.
-    thetatop_nodes = [
-        nids[(ir, ntheta, iz)] for ir in range(nr + 1) for iz in range(nz + 1)
-    ]
-    bdf.spc1(spc_sid, "2", *thetatop_nodes)  # approximate for small wedge angle
-    # Axial: fix UZ at z=0 to prevent rigid body translation
-    z0_nodes = [nids[(ir, it, 0)] for ir in range(nr + 1) for it in range(ntheta + 1)]
-    bdf.spc1(spc_sid, "3", *z0_nodes)
-    # Fix UX at a node to prevent rigid translation in X
-    bdf.spc1(spc_sid, "1", nids[(nr, 0, 0)])
+        inner_faces = []
+        for iz in range(nz):
+            for it in range(ntheta):
+                for ir in range(nr):
+                    eid = bdf.new_eid()
+                    bot = [
+                        nids[(ir, it, iz)],
+                        nids[(ir + 1, it, iz)],
+                        nids[(ir + 1, it + 1, iz)],
+                        nids[(ir, it + 1, iz)],
+                    ]
+                    top = [
+                        nids[(ir, it, iz + 1)],
+                        nids[(ir + 1, it, iz + 1)],
+                        nids[(ir + 1, it + 1, iz + 1)],
+                        nids[(ir, it + 1, iz + 1)],
+                    ]
+                    bdf.chexa(eid, pid, bot + top)
+                    if ir == 0:
+                        inner_faces.append((eid, bot[0], top[3]))
 
-    # Internal pressure on inner face (PLOAD4 on each CHEXA inner face)
-    # PLOAD4: pressure on element face
-    load_sid = 1
-    for eid in inner_face_eids:
-        bdf.pload4(load_sid, eid, p_int)
+        spc_sid = 2
+        theta0_nodes = [nids[(ir, 0, iz)] for ir in range(nr + 1) for iz in range(nz + 1)]
+        thetamax_nodes = [
+            nids[(ir, ntheta, iz)] for ir in range(nr + 1) for iz in range(nz + 1)
+        ]
+        z0_nodes = [nids[(ir, it, 0)] for ir in range(nr + 1) for it in range(ntheta + 1)]
+        bdf.spc1(spc_sid, "2", *theta0_nodes)
+        bdf.spc1(spc_sid, "2", *thetamax_nodes)
+        bdf.spc1(spc_sid, "3", *z0_nodes)
 
-    bdf.write(os.path.join(out_dir, f"{name}_n{n}.bdf"))
+        load_sid = 1
+        for eid, face_node1, face_node34 in inner_faces:
+            bdf.pload4(load_sid, eid, p_int, face_node1, face_node34)
+
+        bdf.write(os.path.join(out_dir, f"{file_stem(name, n, distorted)}.bdf"))
     return name, sig_th_inner
 
 
@@ -1431,48 +1633,51 @@ def case_clamped_plate_modes(n: int, out_dir: str):
         "lambda_11^2/(2*pi*a^2)*sqrt(D/rho/t), lambda_11=35.99 [Leissa]",
     )
 
-    bdf = BDFWriter(f"Clamped Plate SOL103 n={n}", sol=103)
-    pid = bdf.new_pid()
-    mid = bdf.new_mid()
-    bdf.comment(f"CCCC square plate modes: a={a} t={t}")
-    bdf.comment(f"D = {D:.2f} N.mm")
-    bdf.comment(f"ANALYTICAL: f_11 = {f_ref:.4f} Hz  (Leissa, lambda_11=35.99)")
-    bdf.blank()
-
-    bdf.mat1(mid, E, None, NU, RHO)
-    bdf.pshell(pid, mid, t)
-    bdf.blank()
-
     nn = 4 * n
-    ds = a / nn
 
-    nids = {}
-    for i in range(nn + 1):
-        for j in range(nn + 1):
-            nid = bdf.new_nid()
-            nids[(i, j)] = nid
-            bdf.grid(nid, i * ds, j * ds, 0.0)
-
-    for i in range(nn):
-        for j in range(nn):
-            eid = bdf.new_eid()
-            bdf.cquad4(
-                eid,
-                pid,
-                nids[(i, j)],
-                nids[(i + 1, j)],
-                nids[(i + 1, j + 1)],
-                nids[(i, j + 1)],
+    for distorted in active_mesh_variants(name):
+        bdf = BDFWriter(
+            f"Clamped Plate SOL103 {'Distorted ' if distorted else ''}n={n}",
+            sol=103,
+        )
+        pid = bdf.new_pid()
+        mid = bdf.new_mid()
+        bdf.comment(f"CCCC square plate modes: a={a} t={t}")
+        bdf.comment(f"D = {D:.2f} N.mm")
+        bdf.comment(f"ANALYTICAL: f_11 = {f_ref:.4f} Hz  (Leissa, lambda_11=35.99)")
+        if distorted:
+            bdf.comment(
+                f"Distortion: boundary-preserving in-plane random perturbations, "
+                f"fraction={DISTORTION_FRACTION:.2f}, seed={DISTORTION_SEED}"
             )
+        bdf.blank()
 
-    spc_sid = 2
-    edge_nodes = []
-    for i in range(nn + 1):
-        edge_nodes += [nids[(i, 0)], nids[(i, nn)], nids[(0, i)], nids[(nn, i)]]
-    edge_nodes = list(set(edge_nodes))
-    bdf.spc1(spc_sid, "123456", *edge_nodes)
+        bdf.mat1(mid, E, None, NU, RHO)
+        bdf.pshell(pid, mid, t)
+        bdf.blank()
 
-    bdf.write(os.path.join(out_dir, f"{name}_n{n}.bdf"))
+        nids = square_plate_grid(bdf, name, n, distorted, a, nn)
+
+        for i in range(nn):
+            for j in range(nn):
+                eid = bdf.new_eid()
+                bdf.cquad4(
+                    eid,
+                    pid,
+                    nids[(i, j)],
+                    nids[(i + 1, j)],
+                    nids[(i + 1, j + 1)],
+                    nids[(i, j + 1)],
+                )
+
+        spc_sid = 2
+        edge_nodes = []
+        for i in range(nn + 1):
+            edge_nodes += [nids[(i, 0)], nids[(i, nn)], nids[(0, i)], nids[(nn, i)]]
+        edge_nodes = list(set(edge_nodes))
+        bdf.spc1(spc_sid, "123456", *edge_nodes)
+
+        bdf.write(os.path.join(out_dir, f"{file_stem(name, n, distorted)}.bdf"))
     return name, f_ref
 
 
@@ -1513,9 +1718,9 @@ def case_sphere_pressure(n: int, out_dir: str):
       ip=nphi   (phi=pi/2, z=0, equatorial plane): fix UZ (dof 3)
       ip=0      (near-pole cap):                  fix UX and UY (dof 12)
     """
-    Ri = 50.0
-    Ro = 80.0
-    p_int = 50.0
+    Ri = 100.0
+    Ro = 140.0
+    p_int = 10.0
     A_lame = p_int * Ri**3 / (Ro**3 - Ri**3)
     B_lame = p_int * Ri**3 * Ro**3 / (2 * (Ro**3 - Ri**3))
     sig_th_inner = A_lame + B_lame / Ri**3
@@ -1545,110 +1750,584 @@ def case_sphere_pressure(n: int, out_dir: str):
         "A - 2B/Ri^3 = -p_int  (BC check)",
     )
 
-    bdf = BDFWriter(f"Pressurized Sphere Octant n={n}", sol=101)
-    pid = bdf.new_pid()
-    mid = bdf.new_mid()
-    bdf.comment(f"Sphere octant: Ri={Ri} Ro={Ro} p={p_int}")
-    bdf.comment(f"ANALYTICAL: sigma_hoop(inner) = {sig_th_inner:.4f} MPa")
-    bdf.comment(f"ANALYTICAL: sigma_hoop(outer) = {sig_th_outer:.4f} MPa")
-    bdf.comment(f"Mesh: radial extrusion CHEXA, phi avoids z-axis pole")
-    bdf.blank()
+    nr = 2 * n
+    ntheta = 4 * n
+    nphi = 4 * n
+    dr = (Ro - Ri) / nr
+    dtheta = 90.0 / ntheta
+    phi_start_deg = 90.0 / nphi
+    dphi = (90.0 - phi_start_deg) / nphi
 
-    bdf.mat1(mid, E, None, NU, RHO)
-    bdf.psolid(pid, mid)
-    bdf.blank()
-
-    nr = 2 * n  # radial layers
-    ntheta = 3 * n  # azimuth divisions  (theta: 0 -> pi/2)
-    nphi = 3 * n  # polar divisions    (phi: phi_start -> pi/2)
-
-    # phi range: start one step from the pole to avoid sin(phi)=0 degeneracy.
-    # phi_start = pi/2/nphi  (one full grid spacing from pole)
-    phi_start = math.pi / 2 / nphi
-    phi_end = math.pi / 2  # equatorial plane (z=0)
-
-    def sph2cart(r, theta, phi):
-        return (
-            r * math.sin(phi) * math.cos(theta),
-            r * math.sin(phi) * math.sin(theta),
-            r * math.cos(phi),
+    for distorted in active_mesh_variants(name):
+        bdf = BDFWriter(
+            f"Pressurized Sphere Octant {'Distorted ' if distorted else ''}n={n}",
+            sol=101,
         )
+        pid = bdf.new_pid()
+        mid = bdf.new_mid()
+        sph_cid = 20
+        bdf.comment(f"Sphere octant: Ri={Ri} Ro={Ro} p={p_int}")
+        bdf.comment(
+            "Nodes use CORD2S. The mesh is truncated one phi-step off the pole "
+            "to avoid CHEXA collapse; the cap face keeps only tangential DOFs fixed."
+        )
+        bdf.comment(f"ANALYTICAL: sigma_hoop(inner) = {sig_th_inner:.4f} MPa")
+        bdf.comment(f"ANALYTICAL: sigma_hoop(outer) = {sig_th_outer:.4f} MPa")
+        if distorted:
+            bdf.comment(
+                f"Distortion: boundary-preserving random perturbations, "
+                f"fraction={DISTORTION_FRACTION:.2f}, seed={DISTORTION_SEED}"
+            )
+        bdf.blank()
 
-    nids = {}
-    for ir in range(nr + 1):
-        r = Ri + (Ro - Ri) * ir / nr
-        for it in range(ntheta + 1):
-            theta = math.pi / 2 * it / ntheta
-            for ip in range(nphi + 1):
-                phi = phi_start + (phi_end - phi_start) * ip / nphi
+        bdf.mat1(mid, E, None, NU, RHO)
+        bdf.psolid(pid, mid)
+        bdf.cord2s(sph_cid, 0, (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0))
+        bdf.blank()
+
+        rng = distortion_rng(name, n, distorted)
+        nids = {}
+        for ir in range(nr + 1):
+            rho_base = Ri + ir * dr
+            rho = distorted_value(rho_base, dr, distorted and 0 < ir < nr, rng)
+            for it in range(ntheta + 1):
+                theta_base = it * dtheta
+                theta = distorted_value(
+                    theta_base, dtheta, distorted and 0 < it < ntheta, rng
+                )
+                for ip in range(nphi + 1):
+                    phi_base = phi_start_deg + ip * dphi
+                    phi = distorted_value(
+                        phi_base, dphi, distorted and 0 < ip < nphi, rng
+                    )
+                    nid = bdf.new_nid()
+                    nids[(ir, it, ip)] = nid
+                    bdf.grid(nid, rho, theta, phi, cp=sph_cid, cd=sph_cid)
+
+        inner_faces = []
+        for ir in range(nr):
+            for it in range(ntheta):
+                for ip in range(nphi):
+                    eid = bdf.new_eid()
+                    g1 = nids[(ir, it, ip)]
+                    g2 = nids[(ir, it, ip + 1)]
+                    g3 = nids[(ir, it + 1, ip + 1)]
+                    g4 = nids[(ir, it + 1, ip)]
+                    g5 = nids[(ir + 1, it, ip)]
+                    g6 = nids[(ir + 1, it, ip + 1)]
+                    g7 = nids[(ir + 1, it + 1, ip + 1)]
+                    g8 = nids[(ir + 1, it + 1, ip)]
+                    bdf.chexa(eid, pid, [g1, g2, g3, g4, g5, g6, g7, g8])
+                    if ir == 0:
+                        inner_faces.append((eid, g1, g3))
+
+        spc_sid = 2
+        theta0_nodes = [nids[(ir, 0, ip)] for ir in range(nr + 1) for ip in range(nphi + 1)]
+        thetamax_nodes = [
+            nids[(ir, ntheta, ip)] for ir in range(nr + 1) for ip in range(nphi + 1)
+        ]
+        equator_nodes = [
+            nids[(ir, it, nphi)] for ir in range(nr + 1) for it in range(ntheta + 1)
+        ]
+        cap_nodes = [nids[(ir, it, 0)] for ir in range(nr + 1) for it in range(ntheta + 1)]
+        bdf.spc1(spc_sid, "3", *theta0_nodes)
+        bdf.spc1(spc_sid, "3", *thetamax_nodes)
+        bdf.spc1(spc_sid, "2", *equator_nodes)
+        bdf.spc1(spc_sid, "23", *cap_nodes)
+
+        load_sid = 1
+        for eid, face_node1, face_node34 in inner_faces:
+            bdf.pload4(load_sid, eid, p_int, face_node1, face_node34)
+
+        bdf.write(os.path.join(out_dir, f"{file_stem(name, n, distorted)}.bdf"))
+    return name, sig_th_inner
+
+
+# ===========================================================================
+# CASE 14 — Thin Cylinder Shell Sector, Internal Pressure (CQUAD4, SOL 101)
+# ===========================================================================
+
+
+def case_cylinder_shell_pressure(n: int, out_dir: str):
+    """
+    Thin open-ended cylindrical shell sector under internal pressure.
+    Membrane solution:
+      sigma_theta = p*R/t
+      u_r         = p*R^2/(E*t)
+    Uniform thermal loading is added in a second subcase and should contribute
+    only alpha*dT*R to the radial displacement.
+    """
+    R = 100.0
+    t = 5.0
+    p_int = 10.0
+    Lz = 240.0
+    theta_span_deg = 30.0
+    sigma_theta = p_int * R / t
+    u_pressure = p_int * R**2 / (E * t)
+    u_thermal = THERMAL_ALPHA * THERMAL_DT * R
+    u_combined = u_pressure + u_thermal
+
+    name = "cylinder_shell_pressure"
+    RefSolutions.add(name, "Hoop stress (pressure only)", sigma_theta, "MPa", "p*R/t")
+    RefSolutions.add(
+        name, "Radial disp (pressure only)", u_pressure, "mm", "p*R^2/(E*t)"
+    )
+    RefSolutions.add(
+        name,
+        "Radial disp (pressure + thermal)",
+        u_combined,
+        "mm",
+        "p*R^2/(E*t) + alpha*dT*R",
+    )
+
+    ntheta = 6 * n
+    nz = 8 * n
+    dtheta = theta_span_deg / ntheta
+    dz = Lz / nz
+
+    for distorted in active_mesh_variants(name):
+        bdf = BDFWriter(
+            f"Cylinder Shell Pressure {'Distorted ' if distorted else ''}n={n}",
+            sol=101,
+        )
+        pid = bdf.new_pid()
+        mid = bdf.new_mid()
+        cyl_cid = 10
+        bdf.comment(f"Cylinder shell sector: R={R} t={t} p={p_int} Lz={Lz}")
+        bdf.comment(
+            "Open-ended membrane target: sigma_theta=pR/t, "
+            "u_r=pR^2/(E*t). Pressure subcase uses shell normals; "
+            "thermal subcase adds free expansion only."
+        )
+        if distorted:
+            bdf.comment(
+                f"Distortion: boundary-preserving random perturbations, "
+                f"fraction={DISTORTION_FRACTION:.2f}, seed={DISTORTION_SEED}"
+            )
+        bdf.blank()
+
+        bdf.mat1(mid, E, None, NU, RHO, THERMAL_ALPHA, 0.0)
+        bdf.pshell(pid, mid, t)
+        bdf.cord2c(cyl_cid, 0, (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0))
+        bdf.blank()
+
+        rng = distortion_rng(name, n, distorted)
+        nids = {}
+        for iz in range(nz + 1):
+            z_base = iz * dz
+            z = distorted_value(z_base, dz, distorted and 0 < iz < nz, rng)
+            for it in range(ntheta + 1):
+                theta_base = it * dtheta
+                theta = distorted_value(
+                    theta_base, dtheta, distorted and 0 < it < ntheta, rng
+                )
                 nid = bdf.new_nid()
-                nids[(ir, it, ip)] = nid
-                x, y, z = sph2cart(r, theta, phi)
-                bdf.grid(nid, x, y, z)
+                nids[(it, iz)] = nid
+                bdf.grid(nid, R, theta, z, cp=cyl_cid, cd=cyl_cid)
 
-    # CHEXA elements: radial direction is the extrusion axis (G1-G4 at ir, G5-G8 at ir+1)
-    # Within each constant-r face, wind (it,ip) -> (it,ip+1) -> (it+1,ip+1) -> (it+1,ip)
-    # This ordering gives positive Jacobians for the sphere geometry.
-    inner_eids = []
-    for ir in range(nr):
-        for it in range(ntheta):
-            for ip in range(nphi):
+        eids = []
+        for iz in range(nz):
+            for it in range(ntheta):
                 eid = bdf.new_eid()
-                bdf.chexa(
+                eids.append(eid)
+                bdf.cquad4(
                     eid,
                     pid,
-                    [
-                        nids[(ir, it, ip)],  # G1
-                        nids[(ir, it, ip + 1)],  # G2
-                        nids[(ir, it + 1, ip + 1)],  # G3
-                        nids[(ir, it + 1, ip)],  # G4
-                        nids[(ir + 1, it, ip)],  # G5
-                        nids[(ir + 1, it, ip + 1)],  # G6
-                        nids[(ir + 1, it + 1, ip + 1)],  # G7
-                        nids[(ir + 1, it + 1, ip)],  # G8
-                    ],
+                    nids[(it, iz)],
+                    nids[(it + 1, iz)],
+                    nids[(it + 1, iz + 1)],
+                    nids[(it, iz + 1)],
                 )
-                if ir == 0:
-                    inner_eids.append(eid)
 
-    spc_sid = 2
+        load_sid = 1
+        spc_sid = 2
+        temp_sid = 3
+        bdf.subcase(1, "PRESSURE ONLY", load_sid, spc_sid)
+        bdf.subcase(2, "PRESSURE + THERMAL", load_sid, spc_sid, temp_sid)
 
-    # theta=0 face (it=0): XZ plane, y=0 -> fix UY
-    bdf.spc1(
-        spc_sid,
-        "2",
-        *[nids[(ir, 0, ip)] for ir in range(nr + 1) for ip in range(nphi + 1)],
+        theta0_nodes = [nids[(0, iz)] for iz in range(nz + 1)]
+        thetamax_nodes = [nids[(ntheta, iz)] for iz in range(nz + 1)]
+        z0_nodes = [nids[(it, 0)] for it in range(ntheta + 1)]
+        # Shell symmetry on the radial cut faces needs both tangential
+        # displacement and circumferential rotation suppressed; otherwise the
+        # sector can hinge about the cylinder axis and lose the axisymmetric
+        # membrane response.
+        bdf.spc1(spc_sid, "2", *theta0_nodes)
+        bdf.spc1(spc_sid, "2", *thetamax_nodes)
+        bdf.spc1(spc_sid, "6", *theta0_nodes)
+        bdf.spc1(spc_sid, "6", *thetamax_nodes)
+        bdf.spc1(spc_sid, "3", *z0_nodes)
+
+        bdf.pload2(load_sid, p_int, *eids)
+        bdf.tempd(temp_sid, THERMAL_DT)
+
+        bdf.write(os.path.join(out_dir, f"{file_stem(name, n, distorted)}.bdf"))
+    return name, sigma_theta
+
+
+# ===========================================================================
+# CASE 15 — Thin Sphere Shell, Internal Pressure (CTRIA3, SOL 101)
+# ===========================================================================
+
+
+def case_sphere_shell_pressure(n: int, out_dir: str):
+    """
+    Thin full spherical shell under internal pressure.
+    Membrane solution:
+      sigma = p*R/(2*t)
+      u_r   = p*R^2*(1-nu)/(2*E*t)
+    Uniform thermal loading is added in a second subcase and should contribute
+    only alpha*dT*R to the radial displacement.
+
+    The mesh uses an octahedral subdivision projected onto the sphere so there
+    are no polar singularities or seam-folded elements.
+    """
+    R = 100.0
+    t = 5.0
+    p_int = 10.0
+    sigma_membrane = p_int * R / (2 * t)
+    u_pressure = p_int * R**2 * (1 - NU) / (2 * E * t)
+    u_thermal = THERMAL_ALPHA * THERMAL_DT * R
+    u_combined = u_pressure + u_thermal
+
+    name = "sphere_shell_pressure"
+    RefSolutions.add(
+        name, "Membrane stress (pressure only)", sigma_membrane, "MPa", "p*R/(2*t)"
+    )
+    RefSolutions.add(
+        name,
+        "Radial disp (pressure only)",
+        u_pressure,
+        "mm",
+        "p*R^2*(1-nu)/(2*E*t)",
+    )
+    RefSolutions.add(
+        name,
+        "Radial disp (pressure + thermal)",
+        u_combined,
+        "mm",
+        "p*R^2*(1-nu)/(2*E*t) + alpha*dT*R",
     )
 
-    # theta=pi/2 face (it=ntheta): YZ plane, x=0 -> fix UX
-    bdf.spc1(
-        spc_sid,
-        "1",
-        *[nids[(ir, ntheta, ip)] for ir in range(nr + 1) for ip in range(nphi + 1)],
+    subdiv = 4 * n
+
+    for distorted in active_mesh_variants(name):
+        bdf = BDFWriter(
+            f"Sphere Shell Pressure {'Distorted ' if distorted else ''}n={n}",
+            sol=101,
+        )
+        pid = bdf.new_pid()
+        mid = bdf.new_mid()
+        bdf.comment(f"Full sphere shell: R={R} t={t} p={p_int}")
+        bdf.comment(
+            "Octahedral subdivision projected to the sphere; shell normals are "
+            "oriented outward so PLOAD2 uses positive pressure for internal load."
+        )
+        bdf.comment(
+            "Three non-collinear translational restraints remove rigid-body "
+            "motion without introducing line constraints."
+        )
+        if distorted:
+            bdf.comment(
+                f"Distortion: tangential random perturbations projected back to "
+                f"the sphere, fraction={DISTORTION_FRACTION:.2f}, "
+                f"seed={DISTORTION_SEED}"
+            )
+        bdf.blank()
+
+        bdf.mat1(mid, E, None, NU, RHO, THERMAL_ALPHA, 0.0)
+        bdf.pshell(pid, mid, t)
+        bdf.blank()
+
+        base_vertices = [
+            (0.0, 0.0, 1.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (-1.0, 0.0, 0.0),
+            (0.0, -1.0, 0.0),
+            (0.0, 0.0, -1.0),
+        ]
+        base_faces = [
+            (0, 1, 2),
+            (0, 2, 3),
+            (0, 3, 4),
+            (0, 4, 1),
+            (5, 2, 1),
+            (5, 3, 2),
+            (5, 4, 3),
+            (5, 1, 4),
+        ]
+        north_key = tuple(round(v, 12) for v in base_vertices[0])
+        east_key = tuple(round(v, 12) for v in base_vertices[1])
+        north_equator_key = tuple(round(v, 12) for v in base_vertices[2])
+
+        unit_pos_by_key = {}
+        face_triangles = []
+
+        for ia, ib, ic in base_faces:
+            a = base_vertices[ia]
+            b = base_vertices[ib]
+            c = base_vertices[ic]
+            face_nodes = {}
+            for i in range(subdiv + 1):
+                for j in range(subdiv + 1 - i):
+                    k = subdiv - i - j
+                    blended = vec_add(
+                        vec_add(vec_scale(a, k / subdiv), vec_scale(b, i / subdiv)),
+                        vec_scale(c, j / subdiv),
+                    )
+                    unit = vec_normalize(blended)
+                    key = tuple(round(v, 12) for v in unit)
+                    unit_pos_by_key[key] = unit
+                    face_nodes[(i, j)] = key
+
+            for i in range(subdiv):
+                for j in range(subdiv - i):
+                    face_triangles.append(
+                        (
+                            face_nodes[(i, j)],
+                            face_nodes[(i + 1, j)],
+                            face_nodes[(i, j + 1)],
+                        )
+                    )
+                    if j < subdiv - i - 1:
+                        face_triangles.append(
+                            (
+                                face_nodes[(i + 1, j)],
+                                face_nodes[(i + 1, j + 1)],
+                                face_nodes[(i, j + 1)],
+                            )
+                        )
+
+        rng = distortion_rng(name, n, distorted)
+        char_len = math.pi * R / (2.0 * subdiv)
+        node_pos_by_key = {}
+        anchor_keys = {north_key, east_key, north_equator_key}
+        for key, unit in unit_pos_by_key.items():
+            pos = vec_scale(unit, R)
+            if distorted and key not in anchor_keys:
+                random_dir = (
+                    rng.uniform(-1.0, 1.0),
+                    rng.uniform(-1.0, 1.0),
+                    rng.uniform(-1.0, 1.0),
+                )
+                tangent1 = vec_sub(random_dir, vec_scale(unit, vec_dot(random_dir, unit)))
+                if vec_norm(tangent1) < 1e-10:
+                    tangent1 = vec_cross(unit, (1.0, 0.0, 0.0))
+                    if vec_norm(tangent1) < 1e-10:
+                        tangent1 = vec_cross(unit, (0.0, 1.0, 0.0))
+                tangent1 = vec_normalize(tangent1)
+                tangent2 = vec_normalize(vec_cross(unit, tangent1))
+                du = rng.uniform(-DISTORTION_FRACTION, DISTORTION_FRACTION) * char_len
+                dv = rng.uniform(-DISTORTION_FRACTION, DISTORTION_FRACTION) * char_len
+                pos = vec_add(pos, vec_add(vec_scale(tangent1, du), vec_scale(tangent2, dv)))
+                pos = vec_scale(vec_normalize(pos), R)
+            node_pos_by_key[key] = pos
+
+        node_id_by_key = {}
+        north_pole = None
+        east_equator = None
+        north_equator = None
+        for key in sorted(node_pos_by_key):
+            nid = bdf.new_nid()
+            node_id_by_key[key] = nid
+            x, y, z = node_pos_by_key[key]
+            bdf.grid(nid, x, y, z)
+            if key == north_key:
+                north_pole = nid
+            elif key == east_key:
+                east_equator = nid
+            elif key == north_equator_key:
+                north_equator = nid
+
+        eids = []
+        for tri_keys in face_triangles:
+            tri = [node_id_by_key[key] for key in tri_keys]
+            p1 = node_pos_by_key[tri_keys[0]]
+            p2 = node_pos_by_key[tri_keys[1]]
+            p3 = node_pos_by_key[tri_keys[2]]
+            normal = vec_cross(vec_sub(p2, p1), vec_sub(p3, p1))
+            centroid = vec_scale(vec_add(vec_add(p1, p2), p3), 1.0 / 3.0)
+            if vec_dot(normal, centroid) < 0.0:
+                tri[1], tri[2] = tri[2], tri[1]
+            eid = bdf.new_eid()
+            eids.append(eid)
+            bdf.ctria3(eid, pid, tri[0], tri[1], tri[2])
+
+        load_sid = 1
+        spc_sid = 2
+        temp_sid = 3
+        bdf.subcase(1, "PRESSURE ONLY", load_sid, spc_sid)
+        bdf.subcase(2, "PRESSURE + THERMAL", load_sid, spc_sid, temp_sid)
+
+        bdf.spc1(spc_sid, "123", north_pole)
+        bdf.spc1(spc_sid, "23", east_equator)
+        bdf.spc1(spc_sid, "3", north_equator)
+
+        bdf.pload2(load_sid, p_int, *eids)
+        bdf.tempd(temp_sid, THERMAL_DT)
+
+        bdf.write(os.path.join(out_dir, f"{file_stem(name, n, distorted)}.bdf"))
+    return name, sigma_membrane
+
+
+# ===========================================================================
+# CASE 16 — Thin Sphere Shell Octant, Internal Pressure (CTRIA3, SOL 101)
+# ===========================================================================
+
+
+def case_sphere_shell_segment_pressure(n: int, out_dir: str):
+    """
+    Thin spherical shell octant under internal pressure.
+    The mesh uses CORD2S for both geometry input and local output directions:
+      dof 1 = radial
+      dof 2 = polar (phi)
+      dof 3 = azimuthal (theta)
+    Symmetry planes are enforced by fixing the corresponding tangential local
+    displacement on each cut face.
+    """
+    R = 100.0
+    t = 5.0
+    p_int = 10.0
+    sigma_membrane = p_int * R / (2 * t)
+    u_pressure = p_int * R**2 * (1 - NU) / (2 * E * t)
+    u_thermal = THERMAL_ALPHA * THERMAL_DT * R
+    u_combined = u_pressure + u_thermal
+
+    name = "sphere_shell_segment_pressure"
+    RefSolutions.add(
+        name, "Membrane stress (pressure only)", sigma_membrane, "MPa", "p*R/(2*t)"
+    )
+    RefSolutions.add(
+        name,
+        "Radial disp (pressure only)",
+        u_pressure,
+        "mm",
+        "p*R^2*(1-nu)/(2*E*t)",
+    )
+    RefSolutions.add(
+        name,
+        "Radial disp (pressure + thermal)",
+        u_combined,
+        "mm",
+        "p*R^2*(1-nu)/(2*E*t) + alpha*dT*R",
     )
 
-    # phi=pi/2 face (ip=nphi): equatorial plane, z=0 -> fix UZ
-    bdf.spc1(
-        spc_sid,
-        "3",
-        *[nids[(ir, it, nphi)] for ir in range(nr + 1) for it in range(ntheta + 1)],
-    )
+    ntheta = 4 * n
+    nphi = 4 * n
+    dtheta = 90.0 / ntheta
+    dphi = 90.0 / nphi
 
-    # Near-pole cap face (ip=0): closest face to z-axis (phi=phi_start).
-    # By symmetry of the full sphere about the z-axis, UX=UY=0 on this face.
-    bdf.spc1(
-        spc_sid,
-        "12",
-        *[nids[(ir, it, 0)] for ir in range(nr + 1) for it in range(ntheta + 1)],
-    )
+    def sphere_point(theta_deg: float, phi_deg: float):
+        theta = math.radians(theta_deg)
+        phi = math.radians(phi_deg)
+        return (
+            R * math.sin(phi) * math.cos(theta),
+            R * math.sin(phi) * math.sin(theta),
+            R * math.cos(phi),
+        )
 
-    # Internal pressure on inner radial face (ir=0)
-    load_sid = 1
-    for eid in inner_eids:
-        bdf.pload4(load_sid, eid, p_int)
+    for distorted in active_mesh_variants(name):
+        bdf = BDFWriter(
+            f"Sphere Shell Segment Pressure {'Distorted ' if distorted else ''}n={n}",
+            sol=101,
+        )
+        pid = bdf.new_pid()
+        mid = bdf.new_mid()
+        sph_cid = 20
+        bdf.comment(f"Sphere shell octant: R={R} t={t} p={p_int}")
+        bdf.comment(
+            "Nodes use CORD2S. Theta=0 and theta=90 cut faces fix local dof 3; "
+            "the equator fixes local dof 2; the pole fixes local dofs 2 and 3."
+        )
+        bdf.comment(
+            "Shell normals are oriented outward so PLOAD2 uses positive "
+            "pressure for internal load."
+        )
+        if distorted:
+            bdf.comment(
+                f"Distortion: boundary-preserving angular perturbations, "
+                f"fraction={DISTORTION_FRACTION:.2f}, seed={DISTORTION_SEED}"
+            )
+        bdf.blank()
 
-    bdf.write(os.path.join(out_dir, f"{name}_n{n}.bdf"))
-    return name, sig_th_inner
+        bdf.mat1(mid, E, None, NU, RHO, THERMAL_ALPHA, 0.0)
+        bdf.pshell(pid, mid, t)
+        bdf.cord2s(sph_cid, 0, (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0))
+        bdf.blank()
+
+        rng = distortion_rng(name, n, distorted)
+        nids = {}
+        node_pos = {}
+
+        pole = bdf.new_nid()
+        nids[("pole", 0)] = pole
+        node_pos[pole] = sphere_point(0.0, 0.0)
+        bdf.grid(pole, R, 0.0, 0.0, cp=sph_cid, cd=sph_cid)
+
+        for ip in range(1, nphi + 1):
+            phi_base = ip * dphi
+            phi = distorted_value(phi_base, dphi, distorted and 0 < ip < nphi, rng)
+            for it in range(ntheta + 1):
+                theta_base = it * dtheta
+                theta = distorted_value(
+                    theta_base,
+                    dtheta,
+                    distorted and 0 < ip < nphi and 0 < it < ntheta,
+                    rng,
+                )
+                nid = bdf.new_nid()
+                nids[(it, ip)] = nid
+                node_pos[nid] = sphere_point(theta, phi)
+                bdf.grid(nid, R, theta, phi, cp=sph_cid, cd=sph_cid)
+
+        eids = []
+
+        def add_oriented_tri(n1: int, n2: int, n3: int):
+            tri = [n1, n2, n3]
+            p1 = node_pos[n1]
+            p2 = node_pos[n2]
+            p3 = node_pos[n3]
+            normal = vec_cross(vec_sub(p2, p1), vec_sub(p3, p1))
+            centroid = vec_scale(vec_add(vec_add(p1, p2), p3), 1.0 / 3.0)
+            if vec_dot(normal, centroid) < 0.0:
+                tri[1], tri[2] = tri[2], tri[1]
+            eid = bdf.new_eid()
+            eids.append(eid)
+            bdf.ctria3(eid, pid, tri[0], tri[1], tri[2])
+
+        for it in range(ntheta):
+            add_oriented_tri(pole, nids[(it + 1, 1)], nids[(it, 1)])
+
+        for ip in range(1, nphi):
+            for it in range(ntheta):
+                n00 = nids[(it, ip)]
+                n10 = nids[(it + 1, ip)]
+                n01 = nids[(it, ip + 1)]
+                n11 = nids[(it + 1, ip + 1)]
+                add_oriented_tri(n00, n10, n01)
+                add_oriented_tri(n10, n11, n01)
+
+        load_sid = 1
+        spc_sid = 2
+        temp_sid = 3
+        bdf.subcase(1, "PRESSURE ONLY", load_sid, spc_sid)
+        bdf.subcase(2, "PRESSURE + THERMAL", load_sid, spc_sid, temp_sid)
+
+        theta0_nodes = [nids[(0, ip)] for ip in range(1, nphi + 1)]
+        theta90_nodes = [nids[(ntheta, ip)] for ip in range(1, nphi + 1)]
+        equator_nodes = [nids[(it, nphi)] for it in range(ntheta + 1)]
+
+        bdf.spc1(spc_sid, "3", *theta0_nodes)
+        bdf.spc1(spc_sid, "3", *theta90_nodes)
+        bdf.spc1(spc_sid, "2", *equator_nodes)
+        bdf.spc1(spc_sid, "23", pole)
+
+        bdf.pload2(load_sid, p_int, *eids)
+        bdf.tempd(temp_sid, THERMAL_DT)
+
+        bdf.write(os.path.join(out_dir, f"{file_stem(name, n, distorted)}.bdf"))
+    return name, sigma_membrane
 
 
 # ===========================================================================
@@ -1662,6 +2341,7 @@ CASES = {
     "ss_plate_pressure": case_ss_plate_pressure,
     "plate_hole": case_plate_hole,
     "cylinder_pressure": case_cylinder_pressure,
+    "cylinder_shell_pressure": case_cylinder_shell_pressure,
     "cylinder_torsion": case_cylinder_torsion,
     "rbe2_cantilever": case_rbe2_cantilever,
     "rbe3_distribution": case_rbe3_distribution,
@@ -1669,6 +2349,18 @@ CASES = {
     "ss_beam_modes": case_ss_beam_modes,
     "clamped_plate_modes": case_clamped_plate_modes,
     "sphere_pressure": case_sphere_pressure,
+    "sphere_shell_pressure": case_sphere_shell_pressure,
+    "sphere_shell_segment_pressure": case_sphere_shell_segment_pressure,
+}
+
+DISTORTABLE_CASES = {
+    "ss_plate_pressure",
+    "cylinder_pressure",
+    "sphere_pressure",
+    "cylinder_shell_pressure",
+    "clamped_plate_modes",
+    "sphere_shell_pressure",
+    "sphere_shell_segment_pressure",
 }
 
 
@@ -1694,6 +2386,30 @@ def main():
         default="test_cases",
         help="Output directory (default: test_cases/)",
     )
+    parser.add_argument(
+        "--mesh-variant",
+        choices=["regular", "distorted", "both"],
+        default="regular",
+        help=(
+            "Generate the regular mesh, a distorted variant, or both "
+            "(supported cases only; default: regular)"
+        ),
+    )
+    parser.add_argument(
+        "--distortion-fraction",
+        type=float,
+        default=0.30,
+        help=(
+            "Maximum random perturbation as a fraction of the local parametric "
+            "grid spacing for distorted meshes (default: 0.30)"
+        ),
+    )
+    parser.add_argument(
+        "--distortion-seed",
+        type=int,
+        default=12345,
+        help="Base random seed for distorted meshes (default: 12345)",
+    )
     args = parser.parse_args()
 
     if args.list:
@@ -1709,17 +2425,55 @@ def main():
         print("Run with --list to see available cases.")
         sys.exit(1)
 
+    unsupported = [c for c in selected if c not in DISTORTABLE_CASES]
+    if args.mesh_variant == "distorted" and unsupported:
+        print(
+            "Mesh distortion is currently only supported for: "
+            + ", ".join(sorted(DISTORTABLE_CASES))
+        )
+        print(f"Unsupported with --mesh-variant {args.mesh_variant}: {unsupported}")
+        sys.exit(1)
+    if args.mesh_variant == "both" and unsupported:
+        print(
+            "Mesh distortion is currently only supported for: "
+            + ", ".join(sorted(DISTORTABLE_CASES))
+        )
+        print(f"Unsupported with --mesh-variant {args.mesh_variant}: {unsupported}")
+        print("Continuing: unsupported cases will be generated with regular meshes only.")
+        print()
+
+    if args.distortion_fraction < 0.0 or args.distortion_fraction >= 0.5:
+        print("--distortion-fraction must satisfy 0.0 <= value < 0.5")
+        sys.exit(1)
+
+    global MESH_VARIANT
+    global DISTORTION_FRACTION
+    global DISTORTION_SEED
+    MESH_VARIANT = args.mesh_variant
+    DISTORTION_FRACTION = args.distortion_fraction
+    DISTORTION_SEED = args.distortion_seed
+
     os.makedirs(args.out, exist_ok=True)
 
-    print(f"Generating {len(selected)} case(s) with n={args.n} into '{args.out}/'")
+    print(
+        f"Generating {len(selected)} case(s) with n={args.n} into '{args.out}/' "
+        f"(mesh variant: {args.mesh_variant})"
+    )
     print()
 
     for name in selected:
         fn = CASES[name]
         try:
             fn(args.n, args.out)
-            bdf_path = os.path.join(args.out, f"{name}_n{args.n}.bdf")
-            print(f"  [OK]  {bdf_path}")
+            if name in DISTORTABLE_CASES and args.mesh_variant != "regular":
+                for distorted in active_mesh_variants(name):
+                    bdf_path = os.path.join(
+                        args.out, f"{file_stem(name, args.n, distorted)}.bdf"
+                    )
+                    print(f"  [OK]  {bdf_path}")
+            else:
+                bdf_path = os.path.join(args.out, f"{name}_n{args.n}.bdf")
+                print(f"  [OK]  {bdf_path}")
         except Exception as exc:
             print(f"  [ERR] {name}: {exc}")
             raise

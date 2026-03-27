@@ -157,6 +157,14 @@ static double get_disp(const SolverResults& res, int node_id, int dof_0based) {
     throw std::runtime_error("Node not found in results");
 }
 
+static double get_subcase_disp(const SubCaseResults& sc, int node_id,
+                               int dof_0based) {
+    for (const auto& nd : sc.displacements)
+        if (nd.node.value == node_id) // cppcheck-suppress useStlAlgorithm
+            return nd.d[dof_0based];
+    throw std::runtime_error("Node not found in subcase results");
+}
+
 static const char* shellform_param(ShellFormulation formulation) {
     return (formulation == ShellFormulation::MITC4) ? "MITC4" : "MINDLIN";
 }
@@ -276,6 +284,82 @@ static std::string make_closed_tube_cantilever_bdf(
             << ",0.0,0.0,1.0\n";
     }
     bdf << "ENDDATA\n";
+
+    return bdf.str();
+}
+
+static std::string make_cylindrical_shell_pressure_sector_bdf(int ntheta,
+                                                              int nz) {
+    constexpr double R = 100.0;
+    constexpr double T = 5.0;
+    constexpr double P = 10.0;
+    constexpr double Lz = 240.0;
+    constexpr double theta_span_deg = 30.0;
+    constexpr double E = 200000.0;
+    constexpr double nu = 0.3;
+    constexpr double alpha = 1.2e-5;
+    constexpr double dT = 50.0;
+
+    const double dtheta = theta_span_deg / static_cast<double>(ntheta);
+    const double dz = Lz / static_cast<double>(nz);
+
+    auto nid = [ntheta](int it, int iz) {
+        return 1 + iz * (ntheta + 1) + it;
+    };
+    auto eid = [ntheta](int it, int iz) {
+        return 1 + iz * ntheta + it;
+    };
+
+    std::ostringstream bdf;
+    bdf << "SOL 101\n"
+        << "CEND\n"
+        << "SUBCASE 1\n"
+        << "  LABEL = PRESSURE ONLY\n"
+        << "  LOAD = 1\n"
+        << "  SPC = 2\n"
+        << "SUBCASE 2\n"
+        << "  LABEL = PRESSURE + THERMAL\n"
+        << "  LOAD = 1\n"
+        << "  SPC = 2\n"
+        << "  TEMPERATURE(LOAD) = 3\n"
+        << "BEGIN BULK\n"
+        << "MAT1,1," << E << ",," << nu << ",," << alpha << ",0.0\n"
+        << "PSHELL,1,1," << T << "\n"
+        << "CORD2C,10,0,0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.0,0.0\n";
+
+    for (int iz = 0; iz <= nz; ++iz) {
+        const double z = dz * static_cast<double>(iz);
+        for (int it = 0; it <= ntheta; ++it) {
+            const double theta = dtheta * static_cast<double>(it);
+            bdf << "GRID," << nid(it, iz) << ",10," << R << "," << theta
+                << "," << z << ",10\n";
+        }
+    }
+
+    for (int iz = 0; iz < nz; ++iz) {
+        for (int it = 0; it < ntheta; ++it) {
+            bdf << "CQUAD4," << eid(it, iz) << ",1,"
+                << nid(it, iz) << ","
+                << nid(it + 1, iz) << ","
+                << nid(it + 1, iz + 1) << ","
+                << nid(it, iz + 1) << "\n";
+        }
+    }
+
+    for (int iz = 0; iz <= nz; ++iz) {
+        bdf << "SPC1,2,2," << nid(0, iz) << "\n";
+        bdf << "SPC1,2,2," << nid(ntheta, iz) << "\n";
+        bdf << "SPC1,2,6," << nid(0, iz) << "\n";
+        bdf << "SPC1,2,6," << nid(ntheta, iz) << "\n";
+    }
+    for (int it = 0; it <= ntheta; ++it)
+        bdf << "SPC1,2,3," << nid(it, 0) << "\n";
+
+    for (int iz = 0; iz < nz; ++iz)
+        for (int it = 0; it < ntheta; ++it)
+            bdf << "PLOAD2,1," << P << "," << eid(it, iz) << "\n";
+    bdf << "TEMPD,3," << dT << "\n"
+        << "ENDDATA\n";
 
     return bdf.str();
 }
@@ -1584,6 +1668,69 @@ ENDDATA
     double stress_tol = 0.01 * ps_mpc->von_mises;
     EXPECT_NEAR(ps_mpc->von_mises, ps_cd->von_mises, stress_tol)
         << "von Mises: mpc=" << ps_mpc->von_mises << " cd=" << ps_cd->von_mises;
+}
+
+// ── Test 15: Cylindrical shell pressure sector stays axisymmetric ───────────
+// A 30° shell sector of an open-ended cylinder is defined in CORD2C and
+// loaded with PLOAD2 pressure. The cut faces are symmetry planes, so the shell
+// needs both u_θ=0 and rotation about the cylinder axis fixed there; without
+// the rotational constraint the sector can hinge about the cut edges and the
+// reported radial displacement is badly non-uniform.
+TEST(Integration, CylindricalShellPressureSectorAxisymmetric) {
+    constexpr int NTHETA = 6;
+    constexpr int NZ = 8;
+    constexpr double R = 100.0;
+    constexpr double T = 5.0;
+    constexpr double P = 10.0;
+    constexpr double E = 200000.0;
+    constexpr double nu = 0.3;
+    constexpr double alpha = 1.2e-5;
+    constexpr double dT = 50.0;
+    constexpr double Lz = 240.0;
+
+    auto nid = [](int it, int iz) {
+        return 1 + iz * (NTHETA + 1) + it;
+    };
+
+    const SolverResults res =
+        run_analysis(make_cylindrical_shell_pressure_sector_bdf(NTHETA, NZ));
+    ASSERT_EQ(res.subcases.size(), 2u);
+
+    const SubCaseResults& pressure = res.subcases[0];
+    const SubCaseResults& combined = res.subcases[1];
+
+    const double expected_ur_pressure = P * R * R / (E * T);
+    const double expected_ur_combined = expected_ur_pressure + alpha * dT * R;
+    const double expected_eps_z_pressure = -nu * P * R / (E * T);
+    const double expected_eps_z_combined = expected_eps_z_pressure + alpha * dT;
+
+    for (int iz = 0; iz <= NZ; ++iz) {
+        const double z = Lz * static_cast<double>(iz) / NZ;
+        const double ref_ur_pressure = get_subcase_disp(pressure, nid(0, iz), 0);
+        const double ref_ur_combined = get_subcase_disp(combined, nid(0, iz), 0);
+
+        EXPECT_NEAR(ref_ur_pressure, expected_ur_pressure, 5e-4);
+        EXPECT_NEAR(ref_ur_combined, expected_ur_combined, 5e-4);
+        EXPECT_NEAR(get_subcase_disp(pressure, nid(NTHETA / 2, iz), 2),
+                    expected_eps_z_pressure * z, 1e-4);
+        EXPECT_NEAR(get_subcase_disp(combined, nid(NTHETA / 2, iz), 2),
+                    expected_eps_z_combined * z, 1e-4);
+
+        for (int it = 0; it <= NTHETA; ++it) {
+            EXPECT_NEAR(get_subcase_disp(pressure, nid(it, iz), 0),
+                        ref_ur_pressure, 1e-9)
+                << "pressure-only radial displacement should be uniform at z row "
+                << iz;
+            EXPECT_NEAR(get_subcase_disp(combined, nid(it, iz), 0),
+                        ref_ur_combined, 1e-9)
+                << "combined radial displacement should be uniform at z row "
+                << iz;
+            EXPECT_NEAR(get_subcase_disp(pressure, nid(it, iz), 1), 0.0, 1e-9)
+                << "pressure-only tangential displacement should vanish";
+            EXPECT_NEAR(get_subcase_disp(combined, nid(it, iz), 1), 0.0, 1e-9)
+                << "combined tangential displacement should vanish";
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

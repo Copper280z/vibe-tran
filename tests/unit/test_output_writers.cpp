@@ -647,6 +647,67 @@ ENDDATA
     EXPECT_TRUE(sc2.stress_plot);
 }
 
+TEST(BdfParser, GlobalOutputFlagsInheritedByExplicitSubcases) {
+    const std::string bdf = R"(
+SOL 101
+CEND
+DISPLACEMENT(PRINT,SORT1,REAL) = ALL
+STRESS(PRINT,SORT1,REAL,VONMISES,BILIN) = ALL
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+SUBCASE 2
+  LOAD = 2
+  SPC  = 1
+  STRESS = NONE
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.analysis.subcases.size(), 2u);
+
+    const auto& sc1 = m.analysis.subcases[0];
+    EXPECT_TRUE(sc1.disp_print);
+    EXPECT_FALSE(sc1.disp_plot);
+    EXPECT_TRUE(sc1.stress_print);
+    EXPECT_FALSE(sc1.stress_plot);
+
+    const auto& sc2 = m.analysis.subcases[1];
+    EXPECT_TRUE(sc2.disp_print);
+    EXPECT_FALSE(sc2.disp_plot);
+    EXPECT_FALSE(sc2.stress_print);
+    EXPECT_FALSE(sc2.stress_plot);
+}
+
+TEST(BdfParser, GlobalLoadAndSpcDefaultsAreInheritedBySubcases) {
+    const std::string bdf = R"(
+SOL 101
+CEND
+LOAD = 7
+SPC  = 9
+DISPLACEMENT = ALL
+SUBCASE 1
+  LABEL = INHERITS DEFAULTS
+SUBCASE 2
+  LABEL = OVERRIDES LOAD ONLY
+  LOAD = 11
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.analysis.subcases.size(), 2u);
+
+    const auto& sc1 = m.analysis.subcases[0];
+    EXPECT_EQ(sc1.load_set.value, 7);
+    EXPECT_EQ(sc1.spc_set.value, 9);
+    EXPECT_TRUE(sc1.disp_print);
+
+    const auto& sc2 = m.analysis.subcases[1];
+    EXPECT_EQ(sc2.load_set.value, 11);
+    EXPECT_EQ(sc2.spc_set.value, 9);
+    EXPECT_TRUE(sc2.disp_print);
+}
+
 // ── BdfParser: PARAM,CSVOUT,YES ───────────────────────────────────────────────
 
 TEST(BdfParser, ParamCsvoutYes) {

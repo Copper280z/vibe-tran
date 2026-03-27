@@ -147,8 +147,26 @@ Model BdfParser::parse_stream(std::istream &in) {
   // ── Parse case control (lines before BEGIN BULK) ─────────────────────────
   {
     // Simple tokenizer for case control
+    SubCase global_sc;
     SubCase cur_sc;
     bool in_sc = false;
+
+    auto current_subcase = [&]() -> SubCase& {
+      return in_sc ? cur_sc : global_sc;
+    };
+
+    auto has_case_control_entries = [](const SubCase& sc) {
+      return !sc.label.empty() ||
+             sc.load_set.value != 0 ||
+             sc.spc_set.value != 0 ||
+             sc.mpc_set.value != 0 ||
+             sc.temp_load_set != 0 ||
+             sc.t_ref != 0.0 ||
+             sc.disp_print || sc.disp_plot ||
+             sc.stress_print || sc.stress_plot ||
+             sc.eigrl_id != 0 ||
+             sc.eigvec_print || sc.eigvec_plot;
+    };
 
     for (int i = 0; i < begin_bulk_line; ++i) {
       std::string upper = lines[i];
@@ -169,7 +187,9 @@ Model BdfParser::parse_stream(std::istream &in) {
       if (kw.starts_with("SUBCASE")) {
         if (in_sc)
           ctx.model.analysis.subcases.push_back(cur_sc);
-        cur_sc = SubCase{};
+        cur_sc = global_sc;
+        cur_sc.id = 1;
+        cur_sc.label.clear();
         in_sc = true;
         // Parse ID
         size_t eq = kw.find('=');
@@ -189,36 +209,42 @@ Model BdfParser::parse_stream(std::istream &in) {
           }
         }
       } else if (kw.starts_with("LOAD")) {
+        SubCase& sc = current_subcase();
         size_t eq = kw.find('=');
         if (eq != std::string::npos)
           try {
-            cur_sc.load_set = LoadSetId(std::stoi(kw.substr(eq + 1)));
+            sc.load_set = LoadSetId(std::stoi(kw.substr(eq + 1)));
           } catch (...) {
           }
       } else if (kw.starts_with("MPC") && kw.find('=') != std::string::npos
                  && !kw.starts_with("MPCADD")) {
+        SubCase& sc = current_subcase();
         size_t eq = kw.find('=');
         try {
-          cur_sc.mpc_set = MpcSetId(std::stoi(kw.substr(eq + 1)));
+          sc.mpc_set = MpcSetId(std::stoi(kw.substr(eq + 1)));
         } catch (...) {}
       } else if (kw.starts_with("SPC") && !kw.starts_with("SPCADD")) {
+        SubCase& sc = current_subcase();
         size_t eq = kw.find('=');
         if (eq != std::string::npos)
           try {
-            cur_sc.spc_set = SpcSetId(std::stoi(kw.substr(eq + 1)));
+            sc.spc_set = SpcSetId(std::stoi(kw.substr(eq + 1)));
           } catch (...) {
           }
       } else if (kw.starts_with("LABEL")) {
+        SubCase& sc = current_subcase();
         size_t eq = kw.find('=');
         if (eq != std::string::npos)
-          cur_sc.label = kw.substr(eq + 1);
+          sc.label = kw.substr(eq + 1);
       } else if (kw.starts_with("TEMP(LOAD)") || kw.starts_with("TEMPERATURE(LOAD)")) {
+        SubCase& sc = current_subcase();
         size_t eq = kw.find('=');
         if (eq != std::string::npos)
-          try { cur_sc.temp_load_set = std::stoi(kw.substr(eq + 1)); } catch (...) {}
+          try { sc.temp_load_set = std::stoi(kw.substr(eq + 1)); } catch (...) {}
       } else if (kw.starts_with("TEMP(INIT)") || kw.starts_with("TEMPERATURE(INIT)")) {
         // Not used yet but consume gracefully
       } else if (kw.starts_with("DISPLACEMENT")) {
+        SubCase& sc = current_subcase();
         // Syntax: DISPLACEMENT[(PRINT[,PLOT])] = ALL|NONE|<set_id>
         // PRINT → F06/CSV output; PLOT → OP2 output.
         // No modifier is equivalent to PRINT (MSC Nastran default).
@@ -229,28 +255,30 @@ Model BdfParser::parse_stream(std::istream &in) {
           size_t ns = val.find_first_not_of(" \t");
           if (ns != std::string::npos) val = val.substr(ns);
           if (val.starts_with("NONE")) {
-            cur_sc.disp_print = false;
-            cur_sc.disp_plot  = false;
+            sc.disp_print = false;
+            sc.disp_plot  = false;
           } else {
             // Parse modifier list between '(' and ')'
             size_t lp = kw.find('(');
             size_t rp = kw.find(')');
             if (lp != std::string::npos && rp != std::string::npos && rp > lp) {
               std::string mods = kw.substr(lp + 1, rp - lp - 1);
-              if (mods.find("PRINT") != std::string::npos) cur_sc.disp_print = true;
-              if (mods.find("PLOT")  != std::string::npos) cur_sc.disp_plot  = true;
+              if (mods.find("PRINT") != std::string::npos) sc.disp_print = true;
+              if (mods.find("PLOT")  != std::string::npos) sc.disp_plot  = true;
             } else {
               // No modifier list → PRINT (text) output only
-              cur_sc.disp_print = true;
+              sc.disp_print = true;
             }
           }
         }
       } else if (kw.starts_with("METHOD")) {
+        SubCase& sc = current_subcase();
         // METHOD = <sid>  — references an EIGRL card SID
         size_t eq = kw.find('=');
         if (eq != std::string::npos)
-          try { cur_sc.eigrl_id = std::stoi(kw.substr(eq + 1)); } catch (...) {}
+          try { sc.eigrl_id = std::stoi(kw.substr(eq + 1)); } catch (...) {}
       } else if (kw.starts_with("EIGENVECTOR") || kw.starts_with("VECTOR")) {
+        SubCase& sc = current_subcase();
         // EIGENVECTOR[(PRINT[,PLOT])] = ALL
         // VECTOR is an alias for EIGENVECTOR
         size_t eq = kw.find('=');
@@ -263,14 +291,15 @@ Model BdfParser::parse_stream(std::istream &in) {
             size_t rp = kw.find(')');
             if (lp != std::string::npos && rp != std::string::npos && rp > lp) {
               std::string mods = kw.substr(lp + 1, rp - lp - 1);
-              if (mods.find("PRINT") != std::string::npos) cur_sc.eigvec_print = true;
-              if (mods.find("PLOT")  != std::string::npos) cur_sc.eigvec_plot  = true;
+              if (mods.find("PRINT") != std::string::npos) sc.eigvec_print = true;
+              if (mods.find("PLOT")  != std::string::npos) sc.eigvec_plot  = true;
             } else {
-              cur_sc.eigvec_print = true;
+              sc.eigvec_print = true;
             }
           }
         }
       } else if (kw.starts_with("STRESS") || kw.starts_with("STRAIN")) {
+        SubCase& sc = current_subcase();
         // Syntax: STRESS[(PRINT[,PLOT])] = ALL|NONE|<set_id>
         size_t eq = kw.find('=');
         if (eq != std::string::npos) {
@@ -278,17 +307,17 @@ Model BdfParser::parse_stream(std::istream &in) {
           size_t ns = val.find_first_not_of(" \t");
           if (ns != std::string::npos) val = val.substr(ns);
           if (val.starts_with("NONE")) {
-            cur_sc.stress_print = false;
-            cur_sc.stress_plot  = false;
+            sc.stress_print = false;
+            sc.stress_plot  = false;
           } else {
             size_t lp = kw.find('(');
             size_t rp = kw.find(')');
             if (lp != std::string::npos && rp != std::string::npos && rp > lp) {
               std::string mods = kw.substr(lp + 1, rp - lp - 1);
-              if (mods.find("PRINT") != std::string::npos) cur_sc.stress_print = true;
-              if (mods.find("PLOT")  != std::string::npos) cur_sc.stress_plot  = true;
+              if (mods.find("PRINT") != std::string::npos) sc.stress_print = true;
+              if (mods.find("PLOT")  != std::string::npos) sc.stress_plot  = true;
             } else {
-              cur_sc.stress_print = true;
+              sc.stress_print = true;
             }
           }
         }
@@ -309,17 +338,16 @@ Model BdfParser::parse_stream(std::istream &in) {
     if (in_sc)
       ctx.model.analysis.subcases.push_back(cur_sc);
     if (ctx.model.analysis.subcases.empty()) {
-      // No SUBCASE block: global case control entries were collected in cur_sc.
+      // No SUBCASE block: global case control entries were collected in global_sc.
       // Promote them as subcase 1 so METHOD, SPC, LOAD, etc. take effect.
-      if (cur_sc.id == 1 && cur_sc.label.empty())
-        cur_sc.label = "DEFAULT";
-      if (cur_sc.spc_set.value == 0 && cur_sc.eigrl_id == 0 &&
-          cur_sc.load_set.value == 0) {
+      if (global_sc.id == 1 && global_sc.label.empty())
+        global_sc.label = "DEFAULT";
+      if (!has_case_control_entries(global_sc)) {
         // Truly empty — fall back to old default
         ctx.model.analysis.subcases.push_back(
             SubCase{1, "DEFAULT", LoadSetId{1}, SpcSetId{1}});
       } else {
-        ctx.model.analysis.subcases.push_back(cur_sc);
+        ctx.model.analysis.subcases.push_back(global_sc);
       }
     }
   }
