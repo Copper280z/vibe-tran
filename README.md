@@ -22,16 +22,16 @@ More coming soon. 84k elem/170k node hex mesh model solves in 2.6sec on M2 macbo
 vibestran/
 ├── include/
 │   ├── core/           # Matrix, DOF, Mesh data structures
-│   ├── elements/       # Element formulations (CQUAD4, CTRIA3, CHEXA, CTETRA, CPENTA)
+│   ├── elements/       # Shell, solid, beam, bush, spring, and lumped-mass elements
 │   ├── io/             # BDF/INP parsers, F06/OP2/CSV writers
-│   ├── solver/         # Solver backends and linear static analysis
+│   ├── solver/         # Solver backends and static/modal analysis
 │   └── utils/          # Logging, error handling
 ├── src/                # Implementations
 ├── tests/
 │   ├── unit/           # Unit tests per module
 │   ├── integration/    # Integration tests with hand-calculated solutions
 │   └── e2e/            # End-to-end analysis cases (BDF + expected JSON, run against vibestran binary)
-└── third_party/        # Eigen (header-only)
+└── third_party/        # Bundled third-party headers (for example Spectra)
 ```
 
 ## Design Principles
@@ -39,19 +39,24 @@ vibestran/
 - **Separation of concerns**: Parser, FE model, solver, and output are independent layers
 - **Extensibility**: New element types implement `ElementBase`; new solvers implement `SolverBackend`
 - **Modern C++20**: spans, ranges, strong types, error values over exceptions throughout
-- **Performance**: Hash maps are wonderful. TBB for parallel operations. Hardware acceleration via CUDA or Accelerate (eventually Vulkan). 
+- **Performance**: Hash maps are wonderful. Parallel assembly and sparse solves where available, with CUDA, Vulkan, and Apple Accelerate-backed sparse factorizations.
 
 ## Supported Features
 
-- **Elements**: CQUAD4, CTRIA3, CHEXA8, CHEXA20, CTETRA4, CTETRA10, CPENTA6
+- **Elements**: CQUAD4, CTRIA3, CHEXA8, CHEXA20, CTETRA4, CTETRA10, CPENTA6, CBAR, CBEAM, CBUSH, CELAS1, CELAS2, CMASS1, CMASS2
 - **Materials**: MAT1 (isotropic)
-- **Properties**: PSHELL, PSOLID
-- **Loads**: FORCE, MOMENT, TEMP (thermal), PLOAD, PLOAD2, PLOAD4
-  (`PLOAD1` is parsed but remains a stub until bar/beam elements are added)
+- **Properties**: PSHELL, PSOLID, PBAR, PBARL (`ROD`, `TUBE`, `BAR`), PBEAM, PBUSH (`K` section), PELAS, PMASS
+- **Loads**: FORCE, MOMENT, TEMP/TEMPD, PLOAD, PLOAD1 (CBAR/CBEAM), PLOAD2, PLOAD4, GRAV, ACCEL1
 - **Constraints**: SPC, SPC1, MPC, RBE2, RBE3
 - **Coordinate systems**: CORD1R/C/S, CORD2R/C/S
 - **Input formats**: Nastran BDF (`.bdf`) and CalculiX/Abaqus (`.inp`, experimental)
 - **Solutions**: SOL 101 (Linear Static), SOL 103 (Normal Modes / Modal Analysis)
+
+Notable current limitations:
+
+- `ACCEL` is parsed but not yet applied in the static solver.
+- PLOAD1 support is limited to CBAR and CBEAM.
+- Stress recovery is not yet implemented for CBAR, CBEAM, CBUSH, CELAS1/2, and CMASS1/2.
 
 ## SOL 103 — Normal Modes (Modal Analysis)
 
@@ -66,12 +71,17 @@ Eigensolvers are selected via `--backend`:
 
 | Backend | Eigensolver | Notes |
 |---|---|---|
-| `cpu` (default) | Spectra shift-and-invert | Sparse, memory-efficient |
+| `cpu` (default) | Spectra shift-and-invert + sparse direct solve | Uses Apple Accelerate on macOS when available, otherwise CHOLMOD/Eigen |
 | `cuda` / `cuda-pcg` | Implicitly Restarted Lanczos (IRL) with Rayleigh-Ritz refinement | GPU-accelerated; requires CUDA + cuDSS |
 
-The CUDA eigensolver uses cuDSS for the shift-and-invert linear solves inside the
-Lanczos iteration, then applies a Rayleigh-Ritz post-refinement step to improve
-accuracy of the converged eigenpairs.
+On macOS, the CPU modal path prefers Apple Accelerate for the shift-invert
+factorization and triangular solves used inside Spectra. The Accelerate sparse
+ordering can be controlled with `VIBESTRAN_ACCELERATE_ORDER=metis|amd|default`;
+the default is `metis`.
+
+The CUDA eigensolver uses cuDSS for the shift-and-invert linear solves inside
+the Lanczos iteration, then applies a Rayleigh-Ritz post-refinement step to
+improve accuracy of the converged eigenpairs.
 
 ## Building
 
@@ -80,6 +90,7 @@ meson setup build
 cd build
 ninja
 meson test
+ninja cppcheck
 ```
 
 Optional solver backends are detected automatically at configure time.
@@ -87,8 +98,9 @@ Optional solver backends are detected automatically at configure time.
 ## Usage
 
 ```
-vibestran [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg>]
-         [--cuda-single-precision] [--csv]
+vibestran [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg|cuda-pcg-mixed>]
+         [--cuda-precision=<fp32|fp64>] [--csv]
+         [--log-file=<path>]
          <input.bdf|input.inp> [output.f06]
 ```
 
@@ -114,7 +126,7 @@ See `include/io/inp_parser.hpp` for full details on design decisions and limitat
 | File | Format | Written when |
 |---|---|---|
 | `<stem>.f06` | F06 text | Always |
-| `<stem>.op2` | OP2 binary | Set via case control deck |
+| `<stem>.op2` | OP2 binary | Always |
 | `<stem>.node.csv` | Nodal results CSV | `--csv` flag or `PARAM,CSVOUT,YES` in BDF |
 | `<stem>.elem.csv` | Element results CSV | `--csv` flag or `PARAM,CSVOUT,YES` in BDF |
 
@@ -122,10 +134,18 @@ See `include/io/inp_parser.hpp` for full details on design decisions and limitat
 
 ### CPU — Cholesky (default)
 
-Eigen sparse Cholesky. Always available, no extra dependencies. Uses CHOLMOD or Apple Accelerate when available.
+Sparse direct CPU solve. Always available, no extra dependencies. Uses Apple
+Accelerate on macOS when available, SuiteSparse CHOLMOD when available on other
+platforms, and otherwise falls back to Eigen's simplicial factorizations.
 
 ```bash
 vibestran --backend=cpu model.bdf
+```
+
+On macOS, the Accelerate sparse ordering can be selected with:
+
+```bash
+VIBESTRAN_ACCELERATE_ORDER=metis vibestran --backend=cpu model.bdf
 ```
 
 ### CPU — PCG
@@ -159,12 +179,11 @@ shift-and-invert linear solver inside the IRL eigensolver for SOL 103.
 vibestran --backend=cuda model.bdf
 ```
 
-**Single-precision mode** halves GPU memory usage by downcasting to float32 before the
-solve and upcasting the result. Useful for very large models that exhaust device memory
-even with hybrid mode. Applies to both `--backend=cuda` and `--backend=cuda-pcg`:
+The cuDSS direct backend also supports a float32 solve path for reduced VRAM
+usage:
 
 ```bash
-vibestran --backend=cuda --cuda-single-precision model.bdf
+vibestran --backend=cuda --cuda-precision=fp32 model.bdf
 ```
 
 #### Installing cuDSS (Ubuntu 24.04)
@@ -188,12 +207,6 @@ for cuDSS even with hybrid host/device memory mode. This is slower than the cuDS
 vibestran --backend=cuda-pcg model.bdf
 ```
 
-**Single-precision mode** halves VRAM usage by performing the entire PCG solve in float32:
-
-```bash
-vibestran --backend=cuda-pcg --cuda-single-precision model.bdf
-```
-
 Requires CUDA toolkit ≥ 11 with cuBLAS and cuSPARSE (both included in the standard toolkit).
 
 ### Vulkan - Experimental
@@ -209,8 +222,9 @@ vibestran --backend=vulkan model.bdf
 | Dependency | Required | Purpose |
 |---|---|---|
 | C++20 compiler (GCC 11+, Clang 13+) | Yes | |
-| Eigen 3.4 | Yes | CPU sparse Cholesky, matrix assembly |
-| TBB | Yes | Parallel element assembly |
+| Eigen 3.4+ | Yes | Core linear algebra and sparse CPU backends |
+| Spectra | Yes | CPU generalized eigensolver for SOL 103 |
+| TBB | No | Optional parallel execution support |
 | Google Test | Yes (tests) | Fetched by Meson WrapDB |
 | CUDA toolkit ≥ 11 + cuDSS ≥ 0.7 | No | CUDA backend |
 | Vulkan SDK + glslc + xxd | No | Vulkan backend |
