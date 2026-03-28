@@ -30,7 +30,6 @@ static VulkanSolverConfig gpu_test_cfg() {
 
 class VulkanTest : public ::testing::Test {
 protected:
-    // cppcheck-suppress unusedFunction -- called by GTest framework
     void SetUp() override {
         backend_ = VulkanSolverBackend::try_create(gpu_test_cfg());
         if (!backend_.has_value())

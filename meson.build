@@ -333,6 +333,16 @@ endif
 # ── cppcheck ─────────────────────────────────────────────────────────────────
 cppcheck = find_program('cppcheck', required: false)
 if cppcheck.found()
+  cppcheck_suppressions = [
+    '--suppress=*:' + join_paths(meson.project_source_root(), 'third_party') + '/*',
+    '--suppress=*:' + join_paths(meson.project_source_root(), 'subprojects') + '/*',
+    '--suppress=*:/opt/homebrew/*',
+    '--suppress=*:/usr/local/*',
+    '--suppress=*:/usr/include/*',
+    '--suppress=*:/Library/Developer/CommandLineTools/*',
+    '--suppress=*:/Applications/Xcode.app/*',
+    '--suppress=*:*/lib/gcc/*',
+  ]
   run_target('cppcheck',
     command: [
       cppcheck,
@@ -344,6 +354,8 @@ if cppcheck.found()
       '--suppress=checkersReport',
       '--suppress=normalCheckLevelMaxBranches',
       '--suppress=checkLevelNormal',
+      '--suppress=unmatchedSuppression',
+      cppcheck_suppressions,
       # Optional: Add extra arguments
       # '--force', 
       # '-j', '4',
@@ -440,7 +452,11 @@ vibestran_exe = executable(
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 # Google Test
-gtest_dep = dependency('gtest', main : true, fallback : ['gtest', 'gtest_dep'])
+gtest_dep = dependency('gtest',
+  main         : true,
+  fallback     : ['gtest', 'gtest_dep'],
+  include_type : 'system',
+)
 
 # Unit tests
 unit_test_sources = files(

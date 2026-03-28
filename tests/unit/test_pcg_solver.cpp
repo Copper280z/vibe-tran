@@ -55,6 +55,20 @@ static SparseMatrixBuilder::CsrData make_diagonal(int n, double val) {
 
 class EigenPCGTest : public ::testing::Test {
 protected:
+    std::vector<double> solve(const SparseMatrixBuilder::CsrData& csr,
+                              const std::vector<double>& force) {
+        return pcg_.solve(csr, force);
+    }
+
+    int last_iteration_count() const {
+        return pcg_.last_iteration_count();
+    }
+
+    double last_estimated_error() const {
+        return pcg_.last_estimated_error();
+    }
+
+private:
     EigenPCGSolverBackend pcg_;
 };
 
@@ -70,13 +84,13 @@ TEST_F(EigenPCGTest, DiagonalSystemExactSolution) {
     auto csr = b.build_csr();
     std::vector<double> F = {8.0, 27.0};
 
-    auto u = pcg_.solve(csr, F);
+    auto u = solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u.size()), 2);
     EXPECT_NEAR(u[0], 2.0, 1e-9);
     EXPECT_NEAR(u[1], 3.0, 1e-9);
     // IC0 is exact for diagonal K, so CG converges in 0 or 1 iterations.
-    EXPECT_LE(pcg_.last_iteration_count(), 1)
+    EXPECT_LE(last_iteration_count(), 1)
         << "PCG with exact IC0 preconditioner should converge in at most 1 step";
 }
 
@@ -88,7 +102,7 @@ TEST_F(EigenPCGTest, TridiagonalAgreesWithDirectSolver) {
     auto csr = make_tridiagonal(n, 3.0, -1.0);
     std::vector<double> F(n, 1.0);
 
-    auto u_pcg = pcg_.solve(csr, F);
+    auto u_pcg = solve(csr, F);
 
     EigenSolverBackend direct;
     auto u_direct = direct.solve(csr, F);
@@ -115,7 +129,7 @@ TEST_F(EigenPCGTest, LargeBandedSpdAgreesWithDirect) {
     std::vector<double> F(n);
     for (int i = 0; i < n; ++i) F[i] = static_cast<double>((i % 7) + 1);
 
-    auto u_pcg = pcg_.solve(csr, F);
+    auto u_pcg = solve(csr, F);
 
     EigenSolverBackend direct;
     auto u_direct = direct.solve(csr, F);
@@ -125,7 +139,7 @@ TEST_F(EigenPCGTest, LargeBandedSpdAgreesWithDirect) {
         EXPECT_NEAR(u_pcg[i], u_direct[i], 1e-6)
             << "n=500 banded PCG: component " << i << " disagrees with direct solver";
 
-    EXPECT_LT(pcg_.last_estimated_error(), 1e-7)
+    EXPECT_LT(last_estimated_error(), 1e-7)
         << "PCG estimated error should be below tolerance";
 }
 
@@ -141,7 +155,7 @@ TEST_F(EigenPCGTest, StiffDiagonalDoesNotConvergeFalsely) {
     auto csr = make_diagonal(n, K_diag);
     std::vector<double> F(n, F_val);
 
-    auto u = pcg_.solve(csr, F);
+    auto u = solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u.size()), n);
     const double expected = F_val / K_diag;
@@ -156,7 +170,7 @@ TEST_F(EigenPCGTest, ZeroRhsReturnZeroDisplacement) {
     auto csr = make_tridiagonal(10, 3.0, -1.0);
     std::vector<double> F(10, 0.0);
 
-    auto u = pcg_.solve(csr, F);
+    auto u = solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u.size()), 10);
     for (int i = 0; i < 10; ++i)
@@ -169,11 +183,11 @@ TEST_F(EigenPCGTest, DiagnosticsPopulatedAfterSolve) {
     auto csr = make_tridiagonal(50, 4.0, -1.0);
     std::vector<double> F(50, 1.0);
 
-    (void)pcg_.solve(csr, F);
+    (void)solve(csr, F);
 
-    EXPECT_GE(pcg_.last_iteration_count(), 0)
+    EXPECT_GE(last_iteration_count(), 0)
         << "Iteration count should be non-negative after solve";
-    EXPECT_LT(pcg_.last_estimated_error(), 1e-7)
+    EXPECT_LT(last_estimated_error(), 1e-7)
         << "Estimated error should be below tolerance after convergence";
 }
 
@@ -188,7 +202,7 @@ TEST_F(EigenPCGTest, LargeTridiagonalConvergesWithinBound) {
     std::vector<double> F(n, 1.0);
 
     // Use default tolerance (1e-8); the test will throw if PCG doesn't converge.
-    auto u = pcg_.solve(csr, F);  // NOLINT — return value intentionally checked below
+    auto u = solve(csr, F);  // NOLINT — return value intentionally checked below
 
     ASSERT_EQ(static_cast<int>(u.size()), n);
 
@@ -203,7 +217,7 @@ TEST_F(EigenPCGTest, LargeTridiagonalConvergesWithinBound) {
 
     // IC0 preconditioned CG converges in O(sqrt(n)) iterations for 1D Laplacian.
     // Upper bound: n / 2 is extremely generous.
-    EXPECT_LT(pcg_.last_iteration_count(), n / 2)
+    EXPECT_LT(last_iteration_count(), n / 2)
         << "PCG iteration count unexpectedly high for 1D Laplacian with IC0";
 }
 

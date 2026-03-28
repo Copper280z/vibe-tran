@@ -3,18 +3,23 @@
 //
 // Default backend is the Eigen CPU solver.  Use --backend to select a GPU
 // solver when available:
-//   --backend=cpu               Eigen sparse Cholesky (always available, default)
+//   --backend=cpu               Eigen sparse Cholesky (always available,
+//   default)
 //   --backend=cpu-pcg           Eigen PCG + IncompleteCholesky (low memory)
-//   --backend=cuda              NVIDIA cuDSS sparse direct solver (requires CUDA)
+//   --backend=cuda              NVIDIA cuDSS sparse direct solver (requires
+//   CUDA)
 //                               For SOL 103 modal: uses the CUDA shift-invert
-//                               Lanczos eigensolver (requires cuDSS+cuBLAS+cuSPARSE)
-//   --backend=cuda-pcg          NVIDIA cuBLAS/cuSPARSE PCG (stable float64 path,
+//                               Lanczos eigensolver (requires
+//                               cuDSS+cuBLAS+cuSPARSE)
+//   --backend=cuda-pcg          NVIDIA cuBLAS/cuSPARSE PCG (stable float64
+//   path,
 //                               low memory, requires CUDA)
 //   --backend=cuda-pcg-mixed    NVIDIA mixed-precision PCG experiment
 //                               SOL 103 modal is not supported with
 //                               --backend=cuda-pcg-mixed.
 //   --backend=vulkan            Vulkan PCG (requires Vulkan SDK)
-//                               SOL 103 modal is not supported with --backend=vulkan.
+//                               SOL 103 modal is not supported with
+//                               --backend=vulkan.
 //   --cuda-precision=<fp32|fp64> Precision for the CUDA cuDSS direct solver.
 //
 // Thread control (CPU backends):
@@ -62,7 +67,15 @@
 #include <spdlog/spdlog.h>
 #include <string_view>
 
-enum class BackendChoice { Auto, Cpu, CpuPCG, Vulkan, Cuda, CudaPCG, CudaPCGMixed };
+enum class BackendChoice {
+  Auto,
+  Cpu,
+  CpuPCG,
+  Vulkan,
+  Cuda,
+  CudaPCG,
+  CudaPCGMixed
+};
 enum class CudaPrecisionChoice { Float64, Float32 };
 
 static void configure_eigen_threads() {
@@ -84,38 +97,38 @@ static void configure_eigen_threads() {
     spdlog::info("Eigen CPU threads: {} (from OMP_NUM_THREADS={})",
                  Eigen::nbThreads(), omp_threads_env);
   } else {
-    spdlog::info("Eigen CPU threads: {} (OpenMP default)",
-                 Eigen::nbThreads());
+    spdlog::info("Eigen CPU threads: {} (OpenMP default)", Eigen::nbThreads());
   }
 }
 
 static void print_usage() {
-  spdlog::error("Usage: vibestran "
-                "[--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg|cuda-pcg-mixed>]\n"
-                "                      [--cuda-precision=<fp32|fp64>] [--csv]\n"
-                "                      [--log-file=<path>]\n"
-                "                      <input.bdf|input.inp> [output.f06]\n"
-                "  --backend=cpu              Eigen sparse Cholesky CPU solver "
-                "(default)\n"
-                "  --backend=cpu-pcg          Eigen PCG + IncompleteCholesky "
-                "CPU solver (low memory)\n"
-                "  --backend=vulkan           Vulkan PCG GPU solver (requires "
-                "Vulkan; SOL 101 only)\n"
-                "  --backend=cuda             CUDA cuDSS direct solver "
-                "(requires CUDA; SOL 101 + SOL 103)\n"
-                "  --backend=cuda-pcg         CUDA PCG + IC0/ILU0 GPU solver "
-                "(stable float64 path; requires CUDA; SOL 101 + SOL 103)\n"
-                "  --backend=cuda-pcg-mixed   CUDA mixed-precision PCG + "
-                "iterative refinement experiment (requires CUDA; SOL 101 only)\n"
-                "  --cuda-precision=fp32|fp64 Precision for --backend=cuda "
-                "(default: fp64)\n"
-                "  --csv                      Write CSV output even if "
-                "PARAM,CSVOUT is not in the BDF\n"
-                "  --log-file=<path>          Also write all log output to "
-                "this file\n"
-                "  OMP_NUM_THREADS=N          Limit CPU solver threads, e.g.:\n"
-                "                             OMP_NUM_THREADS=8 vibestran "
-                "input.bdf\n");
+  spdlog::error(
+      "Usage: vibestran "
+      "[--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg|cuda-pcg-mixed>]\n"
+      "                      [--cuda-precision=<fp32|fp64>] [--csv]\n"
+      "                      [--log-file=<path>]\n"
+      "                      <input.bdf|input.inp> [output.f06]\n"
+      "  --backend=cpu              Eigen sparse Cholesky CPU solver "
+      "(default)\n"
+      "  --backend=cpu-pcg          Eigen PCG + IncompleteCholesky "
+      "CPU solver (low memory)\n"
+      "  --backend=vulkan           Vulkan PCG GPU solver (requires "
+      "Vulkan; SOL 101 only)\n"
+      "  --backend=cuda             CUDA cuDSS direct solver "
+      "(requires CUDA; SOL 101 + SOL 103)\n"
+      "  --backend=cuda-pcg         CUDA PCG + IC0/ILU0 GPU solver "
+      "(stable float64 path; requires CUDA; SOL 101 + SOL 103)\n"
+      "  --backend=cuda-pcg-mixed   CUDA mixed-precision PCG + "
+      "iterative refinement experiment (requires CUDA; SOL 101 only)\n"
+      "  --cuda-precision=fp32|fp64 Precision for --backend=cuda "
+      "(default: fp64)\n"
+      "  --csv                      Write CSV output even if "
+      "PARAM,CSVOUT is not in the BDF\n"
+      "  --log-file=<path>          Also write all log output to "
+      "this file\n"
+      "  OMP_NUM_THREADS=N          Limit CPU solver threads, e.g.:\n"
+      "                             OMP_NUM_THREADS=8 vibestran "
+      "input.bdf\n");
 }
 
 int main(int argc, const char *argv[]) {
@@ -131,7 +144,8 @@ int main(int argc, const char *argv[]) {
   for (int i = 1; i < argc; ++i) {
     std::string_view arg(argv[i]);
     if (arg.starts_with("--cuda-precision=")) {
-      std::string_view val = arg.substr(std::string_view("--cuda-precision=").size());
+      std::string_view val =
+          arg.substr(std::string_view("--cuda-precision=").size());
       if (val == "fp32")
         cuda_precision = CudaPrecisionChoice::Float32;
       else if (val == "fp64")
@@ -145,7 +159,8 @@ int main(int argc, const char *argv[]) {
     } else if (arg == "--csv") {
       force_csv = true;
     } else if (arg.starts_with("--log-file=")) {
-      log_file_path = std::string(arg.substr(std::string_view("--log-file=").size()));
+      log_file_path =
+          std::string(arg.substr(std::string_view("--log-file=").size()));
     } else if (arg.starts_with("--backend=")) {
       std::string_view val = arg.substr(std::string_view("--backend=").size());
       if (val == "cpu")
@@ -163,7 +178,9 @@ int main(int argc, const char *argv[]) {
       else {
         // init_logger with no file so error() goes somewhere
         vibestran::init_logger();
-        spdlog::error("Unknown backend '{}'. Valid: cpu, cpu-pcg, vulkan, cuda, cuda-pcg, cuda-pcg-mixed", val);
+        spdlog::error("Unknown backend '{}'. Valid: cpu, cpu-pcg, vulkan, "
+                      "cuda, cuda-pcg, cuda-pcg-mixed",
+                      val);
         print_usage();
         return 1;
       }
@@ -208,8 +225,8 @@ int main(int argc, const char *argv[]) {
     std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](unsigned char c) { return std::tolower(c); });
     vibestran::Model model = (ext == ".inp")
-        ? vibestran::InpParser::parse_file(bdf_path)
-        : vibestran::BdfParser::parse_file(bdf_path);
+                                 ? vibestran::InpParser::parse_file(bdf_path)
+                                 : vibestran::BdfParser::parse_file(bdf_path);
 
     spdlog::info("  Nodes:    {}", model.nodes.size());
     spdlog::info("  Elements: {}", model.elements.size());
@@ -224,11 +241,12 @@ int main(int argc, const char *argv[]) {
     } else if (backend_choice == BackendChoice::Cuda) {
 #ifdef HAVE_CUDA
       const auto precision = cuda_precision == CudaPrecisionChoice::Float32
-          ? vibestran::CudaSolverPrecision::Float32
-          : vibestran::CudaSolverPrecision::Float64;
+                                 ? vibestran::CudaSolverPrecision::Float32
+                                 : vibestran::CudaSolverPrecision::Float64;
       auto cu = vibestran::CudaSolverBackend::try_create(precision);
       if (cu.has_value()) {
-        backend = std::make_unique<vibestran::CudaSolverBackend>(std::move(*cu));
+        backend =
+            std::make_unique<vibestran::CudaSolverBackend>(std::move(*cu));
       } else {
         spdlog::error("CUDA backend requested but no CUDA device found");
         return 1;
@@ -255,10 +273,11 @@ int main(int argc, const char *argv[]) {
 #ifdef HAVE_CUDA
       auto cu = vibestran::CudaMixedPCGSolverBackend::try_create();
       if (cu.has_value()) {
-        backend =
-            std::make_unique<vibestran::CudaMixedPCGSolverBackend>(std::move(*cu));
+        backend = std::make_unique<vibestran::CudaMixedPCGSolverBackend>(
+            std::move(*cu));
       } else {
-        spdlog::error("CUDA mixed PCG backend requested but no CUDA device found");
+        spdlog::error(
+            "CUDA mixed PCG backend requested but no CUDA device found");
         return 1;
       }
 #else
@@ -311,8 +330,9 @@ int main(int argc, const char *argv[]) {
         return 1;
 #endif
       } else if (backend_choice == BackendChoice::CudaPCGMixed) {
-        spdlog::error("--backend=cuda-pcg-mixed is not supported for SOL 103 "
-                      "modal analysis; use --backend=cuda or --backend=cuda-pcg");
+        spdlog::error(
+            "--backend=cuda-pcg-mixed is not supported for SOL 103 "
+            "modal analysis; use --backend=cuda or --backend=cuda-pcg");
         return 1;
       } else if (backend_choice == BackendChoice::Vulkan) {
         spdlog::error("--backend=vulkan is not supported for SOL 103 modal "
