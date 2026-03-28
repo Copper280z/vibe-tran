@@ -59,6 +59,12 @@ private:
                               const MpcHandler& mpc_handler,
                               std::vector<double>& F);
 
+    /// Apply inertial loads (GRAV, ACCEL1) to F via MpcHandler
+    void apply_inertial_loads(const Model& model,
+                              const SubCase& sc,
+                              const MpcHandler& mpc_handler,
+                              std::vector<double>& F);
+
     /// Apply thermal loads to F via MpcHandler
     void apply_thermal_loads(const Model& model,
                              const SubCase& sc,

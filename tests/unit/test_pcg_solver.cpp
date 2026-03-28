@@ -55,7 +55,7 @@ static SparseMatrixBuilder::CsrData make_diagonal(int n, double val) {
 
 class EigenPCGTest : public ::testing::Test {
 protected:
-    EigenPCGSolverBackend pcg_;  // cppcheck-suppress unusedStructMember -- used by GTest TEST_F
+    EigenPCGSolverBackend pcg_;
 };
 
 // ── Test 1: 2×2 diagonal system — exact solution ──────────────────────────────

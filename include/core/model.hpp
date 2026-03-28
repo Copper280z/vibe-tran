@@ -61,7 +61,58 @@ struct PSolid {
   SolidFormulation isop{SolidFormulation::EAS};
 };
 
-using Property = std::variant<PShell, PSolid>;
+struct PBar {
+  PropertyId pid{0};
+  MaterialId mid{0};
+  double A{0.0};
+  double I1{0.0};
+  double I2{0.0};
+  double J{0.0};
+  double nsm{0.0};
+};
+
+struct PBarL {
+  PropertyId pid{0};
+  MaterialId mid{0};
+  std::string section_type;
+  std::vector<double> dimensions;
+  double A{0.0};
+  double I1{0.0};
+  double I2{0.0};
+  double J{0.0};
+  double nsm{0.0};
+};
+
+struct PBeam {
+  PropertyId pid{0};
+  MaterialId mid{0};
+  double A{0.0};
+  double I1{0.0};
+  double I2{0.0};
+  double I12{0.0};
+  double J{0.0};
+  double nsm{0.0};
+};
+
+struct PBush {
+  PropertyId pid{0};
+  std::array<double, 6> k{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+};
+
+struct PElas {
+  PropertyId pid{0};
+  double k{0.0};
+  double ge{0.0};
+  double s{0.0};
+};
+
+struct PMass {
+  PropertyId pid{0};
+  double mass{0.0};
+};
+
+using Property = std::variant<PShell, PSolid, PBar, PBarL, PBeam, PBush,
+                              PElas, PMass>;
 
 // ── Elements ─────────────────────────────────────────────────────────────────
 
@@ -73,6 +124,13 @@ enum class ElementType {
   CTETRA4,
   CTETRA10,
   CPENTA6,
+  CBAR,
+  CBEAM,
+  CBUSH,
+  CELAS1,
+  CELAS2,
+  CMASS1,
+  CMASS2,
 };
 
 struct ElementData {
@@ -83,6 +141,11 @@ struct ElementData {
   std::optional<double> theta{std::nullopt};
   std::optional<CoordId> mcid{std::nullopt};
   double zoffs{0.0};
+  std::optional<Vec3> orientation{std::nullopt};
+  std::optional<NodeId> g0{std::nullopt};
+  std::optional<CoordId> cid{std::nullopt};
+  std::array<int, 2> components{0, 0};
+  double value{0.0};
 };
 
 // ── Loads
@@ -161,8 +224,34 @@ struct Pload4Load {
   std::optional<NodeId> face_node34;
 };
 
+/// GRAV card: uniform translational acceleration applied to all mass.
+struct GravLoad {
+  LoadSetId sid{0};
+  CoordId cid{0};
+  double scale{0.0};
+  Vec3 direction{0.0, 0.0, 0.0};
+};
+
+/// ACCEL1 card: uniform translational acceleration applied to selected grids.
+struct Accel1Load {
+  LoadSetId sid{0};
+  CoordId cid{0};
+  double scale{0.0};
+  Vec3 direction{0.0, 0.0, 0.0};
+  std::vector<NodeId> nodes;
+};
+
+/// ACCEL card stub. Parsed so unsupported usage can fail explicitly.
+struct AccelLoad {
+  LoadSetId sid{0};
+  CoordId cid{0};
+  double scale{0.0};
+  Vec3 direction{0.0, 0.0, 0.0};
+};
+
 using Load = std::variant<ForceLoad, MomentLoad, TempLoad, PloadLoad,
-                          Pload1Load, Pload2Load, Pload4Load>;
+                          Pload1Load, Pload2Load, Pload4Load, GravLoad,
+                          Accel1Load, AccelLoad>;
 
 // ── Single point constraints
 // ──────────────────────────────────────────────────

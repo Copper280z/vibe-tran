@@ -11,6 +11,7 @@
 //     Fields not applicable to an element type are written as 0.0.
 
 #include "io/results.hpp"
+#include <algorithm>
 #include <fstream>
 #include <iomanip>
 #include <format>
@@ -22,13 +23,12 @@ void CsvWriter::write(const SolverResults& results, const Model& model,
     // Collect output flags per subcase
     auto get_flags = [&](int sc_id, bool& do_disp, bool& do_stress) {
         do_disp = do_stress = false;
-        for (const auto& msc : model.analysis.subcases) {
-            if (msc.id == sc_id) {
-                do_disp   = msc.disp_print;
-                do_stress = msc.stress_print;
-                return;
-            }
-        }
+        const auto it = std::find_if(
+            model.analysis.subcases.begin(), model.analysis.subcases.end(),
+            [&](const SubCase& sc) { return sc.id == sc_id; });
+        if (it == model.analysis.subcases.end()) return;
+        do_disp = it->disp_print;
+        do_stress = it->stress_print;
     };
 
     // ── Nodal CSV ─────────────────────────────────────────────────────────────

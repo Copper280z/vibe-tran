@@ -250,7 +250,7 @@ void cmd_dot_reduce_d(VkCommandBuffer cmd, const Pipelines& pl,
 }
 
 void cmd_axpby_d(VkCommandBuffer cmd, const Pipelines& pl,
-                 VkDescriptorSet ds, PCAxpbyD pc, uint32_t n) {
+                 VkDescriptorSet ds, const PCAxpbyD& pc, uint32_t n) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pl.pipeline[PL_AXPBY_D]);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                             pl.pl_layout[PL_AXPBY_D], 0, 1, &ds, 0, nullptr);

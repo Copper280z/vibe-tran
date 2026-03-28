@@ -146,7 +146,6 @@ Mat3 rotation_matrix(const CoordSys& cs, const Vec3& basic_pos) {
     return Mat3::identity(); // unreachable
 }
 
-// cppcheck-suppress unusedFunction -- called from linear_static.cpp
 Vec3 apply_rotation(const Mat3& M, const Vec3& v) {
     return Vec3{
         M(0,0)*v.x + M(0,1)*v.y + M(0,2)*v.z,

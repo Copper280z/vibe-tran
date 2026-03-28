@@ -2211,6 +2211,365 @@ TEST(Integration, ClosedTubeCantileverBendingMindlin) {
         ShellFormulation::MINDLIN, 56, 6, 0.08);
 }
 
+TEST(Integration, CBarAxialExtension) {
+    constexpr double E = 2.0e7;
+    constexpr double A = 0.5;
+    constexpr double L = 2.0;
+    constexpr double F = 1000.0;
+
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,2.0,0.0,0.0
+MAT1,1,2.0E7,,0.3
+PBAR,1,1,0.5,0.02,0.03,0.01
+CBAR,1,1,1,2,0.0,1.0,0.0
+SPC1,1,123456,1
+FORCE,1,2,0,1000.0,1.0,0.0,0.0
+ENDDATA
+)";
+
+    const SolverResults res = run_analysis(bdf);
+    const double expected = F * L / (E * A);
+    EXPECT_NEAR(get_disp(res, 2, 0), expected, 1e-10);
+    EXPECT_NEAR(get_disp(res, 2, 1), 0.0, 1e-12);
+    EXPECT_NEAR(get_disp(res, 2, 2), 0.0, 1e-12);
+}
+
+TEST(Integration, CBeamPload1CantileverMatchesBeamTheory) {
+    constexpr double E = 1.0e6;
+    constexpr double I1 = 0.02;
+    constexpr double L = 4.0;
+    constexpr double q = 25.0;
+
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,4.0,0.0,0.0
+MAT1,1,1.0E6,,0.3
+PBEAM,1,1,1.0,0.02,0.05,0.0,0.01
+CBEAM,1,1,1,2,0.0,1.0,0.0
+SPC1,1,123456,1
+PLOAD1,1,1,FZ,FR,0.0,25.0,1.0,25.0
+ENDDATA
+)";
+
+    const SolverResults res = run_analysis(bdf);
+    const double expected = q * std::pow(L, 4) / (8.0 * E * I1);
+    EXPECT_NEAR(get_disp(res, 2, 2), expected, 1e-10);
+}
+
+TEST(Integration, CBeamThermalExpansionMatchesAlphaDeltaTL) {
+    constexpr double alpha = 1.2e-5;
+    constexpr double tref = 10.0;
+    constexpr double temp = 60.0;
+    constexpr double L = 3.0;
+
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  SPC = 1
+  TEMPERATURE(LOAD) = 2
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,3.0,0.0,0.0
+MAT1,1,2.0E7,,0.3,,1.2E-5,10.0
+PBEAM,1,1,1.0,0.03,0.04,0.0,0.02
+CBEAM,1,1,1,2,0.0,1.0,0.0
+SPC1,1,123456,1
+TEMPD,2,60.0
+ENDDATA
+)";
+
+    const SolverResults res = run_analysis(bdf);
+    const double expected = alpha * (temp - tref) * L;
+    EXPECT_NEAR(get_disp(res, 2, 0), expected, 1e-10);
+    EXPECT_NEAR(get_disp(res, 2, 1), 0.0, 1e-12);
+    EXPECT_NEAR(get_disp(res, 2, 2), 0.0, 1e-12);
+}
+
+TEST(Integration, CBeamGravityCantileverMatchesBeamTheory) {
+    constexpr double E = 1.0e6;
+    constexpr double I1 = 0.02;
+    constexpr double rho = 5.0;
+    constexpr double A = 2.0;
+    constexpr double g = 10.0;
+    constexpr double L = 4.0;
+
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,4.0,0.0,0.0
+MAT1,1,1.0E6,,0.3,5.0
+PBEAM,1,1,2.0,0.02,0.05,0.0,0.01
+CBEAM,1,1,1,2,0.0,1.0,0.0
+SPC1,1,123456,1
+GRAV,1,0,10.0,0.0,0.0,-1.0
+ENDDATA
+)";
+
+    const SolverResults res = run_analysis(bdf);
+    const double q = rho * A * g;
+    const double expected = -q * std::pow(L, 4) / (8.0 * E * I1);
+    EXPECT_NEAR(get_disp(res, 2, 2), expected, 5e-10);
+}
+
+TEST(Integration, CBushOrientedSpringStaticResponse) {
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+PBUSH,1,K,0.0,1000.0,0.0,0.0,0.0,0.0
+CBUSH,1,1,1,2,0.0,0.0,1.0
+SPC1,1,123456,1
+SPC1,1,12456,2
+FORCE,1,2,0,100.0,0.0,0.0,1.0
+ENDDATA
+)";
+
+    const SolverResults res = run_analysis(bdf);
+    EXPECT_NEAR(get_disp(res, 2, 2), 0.1, 1e-12);
+}
+
+TEST(Integration, GroundedScalarMassSpringFrequencyMatchesClosedForm) {
+    constexpr double k = 4000.0;
+    constexpr double m = 10.0;
+
+    const std::string bdf = R"(
+SOL 103
+CEND
+SUBCASE 1
+  METHOD = 1
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+EIGRL,1,0.0,,1
+CELAS2,1,4000.0,1,1
+CMASS2,2,10.0,1,1
+CELAS2,3,9000.0,2,1
+CMASS2,4,10.0,2,1
+ENDDATA
+)";
+
+    const ModalSolverResults res = run_modal(bdf);
+    const double expected = std::sqrt(k / m) / (2.0 * std::numbers::pi);
+    EXPECT_NEAR(get_freq(res, 0), expected, 1e-10);
+}
+
+TEST(Integration, Accel1InRotatedCidDrivesGroundedMassSpring) {
+    constexpr double k = 200.0;
+    constexpr double m = 5.0;
+    constexpr double a = 3.0;
+
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+CORD2R,10,0,0.0,0.0,0.0,0.0,0.0,1.0,0.0,1.0,0.0
+CELAS2,1,200.0,1,2
+CMASS2,2,5.0,1,2
+ACCEL1,1,10,3.0,1.0,0.0,0.0,1
+ENDDATA
+)";
+
+    const SolverResults res = run_analysis(bdf);
+    const double expected = m * a / k;
+    EXPECT_NEAR(get_disp(res, 1, 1), expected, 1e-12);
+    EXPECT_NEAR(get_disp(res, 1, 0), 0.0, 1e-12);
+}
+
+TEST(Integration, BeamShellInterconnectionMatchesCombinedAxialStiffness) {
+    auto make_bdf = [](bool with_beams) {
+        std::ostringstream bdf;
+        bdf << "SOL 101\n"
+            << "CEND\n"
+            << "SUBCASE 1\n"
+            << "  LOAD = 1\n"
+            << "  SPC  = 1\n"
+            << "BEGIN BULK\n"
+            << "GRID,1,,0.0,0.0,0.0\n"
+            << "GRID,2,,1.0,0.0,0.0\n"
+            << "GRID,3,,2.0,0.0,0.0\n"
+            << "GRID,4,,0.0,1.0,0.0\n"
+            << "GRID,5,,1.0,1.0,0.0\n"
+            << "GRID,6,,2.0,1.0,0.0\n"
+            << "MAT1,1,1.0E6,,0.0\n"
+            << "PSHELL,1,1,0.1\n"
+            << "CQUAD4,1,1,1,2,5,4\n"
+            << "CQUAD4,2,1,2,3,6,5\n";
+        if (with_beams) {
+            bdf << "PBAR,10,1,0.1,0.01,0.01,0.01\n"
+                << "CBAR,10,10,1,2,0.0,0.0,1.0\n"
+                << "CBAR,11,10,2,3,0.0,0.0,1.0\n"
+                << "CBAR,12,10,4,5,0.0,0.0,1.0\n"
+                << "CBAR,13,10,5,6,0.0,0.0,1.0\n";
+        }
+        bdf << "SPC1,1,123456,1,4\n"
+            << "FORCE,1,3,0,500.0,1.0,0.0,0.0\n"
+            << "FORCE,1,6,0,500.0,1.0,0.0,0.0\n"
+            << "ENDDATA\n";
+        return bdf.str();
+    };
+
+    const SolverResults shell_only = run_analysis(make_bdf(false));
+    const SolverResults stiffened = run_analysis(make_bdf(true));
+
+    const double plain_expected = 1000.0 * 2.0 / (1.0e6 * 0.1);
+    const double stiffened_expected = 1000.0 * 2.0 / (1.0e6 * 0.3);
+    const double shell_only_tip =
+        0.5 * (get_disp(shell_only, 3, 0) + get_disp(shell_only, 6, 0));
+    const double stiffened_tip =
+        0.5 * (get_disp(stiffened, 3, 0) + get_disp(stiffened, 6, 0));
+
+    EXPECT_NEAR(shell_only_tip, plain_expected, 1e-10);
+    EXPECT_NEAR(stiffened_tip, stiffened_expected, 1e-10);
+    EXPECT_LT(stiffened_tip, shell_only_tip);
+}
+
+TEST(Integration, ShellSolidInterconnectionMatchesCombinedAxialStiffness) {
+    auto make_bdf = [](bool with_skins) {
+        std::ostringstream bdf;
+        bdf << "SOL 101\n"
+            << "CEND\n"
+            << "SUBCASE 1\n"
+            << "  LOAD = 1\n"
+            << "  SPC  = 1\n"
+            << "BEGIN BULK\n"
+            << "GRID,1,,0.0,0.0,0.0\n"
+            << "GRID,2,,1.0,0.0,0.0\n"
+            << "GRID,3,,2.0,0.0,0.0\n"
+            << "GRID,4,,0.0,1.0,0.0\n"
+            << "GRID,5,,1.0,1.0,0.0\n"
+            << "GRID,6,,2.0,1.0,0.0\n"
+            << "GRID,7,,0.0,0.0,1.0\n"
+            << "GRID,8,,1.0,0.0,1.0\n"
+            << "GRID,9,,2.0,0.0,1.0\n"
+            << "GRID,10,,0.0,1.0,1.0\n"
+            << "GRID,11,,1.0,1.0,1.0\n"
+            << "GRID,12,,2.0,1.0,1.0\n"
+            << "MAT1,1,1.0E6,,0.0\n"
+            << "PSOLID,1,1\n"
+            << "CHEXA,1,1,1,2,5,4,7,8,11,10\n"
+            << "CHEXA,2,1,2,3,6,5,8,9,12,11\n";
+        if (with_skins) {
+            bdf << "PSHELL,20,1,0.25\n"
+                << "CQUAD4,20,20,1,2,5,4\n"
+                << "CQUAD4,21,20,2,3,6,5\n"
+                << "CQUAD4,22,20,7,8,11,10\n"
+                << "CQUAD4,23,20,8,9,12,11\n";
+        }
+        bdf << "SPC1,1,123456,1,4,7,10\n"
+            << "FORCE,1,3,0,250.0,1.0,0.0,0.0\n"
+            << "FORCE,1,6,0,250.0,1.0,0.0,0.0\n"
+            << "FORCE,1,9,0,250.0,1.0,0.0,0.0\n"
+            << "FORCE,1,12,0,250.0,1.0,0.0,0.0\n"
+            << "ENDDATA\n";
+        return bdf.str();
+    };
+
+    const SolverResults solid_only = run_analysis(make_bdf(false));
+    const SolverResults skinned = run_analysis(make_bdf(true));
+
+    const double plain_expected = 1000.0 * 2.0 / (1.0e6 * 1.0);
+    const double skinned_expected = 1000.0 * 2.0 / (1.0e6 * 1.5);
+    const double solid_only_tip =
+        0.25 * (get_disp(solid_only, 3, 0) + get_disp(solid_only, 6, 0) +
+                get_disp(solid_only, 9, 0) + get_disp(solid_only, 12, 0));
+    const double skinned_tip =
+        0.25 * (get_disp(skinned, 3, 0) + get_disp(skinned, 6, 0) +
+                get_disp(skinned, 9, 0) + get_disp(skinned, 12, 0));
+
+    EXPECT_NEAR(solid_only_tip, plain_expected, 1e-10);
+    EXPECT_NEAR(skinned_tip, skinned_expected, 1e-10);
+    EXPECT_LT(skinned_tip, solid_only_tip);
+}
+
+TEST(Integration, BeamSolidInterconnectionMatchesCombinedAxialStiffness) {
+    auto make_bdf = [](bool with_beams) {
+        std::ostringstream bdf;
+        bdf << "SOL 101\n"
+            << "CEND\n"
+            << "SUBCASE 1\n"
+            << "  LOAD = 1\n"
+            << "  SPC  = 1\n"
+            << "BEGIN BULK\n"
+            << "GRID,1,,0.0,0.0,0.0\n"
+            << "GRID,2,,1.0,0.0,0.0\n"
+            << "GRID,3,,2.0,0.0,0.0\n"
+            << "GRID,4,,0.0,1.0,0.0\n"
+            << "GRID,5,,1.0,1.0,0.0\n"
+            << "GRID,6,,2.0,1.0,0.0\n"
+            << "GRID,7,,0.0,0.0,1.0\n"
+            << "GRID,8,,1.0,0.0,1.0\n"
+            << "GRID,9,,2.0,0.0,1.0\n"
+            << "GRID,10,,0.0,1.0,1.0\n"
+            << "GRID,11,,1.0,1.0,1.0\n"
+            << "GRID,12,,2.0,1.0,1.0\n"
+            << "MAT1,1,1.0E6,,0.0\n"
+            << "PSOLID,1,1\n"
+            << "CHEXA,1,1,1,2,5,4,7,8,11,10\n"
+            << "CHEXA,2,1,2,3,6,5,8,9,12,11\n";
+        if (with_beams) {
+            bdf << "PBAR,20,1,0.1,0.01,0.01,0.01\n"
+                << "CBAR,20,20,1,2,0.0,0.0,1.0\n"
+                << "CBAR,21,20,2,3,0.0,0.0,1.0\n"
+                << "CBAR,22,20,4,5,0.0,0.0,1.0\n"
+                << "CBAR,23,20,5,6,0.0,0.0,1.0\n"
+                << "CBAR,24,20,7,8,0.0,0.0,1.0\n"
+                << "CBAR,25,20,8,9,0.0,0.0,1.0\n"
+                << "CBAR,26,20,10,11,0.0,0.0,1.0\n"
+                << "CBAR,27,20,11,12,0.0,0.0,1.0\n";
+        }
+        bdf << "SPC1,1,123456,1,4,7,10\n"
+            << "FORCE,1,3,0,250.0,1.0,0.0,0.0\n"
+            << "FORCE,1,6,0,250.0,1.0,0.0,0.0\n"
+            << "FORCE,1,9,0,250.0,1.0,0.0,0.0\n"
+            << "FORCE,1,12,0,250.0,1.0,0.0,0.0\n"
+            << "ENDDATA\n";
+        return bdf.str();
+    };
+
+    const SolverResults solid_only = run_analysis(make_bdf(false));
+    const SolverResults stiffened = run_analysis(make_bdf(true));
+
+    const double plain_expected = 1000.0 * 2.0 / (1.0e6 * 1.0);
+    const double stiffened_expected = 1000.0 * 2.0 / (1.0e6 * 1.4);
+    const double solid_only_tip =
+        0.25 * (get_disp(solid_only, 3, 0) + get_disp(solid_only, 6, 0) +
+                get_disp(solid_only, 9, 0) + get_disp(solid_only, 12, 0));
+    const double stiffened_tip =
+        0.25 * (get_disp(stiffened, 3, 0) + get_disp(stiffened, 6, 0) +
+                get_disp(stiffened, 9, 0) + get_disp(stiffened, 12, 0));
+
+    EXPECT_NEAR(solid_only_tip, plain_expected, 1e-10);
+    EXPECT_NEAR(stiffened_tip, stiffened_expected, 1e-10);
+    EXPECT_LT(stiffened_tip, solid_only_tip);
+}
+
 TEST(Integration, PloadMatchesEquivalentNodalForcesOnCquad4) {
     const SolverResults pressure = run_analysis(make_single_cquad4_pressure_bdf(
         "PLOAD,1,-40.0,1,2,3,4\n"));
@@ -2278,7 +2637,7 @@ TEST(Integration, Pload4SolidDefaultFaceMatchesEquivalentNodalForces) {
     expect_displacement_match(pressure, forces, 3, 2, 1e-10);
 }
 
-TEST(Integration, Pload1StubThrowsWhenActive) {
+TEST(Integration, Pload1ThrowsOnUnsupportedElementType) {
     EXPECT_THROW(
         run_analysis(make_single_cquad4_pressure_bdf(
             "PLOAD1,1,1,FY,FR,0.0,25.0,1.0,25.0\n")),

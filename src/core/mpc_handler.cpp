@@ -277,7 +277,6 @@ void MpcHandler::apply_to_stiffness(std::span<const EqIndex> gdofs_full,
     K_builder.add_element_stiffness(rdofs, k_red);
 }
 
-// cppcheck-suppress unusedFunction -- called from linear_static.cpp
 void MpcHandler::apply_to_force(std::span<const EqIndex> gdofs_full,
                                  std::span<const double> fe,
                                  std::vector<double>& F) const {

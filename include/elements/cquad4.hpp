@@ -75,12 +75,6 @@ private:
     /// Node coordinates in local element frame
     std::array<Vec3, 4> node_coords() const;
 
-    /// Build the plane-stress constitutive matrix D (3×3) for membrane
-    Eigen::Matrix3d membrane_D() const;
-
-    /// Build the bending constitutive matrix Db (3×3)
-    Eigen::Matrix3d bending_D() const;
-
     /// Compute element thickness and material
     double thickness() const;
     const Mat1& material() const;
@@ -126,8 +120,6 @@ private:
     const Model& model_;
 
     std::array<Vec3, 4> node_coords() const;
-    Eigen::Matrix3d membrane_D() const;
-    Eigen::Matrix3d bending_D() const;
     double thickness() const;
     const Mat1& material() const;
     const PShell& pshell() const;

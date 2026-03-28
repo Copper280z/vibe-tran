@@ -8,6 +8,7 @@
 #include "elements/element_factory.hpp"
 #include "elements/rbe_constraints.hpp"
 #include "assembly_parallel.hpp"
+#include "solver/analysis_support.hpp"
 
 #include <Eigen/Sparse>
 #include <algorithm>
@@ -183,153 +184,14 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
 // ── DOF map (identical to LinearStaticSolver::build_dof_map) ─────────────────
 
 DofMap ModalSolver::build_dof_map(const Model& model, const SubCase& sc) {
-    DofMap dmap;
-    dmap.build(model.nodes, 6);
-
-    // Apply SPCs (skip translational DOFs for CD≠0 nodes — handled as MPCs)
-    {
-        std::vector<std::pair<NodeId, int>> spc_constraints;
-        for (const Spc* spc : model.spcs_for_set(sc.spc_set)) {
-            auto node_it = model.nodes.find(spc->node);
-            bool has_cd  = (node_it != model.nodes.end() &&
-                            node_it->second.cd.value != 0);
-            for (int d = 0; d < 6; ++d) {
-                if (!spc->dofs.has(d + 1)) continue;
-                if (has_cd && d < 3) continue; // handled as MPC
-                spc_constraints.emplace_back(spc->node, d);
-            }
-        }
-        dmap.constrain_batch(spc_constraints);
-    }
-
-    // Constrain rotational DOFs on solid-element-only nodes
-    std::unordered_map<NodeId, bool> node_has_shell;
-    for (const auto& [nid, _] : model.nodes)
-        node_has_shell[nid] = false;
-
-    for (const auto& elem : model.elements) {
-        bool is_shell = (elem.type == ElementType::CQUAD4 ||
-                         elem.type == ElementType::CTRIA3);
-        if (is_shell)
-            for (NodeId nid : elem.nodes)
-                node_has_shell[nid] = true;
-    }
-
-    {
-        std::vector<std::pair<NodeId, int>> rot_constraints;
-        rot_constraints.reserve(node_has_shell.size() * 3);
-        for (const auto& [nid, has_shell] : node_has_shell)
-            if (!has_shell)
-                for (int d = 3; d < 6; ++d)
-                    rot_constraints.emplace_back(nid, d);
-        dmap.constrain_batch(rot_constraints);
-    }
-
-    return dmap;
+    return build_analysis_dof_map(model, sc);
 }
 
 // ── MPC system (identical to LinearStaticSolver::build_mpc_system) ────────────
 
 void ModalSolver::build_mpc_system(const Model& model, const SubCase& sc,
                                    DofMap& dof_map, MpcHandler& mpc_handler) {
-    std::vector<Mpc> all_mpcs;
-
-    // CD-frame SPCs
-    {
-        std::unordered_map<NodeId, DofSet> node_spc_dofs;
-        for (const Spc* spc : model.spcs_for_set(sc.spc_set)) {
-            if (spc->value != 0.0) continue;
-            node_spc_dofs[spc->node].mask |= spc->dofs.mask;
-        }
-
-        std::vector<std::pair<NodeId, int>> direct_constraints;
-
-        for (const auto& [nid, gp] : model.nodes) {
-            if (gp.cd == CoordId{0}) continue;
-            auto spc_it = node_spc_dofs.find(nid);
-            if (spc_it == node_spc_dofs.end()) continue;
-
-            auto cs_it = model.coord_systems.find(gp.cd);
-            if (cs_it == model.coord_systems.end()) continue;
-
-            const CoordSys& cs = cs_it->second;
-            Mat3 T3 = rotation_matrix(cs, gp.position);
-            DofSet dofs = spc_it->second;
-
-            int cd_dofs[3], n_trans = 0;
-            for (int d = 0; d < 3; ++d)
-                if (dofs.has(d + 1)) cd_dofs[n_trans++] = d;
-
-            if (n_trans == 3) {
-                for (int j = 0; j < 3; ++j)
-                    direct_constraints.emplace_back(nid, j);
-            } else if (n_trans > 0) {
-                double A[3][3] = {};
-                int col_perm[3] = {0, 1, 2};
-                for (int i = 0; i < n_trans; ++i)
-                    for (int j = 0; j < 3; ++j)
-                        A[i][j] = T3(j, cd_dofs[i]);
-
-                for (int row = 0; row < n_trans; ++row) {
-                    int best_col = row;
-                    double best_val = std::abs(A[row][row]);
-                    for (int col = row + 1; col < 3; ++col)
-                        if (std::abs(A[row][col]) > best_val) {
-                            best_val = std::abs(A[row][col]);
-                            best_col = col;
-                        }
-                    if (best_col != row) {
-                        for (int i = 0; i < n_trans; ++i)
-                            std::swap(A[i][row], A[i][best_col]);
-                        std::swap(col_perm[row], col_perm[best_col]);
-                    }
-                    if (std::abs(A[row][row]) < 1e-14) continue;
-                    for (int i = row + 1; i < n_trans; ++i) {
-                        double factor = A[i][row] / A[row][row];
-                        for (int j = row; j < 3; ++j)
-                            A[i][j] -= factor * A[row][j];
-                    }
-                }
-
-                for (int row = 0; row < n_trans; ++row) {
-                    if (std::abs(A[row][row]) < 1e-14) continue;
-                    int nnz = 0;
-                    for (int col = row; col < 3; ++col)
-                        if (std::abs(A[row][col]) > 1e-14) nnz++;
-                    if (nnz == 1) {
-                        direct_constraints.emplace_back(nid, col_perm[row]);
-                    } else {
-                        Mpc mpc;
-                        mpc.sid = MpcSetId{0};
-                        for (int col = row; col < 3; ++col)
-                            if (std::abs(A[row][col]) > 1e-14)
-                                mpc.terms.push_back({nid, col_perm[col] + 1,
-                                                     A[row][col]});
-                        if (!mpc.terms.empty())
-                            all_mpcs.push_back(std::move(mpc));
-                    }
-                }
-            }
-        }
-        if (!direct_constraints.empty())
-            dof_map.constrain_batch(direct_constraints);
-    }
-
-    // RBE2 / RBE3
-    for (const auto& rbe2 : model.rbe2s) expand_rbe2(rbe2, model, all_mpcs);
-    for (const auto& rbe3 : model.rbe3s) expand_rbe3(rbe3, model, all_mpcs);
-
-    // Explicit MPCs
-    if (sc.mpc_set.value != 0)
-        for (const Mpc* mpc : model.mpcs_for_set(sc.mpc_set))
-            all_mpcs.push_back(*mpc);
-
-    std::vector<const Mpc*> mpc_ptrs;
-    mpc_ptrs.reserve(all_mpcs.size());
-    for (const auto& m : all_mpcs)
-        mpc_ptrs.push_back(&m);
-
-    mpc_handler.build(mpc_ptrs, dof_map);
+    build_analysis_mpc_system(model, sc, dof_map, mpc_handler);
 }
 
 // ── Assemble stiffness ────────────────────────────────────────────────────────

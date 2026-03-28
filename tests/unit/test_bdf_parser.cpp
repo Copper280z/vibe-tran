@@ -7,6 +7,7 @@
 #include "core/model.hpp"
 #include <filesystem>
 #include <fstream>
+#include <numbers>
 #include <sstream>
 #include <spdlog/spdlog.h>
 
@@ -161,6 +162,116 @@ ENDDATA
     ASSERT_TRUE(pl.p2.has_value());
     EXPECT_DOUBLE_EQ(*pl.x2, 1.0);
     EXPECT_DOUBLE_EQ(*pl.p2, 50.0);
+}
+
+TEST(BdfParser, ParsesLineBushAndScalarFamilies) {
+    const std::string bdf = R"(
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,0.0,1.0,0.0
+GRID,4,,1.0,1.0,0.0
+GRID,5,,0.0,0.0,1.0
+GRID,6,,1.0,0.0,1.0
+GRID,7,,0.0,1.0,1.0
+GRID,8,,1.0,1.0,1.0
+MAT1,1,2.0E7,,0.3
+PBAR,10,1,2.5,0.1,0.2,0.3,0.4
+PBUSH,20,K,1.0,2.0,3.0,4.0,5.0,6.0
+PELAS,30,1000.0
+PMASS,40,2.5
+CBAR,100,10,1,2,0.0,1.0,0.0
+CBUSH,200,20,3,4,0.0,1.0,0.0
+CELAS1,300,30,5,1,6,1
+CMASS1,400,40,7,2,8,2
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.properties.size(), 4u);
+    ASSERT_EQ(m.elements.size(), 4u);
+
+    const auto &pbar = std::get<PBar>(m.properties.at(PropertyId{10}));
+    EXPECT_DOUBLE_EQ(pbar.A, 2.5);
+    EXPECT_DOUBLE_EQ(pbar.J, 0.3);
+
+    const auto &pbush = std::get<PBush>(m.properties.at(PropertyId{20}));
+    EXPECT_DOUBLE_EQ(pbush.k[0], 1.0);
+    EXPECT_DOUBLE_EQ(pbush.k[5], 6.0);
+
+    const auto &cbush = m.elements[1];
+    EXPECT_EQ(cbush.type, ElementType::CBUSH);
+    ASSERT_TRUE(cbush.orientation.has_value());
+    EXPECT_DOUBLE_EQ(cbush.orientation->y, 1.0);
+
+    const auto &celas1 = m.elements[2];
+    EXPECT_EQ(celas1.type, ElementType::CELAS1);
+    EXPECT_EQ(celas1.components[0], 1);
+    EXPECT_EQ(celas1.components[1], 1);
+
+    const auto &cmass1 = m.elements[3];
+    EXPECT_EQ(cmass1.type, ElementType::CMASS1);
+    EXPECT_EQ(cmass1.components[0], 2);
+    EXPECT_EQ(cmass1.components[1], 2);
+}
+
+TEST(BdfParser, ParsesPbarlAndAccel1ByRange) {
+    const std::string bdf = R"(
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,2.0,0.0,0.0
+GRID,4,,3.0,0.0,0.0
+GRID,5,,4.0,0.0,0.0
+MAT1,1,2.0E7,,0.3
+PBARL,11,1,MSCBMLO,TUBE,2.0,0.25,0.1
+ACCEL1,9,0,3.0,1.0,0.0,0.0,1,THRU,5,BY,2
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    const auto &pbarl = std::get<PBarL>(m.properties.at(PropertyId{11}));
+    EXPECT_EQ(pbarl.section_type, "TUBE");
+    EXPECT_NEAR(pbarl.A, std::numbers::pi * (4.0 - 2.25) * 0.25, 1e-12);
+    EXPECT_DOUBLE_EQ(pbarl.nsm, 0.1);
+
+    ASSERT_EQ(m.loads.size(), 1u);
+    const auto &accel1 = std::get<Accel1Load>(m.loads[0]);
+    ASSERT_EQ(accel1.nodes.size(), 3u);
+    EXPECT_EQ(accel1.nodes[0].value, 1);
+    EXPECT_EQ(accel1.nodes[1].value, 3);
+    EXPECT_EQ(accel1.nodes[2].value, 5);
+}
+
+TEST(BdfParser, ParsesCbeamG0AndGroundedScalarCards) {
+    const std::string bdf = R"(
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,9,,0.0,1.0,0.0
+GRID,10,,0.0,0.0,0.0
+MAT1,1,2.0E7,,0.3
+PBEAM,12,1,1.5,0.2,0.3,0.0,0.4,0.1
+CBEAM,101,12,1,2,9
+CELAS2,301,55.0,10,2
+CMASS2,401,3.5,10,2
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.elements.size(), 3u);
+    const auto &cbeam = m.elements[0];
+    EXPECT_EQ(cbeam.type, ElementType::CBEAM);
+    ASSERT_TRUE(cbeam.g0.has_value());
+    EXPECT_EQ(cbeam.g0->value, 9);
+
+    const auto &celas2 = m.elements[1];
+    EXPECT_EQ(celas2.type, ElementType::CELAS2);
+    EXPECT_DOUBLE_EQ(celas2.value, 55.0);
+    EXPECT_EQ(celas2.nodes.size(), 1u);
+    EXPECT_EQ(celas2.components[0], 2);
+
+    const auto &cmass2 = m.elements[2];
+    EXPECT_EQ(cmass2.type, ElementType::CMASS2);
+    EXPECT_DOUBLE_EQ(cmass2.value, 3.5);
+    EXPECT_EQ(cmass2.nodes.size(), 1u);
 }
 
 TEST(BdfParser, Pload2CardExpandsThruRange) {
@@ -435,9 +546,9 @@ SUBCASE 1
   SPC  = 1
 BEGIN BULK
 GRID,1,,0.0,0.0,0.0
-CBAR,100,10,1,1,0.0,1.0,0.0
-CBAR,101,10,1,1,0.0,1.0,0.0
-PBEAM,10,1,1.0
+PBEAML,10,1
+PBEAML,11,1
+CELAS3,100,1,2
 ENDDATA
 )";
 
@@ -449,7 +560,7 @@ ENDDATA
 
     EXPECT_NE(log_text.find("Unsupported BDF cards were ignored"), std::string::npos);
     EXPECT_NE(log_text.find("Case control: ECHO, TITLE"), std::string::npos);
-    EXPECT_NE(log_text.find("Bulk data: CBAR, PBEAM"), std::string::npos);
+    EXPECT_NE(log_text.find("Bulk data: CELAS3, PBEAML"), std::string::npos);
 }
 
 TEST(BdfParser, SmallFieldSpcFullLine) {

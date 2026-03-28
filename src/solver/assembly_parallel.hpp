@@ -33,6 +33,15 @@ inline int element_num_dofs(ElementType type) {
     return 30;
   case ElementType::CPENTA6:
     return 18;
+  case ElementType::CBAR:
+  case ElementType::CBEAM:
+  case ElementType::CBUSH:
+    return 12;
+  case ElementType::CELAS1:
+  case ElementType::CELAS2:
+  case ElementType::CMASS1:
+  case ElementType::CMASS2:
+    return 2;
   }
   return 0;
 }

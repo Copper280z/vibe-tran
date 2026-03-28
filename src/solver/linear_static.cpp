@@ -12,14 +12,72 @@
 #include "elements/rbe_constraints.hpp"
 #include "elements/solid_elements.hpp"
 #include "assembly_parallel.hpp"
+#include "solver/analysis_support.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <numbers>
+#include <set>
 #include <spdlog/spdlog.h>
 
 namespace vibestran {
+
+namespace {
+
+[[nodiscard]] MaterialId property_material_id(const Property &prop) {
+  if (const auto *pshell = std::get_if<PShell>(&prop))
+    return pshell->mid1;
+  if (const auto *psolid = std::get_if<PSolid>(&prop))
+    return psolid->mid;
+  if (const auto *pbar = std::get_if<PBar>(&prop))
+    return pbar->mid;
+  if (const auto *pbarl = std::get_if<PBarL>(&prop))
+    return pbarl->mid;
+  if (const auto *pbeam = std::get_if<PBeam>(&prop))
+    return pbeam->mid;
+  return MaterialId{0};
+}
+
+[[nodiscard]] double component_value(const Vec3 &v, const int component) {
+  switch (component) {
+  case 1:
+    return v.x;
+  case 2:
+    return v.y;
+  case 3:
+    return v.z;
+  default:
+    return 0.0;
+  }
+}
+
+[[nodiscard]] double wtmass_scale(const Model &model) {
+  auto wt_it = model.params.find("WTMASS");
+  if (wt_it == model.params.end())
+    return 1.0;
+  try {
+    return std::stod(wt_it->second);
+  } catch (...) {
+    return 1.0;
+  }
+}
+
+[[nodiscard]] Vec3 load_direction_in_basic(const Model &model, const CoordId cid,
+                                           const Vec3 &direction,
+                                           const Vec3 &position) {
+  if (cid.value == 0)
+    return direction;
+  const auto cs_it = model.coord_systems.find(cid);
+  if (cs_it == model.coord_systems.end()) {
+    throw SolverError(std::format(
+        "Coordinate system {} not found for inertial load direction",
+        cid.value));
+  }
+  return apply_rotation(rotation_matrix(cs_it->second, position), direction);
+}
+
+} // namespace
 
 LinearStaticSolver::LinearStaticSolver(std::unique_ptr<SolverBackend> backend)
     : backend_(std::move(backend)) {}
@@ -71,10 +129,15 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   spdlog::debug("[subcase {}] apply_pressure_loads: {:.3f} ms", sc.id,
                 Ms(t4b - t4).count());
 
+  apply_inertial_loads(model, sc, mpc_handler, F);
+  const auto t4c = Clock::now();
+  spdlog::debug("[subcase {}] apply_inertial_loads: {:.3f} ms", sc.id,
+                Ms(t4c - t4b).count());
+
   apply_thermal_loads(model, sc, mpc_handler, K_builder, F);
   const auto t5 = Clock::now();
   spdlog::debug("[subcase {}] apply_thermal_loads: {:.3f} ms", sc.id,
-                Ms(t5 - t4b).count());
+                Ms(t5 - t4c).count());
 
   // 4. Solve
   auto csr = K_builder.build_csr();
@@ -137,199 +200,14 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
 
 DofMap LinearStaticSolver::build_dof_map(const Model &model,
                                          const SubCase &sc) {
-  DofMap dmap;
-  dmap.build(model.nodes, 6);
-
-  // Apply SPCs
-  // For nodes with CD≠0 (non-basic displacement coordinate system),
-  // translational SPC DOFs refer to CD-frame directions, not basic axes.
-  // Skip those here; they are converted to MPCs in build_mpc_system().
-  {
-    std::vector<std::pair<NodeId, int>> spc_constraints;
-    for (const Spc *spc : model.spcs_for_set(sc.spc_set)) {
-      auto node_it = model.nodes.find(spc->node);
-      bool has_cd = (node_it != model.nodes.end() &&
-                     node_it->second.cd.value != 0);
-      for (int d = 0; d < 6; ++d) {
-        if (!spc->dofs.has(d + 1))
-          continue;
-        // Skip translational DOFs for CD≠0 nodes — handled as MPCs
-        if (has_cd && d < 3)
-          continue;
-        spc_constraints.emplace_back(spc->node, d);
-      }
-    }
-    dmap.constrain_batch(spc_constraints);
-  }
-
-  // Constrain rotational DOFs on solid-element-only nodes
-  std::unordered_map<NodeId, bool> node_has_shell;
-  for (const auto &nid_gp : model.nodes)
-    node_has_shell[nid_gp.first] = false;
-
-  for (const auto &elem : model.elements) {
-    bool is_shell =
-        (elem.type == ElementType::CQUAD4 || elem.type == ElementType::CTRIA3);
-    if (is_shell)
-      for (NodeId nid : elem.nodes)
-        node_has_shell[nid] = true;
-  }
-
-  {
-    std::vector<std::pair<NodeId, int>> rot_constraints;
-    rot_constraints.reserve(node_has_shell.size() * 3);
-    for (const auto &[nid, has_shell] : node_has_shell)
-      if (!has_shell)
-        for (int d = 3; d < 6; ++d)
-          rot_constraints.emplace_back(nid, d);
-    dmap.constrain_batch(rot_constraints);
-  }
-
-  return dmap;
+  return build_analysis_dof_map(model, sc);
 }
 
 void LinearStaticSolver::build_mpc_system(const Model &model,
                                            const SubCase &sc,
                                            DofMap &dof_map,
                                            MpcHandler &mpc_handler) {
-  // Collect MPCs from all sources into one vector
-  std::vector<Mpc> all_mpcs;
-
-  // 1. CD-frame SPCs: for nodes with CD≠basic, translational SPC DOFs refer
-  //    to CD-frame directions.  Each CD-frame constraint becomes either:
-  //    (a) a direct basic SPC (when the constraint aligns with a basic axis), or
-  //    (b) an MPC: T3[:,d]^T · [u1,u2,u3] = 0.
-  //
-  //    When a node has multiple CD-frame SPCs, we use Gaussian elimination
-  //    with column pivoting to produce independent MPCs with unique dependent
-  //    DOFs, avoiding conflicts in the MPC handler.
-  {
-    // Pre-build node→SPC lookup
-    std::unordered_map<NodeId, DofSet> node_spc_dofs;
-    for (const Spc *spc : model.spcs_for_set(sc.spc_set)) {
-      if (spc->value != 0.0) continue;
-      node_spc_dofs[spc->node].mask |= spc->dofs.mask;
-    }
-
-    std::vector<std::pair<NodeId, int>> direct_constraints;
-
-    for (const auto &[nid, gp] : model.nodes) {
-      if (gp.cd == CoordId{0})
-        continue;
-      auto spc_it = node_spc_dofs.find(nid);
-      if (spc_it == node_spc_dofs.end())
-        continue;
-
-      auto cs_it = model.coord_systems.find(gp.cd);
-      if (cs_it == model.coord_systems.end())
-        continue;
-
-      const CoordSys &cs = cs_it->second;
-      Mat3 T3 = rotation_matrix(cs, gp.position);
-      DofSet dofs = spc_it->second;
-
-      // Collect constrained translational CD-frame DOFs
-      int cd_dofs[3];
-      int n_trans = 0;
-      for (int d = 0; d < 3; ++d)
-        if (dofs.has(d + 1))
-          cd_dofs[n_trans++] = d;
-
-      if (n_trans == 3) {
-        // All translational DOFs constrained → constrain all basic
-        for (int j = 0; j < 3; ++j)
-          direct_constraints.emplace_back(nid, j);
-      } else if (n_trans > 0) {
-        // Build constraint matrix A[i][j] = T3(j, cd_dofs[i])
-        // Each row is a CD direction expressed in basic coordinates.
-        // Gaussian elimination with column pivoting produces independent
-        // equations with unique dominant basic DOFs.
-        double A[3][3] = {};
-        int col_perm[3] = {0, 1, 2};
-
-        for (int i = 0; i < n_trans; ++i)
-          for (int j = 0; j < 3; ++j)
-            A[i][j] = T3(j, cd_dofs[i]);
-
-        for (int row = 0; row < n_trans; ++row) {
-          // Partial column pivoting: find largest |A[row][col]| for col >= row
-          int best_col = row;
-          double best_val = std::abs(A[row][row]);
-          for (int col = row + 1; col < 3; ++col) {
-            if (std::abs(A[row][col]) > best_val) {
-              best_val = std::abs(A[row][col]);
-              best_col = col;
-            }
-          }
-          if (best_col != row) {
-            for (int i = 0; i < n_trans; ++i)
-              std::swap(A[i][row], A[i][best_col]);
-            std::swap(col_perm[row], col_perm[best_col]);
-          }
-          // Eliminate rows below the pivot
-          if (std::abs(A[row][row]) < 1e-14) continue;
-          for (int i = row + 1; i < n_trans; ++i) {
-            double factor = A[i][row] / A[row][row];
-            for (int j = row; j < 3; ++j)
-              A[i][j] -= factor * A[row][j];
-          }
-        }
-
-        // Generate either direct SPCs or MPCs from the triangular system
-        for (int row = 0; row < n_trans; ++row) {
-          if (std::abs(A[row][row]) < 1e-14) continue;
-
-          // Count non-zero entries in this row (from diagonal onward)
-          int nnz = 0;
-          for (int col = row; col < 3; ++col)
-            if (std::abs(A[row][col]) > 1e-14) nnz++;
-
-          if (nnz == 1) {
-            // Single non-zero → direct basic SPC (constraint aligns with axis)
-            direct_constraints.emplace_back(nid, col_perm[row]);
-          } else {
-            // Multiple terms → MPC
-            Mpc mpc;
-            mpc.sid = MpcSetId{0};
-            for (int col = row; col < 3; ++col) {
-              if (std::abs(A[row][col]) > 1e-14)
-                mpc.terms.push_back({nid, col_perm[col] + 1, A[row][col]});
-            }
-            if (!mpc.terms.empty())
-              all_mpcs.push_back(std::move(mpc));
-          }
-        }
-      }
-
-      // Rotational DOFs: solid-only nodes already have all rotations
-      // constrained in build_dof_map, so CD-frame rotation SPCs are
-      // automatically satisfied.  For future shell support, rotational
-      // CD-frame SPCs would need similar treatment here.
-    }
-
-    // Apply any direct basic constraints identified above
-    if (!direct_constraints.empty())
-      dof_map.constrain_batch(direct_constraints);
-  }
-
-  // 2. RBE2/RBE3
-  for (const auto &rbe2 : model.rbe2s)
-    expand_rbe2(rbe2, model, all_mpcs);
-  for (const auto &rbe3 : model.rbe3s)
-    expand_rbe3(rbe3, model, all_mpcs);
-
-  // 3. Explicit MPCs from active MPC set
-  if (sc.mpc_set.value != 0) {
-    for (const Mpc *mpc : model.mpcs_for_set(sc.mpc_set))
-      all_mpcs.push_back(*mpc);
-  }
-
-  std::vector<const Mpc*> mpc_ptrs;
-  mpc_ptrs.reserve(all_mpcs.size());
-  for (const auto& m : all_mpcs)
-    mpc_ptrs.push_back(&m);
-
-  mpc_handler.build(mpc_ptrs, dof_map);
+  build_analysis_mpc_system(model, sc, dof_map, mpc_handler);
 }
 
 void LinearStaticSolver::assemble(const Model &model, const SubCase & /*sc*/,
@@ -398,6 +276,111 @@ void LinearStaticSolver::apply_point_loads(const Model &model,
   }
 }
 
+void LinearStaticSolver::apply_inertial_loads(const Model &model,
+                                              const SubCase &sc,
+                                              const MpcHandler &mpc_handler,
+                                              std::vector<double> &F) {
+  const double wtmass = wtmass_scale(model);
+  std::unordered_map<NodeId, Vec3> nodal_accels;
+  bool has_inertial_load = false;
+
+  auto add_accel_to_node = [&](NodeId nid, const Vec3 &accel) {
+    nodal_accels[nid] = nodal_accels[nid] + accel;
+  };
+
+  for (const Load *lp : model.loads_for_set(sc.load_set)) {
+    std::visit(
+        [&](const auto &load) {
+          using T = std::decay_t<decltype(load)>;
+          if constexpr (std::is_same_v<T, GravLoad>) {
+            has_inertial_load = true;
+            for (const auto &[nid, gp] : model.nodes) {
+              const Vec3 accel =
+                  load_direction_in_basic(model, load.cid,
+                                          load.direction * load.scale,
+                                          gp.position);
+              add_accel_to_node(nid, accel);
+            }
+          } else if constexpr (std::is_same_v<T, Accel1Load>) {
+            has_inertial_load = true;
+            for (NodeId nid : load.nodes) {
+              const Vec3 accel = load_direction_in_basic(
+                  model, load.cid, load.direction * load.scale,
+                  model.node(nid).position);
+              add_accel_to_node(nid, accel);
+            }
+          } else if constexpr (std::is_same_v<T, AccelLoad>) {
+            throw SolverError(std::format(
+                "ACCEL load set {} is parsed but not implemented",
+                load.sid.value));
+          }
+        },
+        *lp);
+  }
+
+  if (!has_inertial_load)
+    return;
+
+  const DofMap &dof_map = mpc_handler.full_dof_map();
+  for (const auto &elem_data : model.elements) {
+    auto elem = make_element(elem_data, model);
+    LocalKe mass = elem->mass_matrix();
+    if (mass.rows() == 0)
+      continue;
+    mass *= wtmass;
+    if (mass.cwiseAbs().maxCoeff() < 1e-30)
+      continue;
+
+    LocalFe accel = LocalFe::Zero(elem->num_dofs());
+    switch (elem_data.type) {
+    case ElementType::CQUAD4:
+    case ElementType::CTRIA3:
+    case ElementType::CBAR:
+    case ElementType::CBEAM:
+    case ElementType::CBUSH:
+      for (size_t i = 0; i < elem_data.nodes.size(); ++i) {
+        const Vec3 a = nodal_accels[elem_data.nodes[i]];
+        accel(6 * static_cast<int>(i) + 0) = a.x;
+        accel(6 * static_cast<int>(i) + 1) = a.y;
+        accel(6 * static_cast<int>(i) + 2) = a.z;
+      }
+      break;
+    case ElementType::CHEXA8:
+    case ElementType::CHEXA20:
+    case ElementType::CTETRA4:
+    case ElementType::CTETRA10:
+    case ElementType::CPENTA6:
+      for (size_t i = 0; i < elem_data.nodes.size(); ++i) {
+        const Vec3 a = nodal_accels[elem_data.nodes[i]];
+        accel(3 * static_cast<int>(i) + 0) = a.x;
+        accel(3 * static_cast<int>(i) + 1) = a.y;
+        accel(3 * static_cast<int>(i) + 2) = a.z;
+      }
+      break;
+    case ElementType::CELAS1:
+    case ElementType::CELAS2:
+      break;
+    case ElementType::CMASS1:
+    case ElementType::CMASS2:
+      for (size_t i = 0; i < elem_data.nodes.size(); ++i) {
+        const auto it = nodal_accels.find(elem_data.nodes[i]);
+        if (it == nodal_accels.end())
+          continue;
+        accel(static_cast<int>(i)) =
+            component_value(it->second, elem_data.components[i]);
+      }
+      break;
+    }
+
+    const LocalFe fe = mass * accel;
+    if (fe.cwiseAbs().maxCoeff() < 1e-30)
+      continue;
+    const auto gdofs = elem->global_dof_indices(dof_map);
+    std::vector<double> fe_vec(fe.data(), fe.data() + fe.size());
+    mpc_handler.apply_to_force(gdofs, fe_vec, F);
+  }
+}
+
 void LinearStaticSolver::apply_thermal_loads(
     const Model &model, const SubCase &sc,
     const MpcHandler &mpc_handler,
@@ -436,12 +419,12 @@ void LinearStaticSolver::apply_thermal_loads(
     const int nn = static_cast<int>(node_ids.size());
 
     // Reference temperature from the element's material (MAT1 TREF field)
-    const auto& prop = model.property(elem_data.pid);
     MaterialId mid{0};
-    if (std::holds_alternative<PShell>(prop))
-      mid = std::get<PShell>(prop).mid1;
-    else if (std::holds_alternative<PSolid>(prop))
-      mid = std::get<PSolid>(prop).mid;
+    if (elem_data.type != ElementType::CELAS2 &&
+        elem_data.type != ElementType::CMASS2) {
+      const auto &prop = model.property(elem_data.pid);
+      mid = property_material_id(prop);
+    }
     double elem_t_ref = (mid.value != 0) ? model.material(mid).ref_temp : 0.0;
 
     std::vector<double> temps(static_cast<size_t>(nn));
@@ -526,6 +509,50 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
     for (const auto& [nid, _] : model.nodes) {
       if (nodal_temps_rec.find(nid) == nodal_temps_rec.end())
         nodal_temps_rec[nid] = T_default;
+    }
+  }
+
+  if (sc.stress_print || sc.stress_plot) {
+    std::set<std::string> unsupported_types;
+    for (const auto &elem_data : model.elements) {
+      switch (elem_data.type) {
+      case ElementType::CBAR:
+        unsupported_types.insert("CBAR");
+        break;
+      case ElementType::CBEAM:
+        unsupported_types.insert("CBEAM");
+        break;
+      case ElementType::CBUSH:
+        unsupported_types.insert("CBUSH");
+        break;
+      case ElementType::CELAS1:
+        unsupported_types.insert("CELAS1");
+        break;
+      case ElementType::CELAS2:
+        unsupported_types.insert("CELAS2");
+        break;
+      case ElementType::CMASS1:
+        unsupported_types.insert("CMASS1");
+        break;
+      case ElementType::CMASS2:
+        unsupported_types.insert("CMASS2");
+        break;
+      default:
+        break;
+      }
+    }
+
+    if (!unsupported_types.empty()) {
+      std::string families;
+      for (const auto &name : unsupported_types) {
+        if (!families.empty())
+          families += ", ";
+        families += name;
+      }
+      spdlog::warn(
+          "[subcase {}] stress recovery is not implemented for element "
+          "families [{}]; those results were skipped",
+          sc.id, families);
     }
   }
 

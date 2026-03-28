@@ -8,8 +8,10 @@
 #include "core/logger.hpp"
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <format>
 #include <fstream>
+#include <numbers>
 #include <set>
 #include <sstream>
 
@@ -506,6 +508,18 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_pshell(ctx, card.fields);
       else if (kw == "PSOLID")
         process_psolid(ctx, card.fields);
+      else if (kw == "PBAR")
+        process_pbar(ctx, card.fields);
+      else if (kw == "PBARL")
+        process_pbarl(ctx, card.fields);
+      else if (kw == "PBEAM")
+        process_pbeam(ctx, card.fields);
+      else if (kw == "PBUSH")
+        process_pbush(ctx, card.fields);
+      else if (kw == "PELAS")
+        process_pelas(ctx, card.fields);
+      else if (kw == "PMASS")
+        process_pmass(ctx, card.fields);
       else if (kw == "CQUAD4")
         process_cquad4(ctx, card.fields);
       else if (kw == "CTRIA3")
@@ -516,6 +530,20 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_ctetra(ctx, card.fields);
       else if (kw == "CPENTA")
         process_cpenta(ctx, card.fields);
+      else if (kw == "CBAR")
+        process_cbar(ctx, card.fields);
+      else if (kw == "CBEAM")
+        process_cbeam(ctx, card.fields);
+      else if (kw == "CBUSH")
+        process_cbush(ctx, card.fields);
+      else if (kw == "CELAS1")
+        process_celas1(ctx, card.fields);
+      else if (kw == "CELAS2")
+        process_celas2(ctx, card.fields);
+      else if (kw == "CMASS1")
+        process_cmass1(ctx, card.fields);
+      else if (kw == "CMASS2")
+        process_cmass2(ctx, card.fields);
       else if (kw == "FORCE")
         process_force(ctx, card.fields);
       else if (kw == "MOMENT")
@@ -524,6 +552,12 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_temp(ctx, card.fields);
       else if (kw == "TEMPD")
         process_tempd(ctx, card.fields);
+      else if (kw == "GRAV")
+        process_grav(ctx, card.fields);
+      else if (kw == "ACCEL")
+        process_accel(ctx, card.fields);
+      else if (kw == "ACCEL1")
+        process_accel1(ctx, card.fields);
       else if (kw == "PLOAD")
         process_pload(ctx, card.fields);
       else if (kw == "PLOAD1")
@@ -717,6 +751,32 @@ int BdfParser::parse_int(const std::string &s, int line) {
 
 namespace {
 
+double parse_double_field(std::string s, const int line) {
+  std::replace_if(s.begin(), s.end(),
+                  [](char c) { return c == 'D' || c == 'd'; }, 'E');
+  for (size_t i = 1; i < s.size(); ++i) {
+    if ((s[i] == '+' || s[i] == '-') &&
+        std::toupper(static_cast<unsigned char>(s[i - 1])) != 'E') {
+      s.insert(i, 1, 'E');
+      break;
+    }
+  }
+  try {
+    return std::stod(s);
+  } catch (...) {
+    throw ParseError(
+        std::format("Line {}: cannot parse double: '{}'", line, s));
+  }
+}
+
+int parse_int_field(const std::string &s, const int line) {
+  try {
+    return std::stoi(s);
+  } catch (...) {
+    throw ParseError(std::format("Line {}: cannot parse int: '{}'", line, s));
+  }
+}
+
 bool field_is_integer_like(const std::string &s) {
   if (s.empty())
     return false;
@@ -748,8 +808,21 @@ bool has_any_nonblank(const std::vector<std::string> &fields, size_t first,
 std::vector<int> expand_id_list(const std::vector<std::string> &fields,
                                 size_t start, int line) {
   std::vector<int> ids;
-  bool pending_thru = false;
-  int thru_start = 0;
+  bool expecting_range_end = false;
+  bool expecting_by_value = false;
+  int range_start = 0;
+  int range_end = 0;
+  int range_step = 1;
+
+  auto flush_range = [&]() {
+    if (!expecting_range_end && !expecting_by_value && range_end >= range_start) {
+      for (int id = range_start + range_step; id <= range_end; id += range_step)
+        ids.push_back(id);
+    }
+    range_start = 0;
+    range_end = 0;
+    range_step = 1;
+  };
 
   for (size_t i = start; i < fields.size(); ++i) {
     if (fields[i].empty())
@@ -762,39 +835,172 @@ std::vector<int> expand_id_list(const std::vector<std::string> &fields,
             "Line {}: THRU cannot be the first entry in an element ID list",
             line));
       }
-      pending_thru = true;
-      thru_start = ids.back();
+      expecting_range_end = true;
+      range_start = ids.back();
+      continue;
+    }
+    if (upper == "BY") {
+      if (range_end == 0 || expecting_range_end) {
+        throw ParseError(std::format(
+            "Line {}: BY must follow a completed THRU range", line));
+      }
+      expecting_by_value = true;
       continue;
     }
 
     if (!field_is_integer_like(fields[i])) {
       throw ParseError(std::format(
-          "Line {}: expected integer element ID or THRU, got '{}'", line,
+          "Line {}: expected integer element ID or THRU/BY, got '{}'", line,
           fields[i]));
     }
 
     const int value = std::stoi(fields[i]);
-    if (pending_thru) {
-      if (value < thru_start) {
+    if (expecting_range_end) {
+      if (value < range_start) {
         throw ParseError(std::format(
             "Line {}: THRU range end {} is less than start {}", line, value,
-            thru_start));
+            range_start));
       }
-      for (int id = thru_start + 1; id <= value; ++id)
-        ids.push_back(id);
-      pending_thru = false;
+      range_end = value;
+      expecting_range_end = false;
+    } else if (expecting_by_value) {
+      if (value <= 0) {
+        throw ParseError(std::format(
+            "Line {}: BY increment must be positive, got {}", line, value));
+      }
+      range_step = value;
+      expecting_by_value = false;
+      flush_range();
+    } else if (range_end != 0) {
+      flush_range();
+      if (value > 0)
+        ids.push_back(value);
     } else if (value > 0) {
       ids.push_back(value);
     }
   }
 
-  if (pending_thru) {
+  if (expecting_range_end) {
     throw ParseError(
         std::format("Line {}: THRU must be followed by an ending element ID",
                     line));
   }
+  if (expecting_by_value) {
+    throw ParseError(
+        std::format("Line {}: BY must be followed by a positive increment",
+                    line));
+  }
+  if (range_end != 0)
+    flush_range();
 
   return ids;
+}
+
+void reject_nonblank_fields(const std::vector<std::string> &fields,
+                            const size_t first, const int line,
+                            const std::string_view card,
+                            const std::string_view detail) {
+  for (size_t i = first; i < fields.size(); ++i) {
+    if (!fields[i].empty()) {
+      throw ParseError(std::format(
+          "Line {}: {} {} (first unsupported field {} = '{}')", line, card,
+          detail, i, fields[i]));
+    }
+  }
+}
+
+void parse_orientation_or_g0(const std::vector<std::string> &f,
+                             ElementData &e, const size_t first_orientation,
+                             const int line_num,
+                             const std::optional<CoordId> cid) {
+  if (f.size() <= first_orientation || f[first_orientation].empty())
+    return;
+  if (field_is_integer_like(f[first_orientation])) {
+    if ((f.size() > first_orientation + 1 && !f[first_orientation + 1].empty()) ||
+        (f.size() > first_orientation + 2 && !f[first_orientation + 2].empty())) {
+      throw ParseError(std::format(
+          "Line {}: orientation field {} cannot mix G0 with X2/X3 components",
+          line_num, first_orientation));
+    }
+    e.g0 = NodeId(parse_int_field(f[first_orientation], line_num));
+    return;
+  }
+
+  const double x1 = parse_double_field(f[first_orientation], line_num);
+  const double x2 =
+      (f.size() > first_orientation + 1) ? parse_double_field(f[first_orientation + 1], line_num)
+                                         : 0.0;
+  const double x3 =
+      (f.size() > first_orientation + 2) ? parse_double_field(f[first_orientation + 2], line_num)
+                                         : 0.0;
+  e.orientation = Vec3{x1, x2, x3};
+  if (cid.has_value())
+    e.cid = *cid;
+}
+
+void populate_pbarl_section(PBarL &p, const int line_num) {
+  const std::string type = uppercase_copy(p.section_type);
+  if (type == "ROD") {
+    if (p.dimensions.size() != 1) {
+      throw ParseError(std::format(
+          "Line {}: PBARL ROD requires exactly 1 dimension", line_num));
+    }
+    const double d = p.dimensions[0];
+    if (d <= 0.0)
+      throw ParseError(std::format(
+          "Line {}: PBARL ROD diameter must be positive", line_num));
+    p.A = std::numbers::pi * d * d * 0.25;
+    p.I1 = p.I2 = std::numbers::pi * std::pow(d, 4) / 64.0;
+    p.J = p.I1 + p.I2;
+    return;
+  }
+
+  if (type == "TUBE") {
+    if (p.dimensions.size() != 2) {
+      throw ParseError(std::format(
+          "Line {}: PBARL TUBE requires outer diameter and thickness",
+          line_num));
+    }
+    const double d_outer = p.dimensions[0];
+    const double t = p.dimensions[1];
+    const double d_inner = d_outer - 2.0 * t;
+    if (d_outer <= 0.0 || t <= 0.0 || d_inner <= 0.0) {
+      throw ParseError(std::format(
+          "Line {}: PBARL TUBE dimensions must satisfy OD > 2*t > 0",
+          line_num));
+    }
+    p.A = std::numbers::pi * (d_outer * d_outer - d_inner * d_inner) * 0.25;
+    p.I1 = p.I2 = std::numbers::pi *
+                  (std::pow(d_outer, 4) - std::pow(d_inner, 4)) / 64.0;
+    p.J = p.I1 + p.I2;
+    return;
+  }
+
+  if (type == "BAR") {
+    if (p.dimensions.size() != 2) {
+      throw ParseError(std::format(
+          "Line {}: PBARL BAR requires exactly 2 dimensions", line_num));
+    }
+    const double b = p.dimensions[0];
+    const double h = p.dimensions[1];
+    if (b <= 0.0 || h <= 0.0) {
+      throw ParseError(std::format(
+          "Line {}: PBARL BAR dimensions must be positive", line_num));
+    }
+    p.A = b * h;
+    p.I1 = b * std::pow(h, 3) / 12.0;
+    p.I2 = h * std::pow(b, 3) / 12.0;
+    const double a = std::max(b, h);
+    const double c = std::min(b, h);
+    const double beta = c / a;
+    p.J = a * std::pow(c, 3) *
+          (1.0 / 3.0 - 0.21 * beta * (1.0 - std::pow(beta, 4) / 12.0));
+    return;
+  }
+
+  throw ParseError(std::format(
+      "Line {}: PBARL section type '{}' is not yet supported", line_num,
+      p.section_type));
 }
 
 } // namespace
@@ -873,6 +1079,131 @@ void BdfParser::process_psolid(ParseContext &ctx,
     else if (isop == "EAS")
       p.isop = SolidFormulation::EAS;
   }
+  ctx.model.properties[p.pid] = p;
+}
+
+void BdfParser::process_pbar(ParseContext &ctx,
+                             const std::vector<std::string> &f) {
+  PBar p;
+  p.pid = PropertyId(parse_int(f[1], ctx.line_num));
+  p.mid = MaterialId(parse_int(f[2], ctx.line_num));
+  p.A = parse_double(f[3], ctx.line_num);
+  p.I1 = parse_double(f[4], ctx.line_num);
+  p.I2 = parse_double(f[5], ctx.line_num);
+  p.J = (f.size() > 6 && !f[6].empty()) ? parse_double(f[6], ctx.line_num) : 0.0;
+  p.nsm = (f.size() > 7 && !f[7].empty()) ? parse_double(f[7], ctx.line_num) : 0.0;
+  reject_nonblank_fields(f, 8, ctx.line_num, "PBAR",
+                         "advanced fields are not yet supported");
+  ctx.model.properties[p.pid] = p;
+}
+
+void BdfParser::process_pbarl(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  PBarL p;
+  p.pid = PropertyId(parse_int(f[1], ctx.line_num));
+  p.mid = MaterialId(parse_int(f[2], ctx.line_num));
+  p.section_type = uppercase_copy(f[4]);
+
+  const int required_dims =
+      (p.section_type == "ROD")
+          ? 1
+          : (p.section_type == "BAR" || p.section_type == "TUBE") ? 2 : -1;
+  if (required_dims < 0) {
+    throw ParseError(std::format(
+        "Line {}: PBARL section type '{}' is not yet supported",
+        ctx.line_num, p.section_type));
+  }
+
+  std::vector<double> numeric_values;
+  for (size_t i = 5; i < f.size(); ++i) {
+    if (f[i].empty())
+      continue;
+    numeric_values.push_back(parse_double(f[i], ctx.line_num));
+  }
+  if (static_cast<int>(numeric_values.size()) < required_dims) {
+    throw ParseError(std::format(
+        "Line {}: PBARL {} requires {} dimensions, got {}", ctx.line_num,
+        p.section_type, required_dims, numeric_values.size()));
+  }
+  if (static_cast<int>(numeric_values.size()) > required_dims + 1) {
+    throw ParseError(std::format(
+        "Line {}: PBARL {} continuation data beyond dimensions and NSM is not "
+        "yet supported",
+        ctx.line_num, p.section_type));
+  }
+
+  p.dimensions.assign(numeric_values.begin(),
+                      numeric_values.begin() + required_dims);
+  if (static_cast<int>(numeric_values.size()) == required_dims + 1)
+    p.nsm = numeric_values.back();
+  populate_pbarl_section(p, ctx.line_num);
+  ctx.model.properties[p.pid] = p;
+}
+
+void BdfParser::process_pbeam(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  PBeam p;
+  p.pid = PropertyId(parse_int(f[1], ctx.line_num));
+  p.mid = MaterialId(parse_int(f[2], ctx.line_num));
+  p.A = parse_double(f[3], ctx.line_num);
+  p.I1 = parse_double(f[4], ctx.line_num);
+  p.I2 = parse_double(f[5], ctx.line_num);
+  p.I12 = (f.size() > 6 && !f[6].empty()) ? parse_double(f[6], ctx.line_num) : 0.0;
+  p.J = (f.size() > 7 && !f[7].empty()) ? parse_double(f[7], ctx.line_num) : 0.0;
+  p.nsm = (f.size() > 8 && !f[8].empty()) ? parse_double(f[8], ctx.line_num) : 0.0;
+  reject_nonblank_fields(
+      f, 9, ctx.line_num, "PBEAM",
+      "continuation-based station data is not yet supported");
+  ctx.model.properties[p.pid] = p;
+}
+
+void BdfParser::process_pbush(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  PBush p;
+  p.pid = PropertyId(parse_int(f[1], ctx.line_num));
+  const std::string section_kind = uppercase_copy(f[2]);
+  if (section_kind != "K") {
+    throw ParseError(std::format(
+        "Line {}: PBUSH '{}' section is not yet supported; only PBUSH,K is "
+        "implemented",
+        ctx.line_num, f[2]));
+  }
+
+  std::vector<double> values;
+  for (size_t i = 3; i < f.size(); ++i) {
+    if (f[i].empty())
+      continue;
+    values.push_back(parse_double(f[i], ctx.line_num));
+  }
+  if (values.size() != 6) {
+    throw ParseError(std::format(
+        "Line {}: PBUSH,K requires exactly 6 stiffness terms, got {}",
+        ctx.line_num, values.size()));
+  }
+  for (int i = 0; i < 6; ++i)
+    p.k[static_cast<size_t>(i)] = values[static_cast<size_t>(i)];
+  ctx.model.properties[p.pid] = p;
+}
+
+void BdfParser::process_pelas(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  PElas p;
+  p.pid = PropertyId(parse_int(f[1], ctx.line_num));
+  p.k = parse_double(f[2], ctx.line_num);
+  p.ge = (f.size() > 3 && !f[3].empty()) ? parse_double(f[3], ctx.line_num) : 0.0;
+  p.s = (f.size() > 4 && !f[4].empty()) ? parse_double(f[4], ctx.line_num) : 0.0;
+  reject_nonblank_fields(f, 5, ctx.line_num, "PELAS",
+                         "extra continuation data is not supported");
+  ctx.model.properties[p.pid] = p;
+}
+
+void BdfParser::process_pmass(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  PMass p;
+  p.pid = PropertyId(parse_int(f[1], ctx.line_num));
+  p.mass = parse_double(f[2], ctx.line_num);
+  reject_nonblank_fields(f, 3, ctx.line_num, "PMASS",
+                         "extra continuation data is not supported");
   ctx.model.properties[p.pid] = p;
 }
 
@@ -977,6 +1308,135 @@ void BdfParser::process_cpenta(ParseContext &ctx,
   ctx.model.elements.push_back(std::move(e));
 }
 
+void BdfParser::process_cbar(ParseContext &ctx,
+                             const std::vector<std::string> &f) {
+  ElementData e;
+  e.id = ElementId(parse_int(f[1], ctx.line_num));
+  e.type = ElementType::CBAR;
+  e.pid = PropertyId(parse_int(f[2], ctx.line_num));
+  e.nodes.push_back(NodeId(parse_int(f[3], ctx.line_num)));
+  e.nodes.push_back(NodeId(parse_int(f[4], ctx.line_num)));
+  parse_orientation_or_g0(f, e, 5, ctx.line_num, std::nullopt);
+  reject_nonblank_fields(
+      f, 8, ctx.line_num, "CBAR",
+      "offsets, releases, OFFT, and other advanced fields are not supported");
+  ctx.model.elements.push_back(std::move(e));
+}
+
+void BdfParser::process_cbeam(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  ElementData e;
+  e.id = ElementId(parse_int(f[1], ctx.line_num));
+  e.type = ElementType::CBEAM;
+  e.pid = PropertyId(parse_int(f[2], ctx.line_num));
+  e.nodes.push_back(NodeId(parse_int(f[3], ctx.line_num)));
+  e.nodes.push_back(NodeId(parse_int(f[4], ctx.line_num)));
+  parse_orientation_or_g0(f, e, 5, ctx.line_num, std::nullopt);
+  reject_nonblank_fields(
+      f, 8, ctx.line_num, "CBEAM",
+      "offsets, releases, and continuation-based beam data are not supported");
+  ctx.model.elements.push_back(std::move(e));
+}
+
+void BdfParser::process_cbush(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  ElementData e;
+  e.id = ElementId(parse_int(f[1], ctx.line_num));
+  e.type = ElementType::CBUSH;
+  e.pid = PropertyId(parse_int(f[2], ctx.line_num));
+  e.nodes.push_back(NodeId(parse_int(f[3], ctx.line_num)));
+  e.nodes.push_back(NodeId(parse_int(f[4], ctx.line_num)));
+  const CoordId cid =
+      (f.size() > 8 && !f[8].empty()) ? CoordId(parse_int(f[8], ctx.line_num))
+                                      : CoordId{0};
+  parse_orientation_or_g0(f, e, 5, ctx.line_num, cid);
+  reject_nonblank_fields(
+      f, 9, ctx.line_num, "CBUSH",
+      "offset and location fields beyond CID are not yet supported");
+  ctx.model.elements.push_back(std::move(e));
+}
+
+void BdfParser::process_celas1(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  ElementData e;
+  e.id = ElementId(parse_int(f[1], ctx.line_num));
+  e.type = ElementType::CELAS1;
+  e.pid = PropertyId(parse_int(f[2], ctx.line_num));
+  e.nodes.push_back(NodeId(parse_int(f[3], ctx.line_num)));
+  e.components[0] = parse_int(f[4], ctx.line_num);
+  if (f.size() > 5 && !f[5].empty() && parse_int(f[5], ctx.line_num) != 0) {
+    e.nodes.push_back(NodeId(parse_int(f[5], ctx.line_num)));
+    e.components[1] =
+        (f.size() > 6 && !f[6].empty()) ? parse_int(f[6], ctx.line_num) : 0;
+  }
+  reject_nonblank_fields(f, 7, ctx.line_num, "CELAS1",
+                         "extra continuation data is not supported");
+  ctx.model.elements.push_back(std::move(e));
+}
+
+void BdfParser::process_celas2(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  ElementData e;
+  e.id = ElementId(parse_int(f[1], ctx.line_num));
+  e.type = ElementType::CELAS2;
+  e.value = parse_double(f[2], ctx.line_num);
+  e.nodes.push_back(NodeId(parse_int(f[3], ctx.line_num)));
+  e.components[0] = parse_int(f[4], ctx.line_num);
+  if (f.size() > 5 && !f[5].empty() && parse_int(f[5], ctx.line_num) != 0) {
+    e.nodes.push_back(NodeId(parse_int(f[5], ctx.line_num)));
+    e.components[1] =
+        (f.size() > 6 && !f[6].empty()) ? parse_int(f[6], ctx.line_num) : 0;
+  }
+  if ((f.size() > 7 && !f[7].empty() &&
+       parse_double(f[7], ctx.line_num) != 0.0) ||
+      (f.size() > 8 && !f[8].empty() &&
+       parse_double(f[8], ctx.line_num) != 0.0)) {
+    throw ParseError(std::format(
+        "Line {}: CELAS2 damping and stress-coefficient fields are not yet "
+        "supported",
+        ctx.line_num));
+  }
+  reject_nonblank_fields(f, 9, ctx.line_num, "CELAS2",
+                         "extra continuation data is not supported");
+  ctx.model.elements.push_back(std::move(e));
+}
+
+void BdfParser::process_cmass1(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  ElementData e;
+  e.id = ElementId(parse_int(f[1], ctx.line_num));
+  e.type = ElementType::CMASS1;
+  e.pid = PropertyId(parse_int(f[2], ctx.line_num));
+  e.nodes.push_back(NodeId(parse_int(f[3], ctx.line_num)));
+  e.components[0] = parse_int(f[4], ctx.line_num);
+  if (f.size() > 5 && !f[5].empty() && parse_int(f[5], ctx.line_num) != 0) {
+    e.nodes.push_back(NodeId(parse_int(f[5], ctx.line_num)));
+    e.components[1] =
+        (f.size() > 6 && !f[6].empty()) ? parse_int(f[6], ctx.line_num) : 0;
+  }
+  reject_nonblank_fields(f, 7, ctx.line_num, "CMASS1",
+                         "extra continuation data is not supported");
+  ctx.model.elements.push_back(std::move(e));
+}
+
+void BdfParser::process_cmass2(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  ElementData e;
+  e.id = ElementId(parse_int(f[1], ctx.line_num));
+  e.type = ElementType::CMASS2;
+  e.value = parse_double(f[2], ctx.line_num);
+  e.nodes.push_back(NodeId(parse_int(f[3], ctx.line_num)));
+  e.components[0] = parse_int(f[4], ctx.line_num);
+  if (f.size() > 5 && !f[5].empty() && parse_int(f[5], ctx.line_num) != 0) {
+    e.nodes.push_back(NodeId(parse_int(f[5], ctx.line_num)));
+    e.components[1] =
+        (f.size() > 6 && !f[6].empty()) ? parse_int(f[6], ctx.line_num) : 0;
+  }
+  reject_nonblank_fields(f, 7, ctx.line_num, "CMASS2",
+                         "extra continuation data is not supported");
+  ctx.model.elements.push_back(std::move(e));
+}
+
 void BdfParser::process_force(ParseContext &ctx,
                               const std::vector<std::string> &f) {
   // FORCE, SID, G, CID, F, N1, N2, N3
@@ -1029,6 +1489,56 @@ void BdfParser::process_tempd(ParseContext &ctx,
   double T = parse_double(f[2], ctx.line_num);
   ctx.tempd_map[sid] = T;
   ctx.model.tempd[sid] = T;
+}
+
+void BdfParser::process_grav(ParseContext &ctx,
+                             const std::vector<std::string> &f) {
+  GravLoad l;
+  l.sid = LoadSetId(parse_int(f[1], ctx.line_num));
+  l.cid = CoordId((f.size() > 2 && !f[2].empty()) ? parse_int(f[2], ctx.line_num)
+                                                  : 0);
+  l.scale = (f.size() > 3 && !f[3].empty()) ? parse_double(f[3], ctx.line_num) : 0.0;
+  l.direction = Vec3((f.size() > 4) ? parse_double(f[4], ctx.line_num) : 0.0,
+                     (f.size() > 5) ? parse_double(f[5], ctx.line_num) : 0.0,
+                     (f.size() > 6) ? parse_double(f[6], ctx.line_num) : 0.0);
+  reject_nonblank_fields(
+      f, 7, ctx.line_num, "GRAV",
+      "rotational acceleration components are not yet supported");
+  ctx.model.loads.emplace_back(l);
+}
+
+void BdfParser::process_accel(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  AccelLoad l;
+  l.sid = LoadSetId(parse_int(f[1], ctx.line_num));
+  l.cid = CoordId((f.size() > 2 && !f[2].empty()) ? parse_int(f[2], ctx.line_num)
+                                                  : 0);
+  l.scale = (f.size() > 3 && !f[3].empty()) ? parse_double(f[3], ctx.line_num) : 0.0;
+  l.direction = Vec3((f.size() > 4 && !f[4].empty()) ? parse_double(f[4], ctx.line_num) : 0.0,
+                     (f.size() > 5 && !f[5].empty()) ? parse_double(f[5], ctx.line_num) : 0.0,
+                     (f.size() > 6 && !f[6].empty()) ? parse_double(f[6], ctx.line_num) : 0.0);
+  ctx.model.loads.emplace_back(l);
+}
+
+void BdfParser::process_accel1(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  Accel1Load l;
+  l.sid = LoadSetId(parse_int(f[1], ctx.line_num));
+  l.cid = CoordId((f.size() > 2 && !f[2].empty()) ? parse_int(f[2], ctx.line_num)
+                                                  : 0);
+  l.scale = (f.size() > 3 && !f[3].empty()) ? parse_double(f[3], ctx.line_num) : 0.0;
+  l.direction = Vec3((f.size() > 4) ? parse_double(f[4], ctx.line_num) : 0.0,
+                     (f.size() > 5) ? parse_double(f[5], ctx.line_num) : 0.0,
+                     (f.size() > 6) ? parse_double(f[6], ctx.line_num) : 0.0);
+  const std::vector<int> node_ids = expand_id_list(f, 7, ctx.line_num);
+  for (int nid : node_ids)
+    l.nodes.push_back(NodeId(nid));
+  if (l.nodes.empty()) {
+    throw ParseError(std::format(
+        "Line {}: ACCEL1 requires at least one grid in the selection list",
+        ctx.line_num));
+  }
+  ctx.model.loads.emplace_back(std::move(l));
 }
 
 void BdfParser::process_pload(ParseContext &ctx,

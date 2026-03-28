@@ -45,7 +45,13 @@ public:
         int nd, double sigma) override;
 
     [[nodiscard]] std::string name() const override {
-        return "Spectra CPU (shift-invert Lanczos)";
+#if defined(HAVE_ACCELERATE)
+        return "Spectra + Apple Accelerate (CPU shift-invert Lanczos)";
+#elif defined(EIGEN_CHOLMOD_SUPPORT)
+        return "Spectra + SuiteSparse CHOLMOD (CPU shift-invert Lanczos)";
+#else
+        return "Spectra + Eigen sparse direct (CPU shift-invert Lanczos)";
+#endif
     }
 };
 

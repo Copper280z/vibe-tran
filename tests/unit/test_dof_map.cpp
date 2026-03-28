@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 #include "core/dof_map.hpp"
 #include "core/model.hpp"
+#include "solver/analysis_support.hpp"
 #include <set>
 
 using namespace vibestran;
@@ -218,4 +219,87 @@ TEST(DofMap, GlobalIndicesAfterConstraint) {
     EXPECT_EQ(out[0], CONSTRAINED_DOF);
     for (int d = 1; d < 6; ++d)
         EXPECT_NE(out[d], CONSTRAINED_DOF);
+}
+
+static Model make_analysis_support_model() {
+    Model m;
+    auto add_node = [&](int id, double x, double y, double z) {
+        m.nodes[NodeId{id}] = GridPoint{NodeId{id}, CoordId{0}, Vec3{x, y, z}, CoordId{0}};
+    };
+
+    add_node(1, 0.0, 0.0, 0.0);
+    add_node(2, 1.0, 0.0, 0.0);
+    add_node(3, 0.0, 1.0, 0.0);
+    add_node(4, 1.0, 1.0, 0.0);
+    add_node(5, 0.0, 0.0, 1.0);
+    add_node(6, 1.0, 0.0, 1.0);
+    add_node(7, 0.0, 1.0, 1.0);
+    add_node(8, 1.0, 1.0, 1.0);
+
+    return m;
+}
+
+TEST(AnalysisSupport, ShellSolidSharedNodeKeepsRotationsActive) {
+    Model m = make_analysis_support_model();
+
+    ElementData shell;
+    shell.id = ElementId{1};
+    shell.type = ElementType::CQUAD4;
+    shell.nodes = {NodeId{1}, NodeId{2}, NodeId{4}, NodeId{3}};
+    m.elements.push_back(shell);
+
+    ElementData solid;
+    solid.id = ElementId{2};
+    solid.type = ElementType::CTETRA4;
+    solid.nodes = {NodeId{1}, NodeId{5}, NodeId{6}, NodeId{7}};
+    m.elements.push_back(solid);
+
+    const DofMap dmap = build_analysis_dof_map(m, SubCase{});
+    EXPECT_TRUE(dmap.is_free(NodeId{1}, 3));
+    EXPECT_TRUE(dmap.is_free(NodeId{1}, 4));
+    EXPECT_TRUE(dmap.is_free(NodeId{1}, 5));
+    EXPECT_FALSE(dmap.is_free(NodeId{5}, 3));
+}
+
+TEST(AnalysisSupport, BeamShellSharedNodeKeepsBeamRotationsActive) {
+    Model m = make_analysis_support_model();
+
+    ElementData beam;
+    beam.id = ElementId{1};
+    beam.type = ElementType::CBAR;
+    beam.nodes = {NodeId{1}, NodeId{2}};
+    m.elements.push_back(beam);
+
+    ElementData shell;
+    shell.id = ElementId{2};
+    shell.type = ElementType::CQUAD4;
+    shell.nodes = {NodeId{1}, NodeId{3}, NodeId{4}, NodeId{2}};
+    m.elements.push_back(shell);
+
+    const DofMap dmap = build_analysis_dof_map(m, SubCase{});
+    EXPECT_TRUE(dmap.is_free(NodeId{1}, 3));
+    EXPECT_TRUE(dmap.is_free(NodeId{1}, 4));
+    EXPECT_TRUE(dmap.is_free(NodeId{1}, 5));
+}
+
+TEST(AnalysisSupport, BeamSolidSharedNodeKeepsBeamRotationsActive) {
+    Model m = make_analysis_support_model();
+
+    ElementData beam;
+    beam.id = ElementId{1};
+    beam.type = ElementType::CBAR;
+    beam.nodes = {NodeId{1}, NodeId{2}};
+    m.elements.push_back(beam);
+
+    ElementData solid;
+    solid.id = ElementId{2};
+    solid.type = ElementType::CTETRA4;
+    solid.nodes = {NodeId{1}, NodeId{5}, NodeId{6}, NodeId{7}};
+    m.elements.push_back(solid);
+
+    const DofMap dmap = build_analysis_dof_map(m, SubCase{});
+    EXPECT_TRUE(dmap.is_free(NodeId{1}, 3));
+    EXPECT_TRUE(dmap.is_free(NodeId{1}, 4));
+    EXPECT_TRUE(dmap.is_free(NodeId{1}, 5));
+    EXPECT_FALSE(dmap.is_free(NodeId{5}, 3));
 }

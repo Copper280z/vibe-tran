@@ -20,7 +20,6 @@ namespace vibestran {
 // u_gm[R2] - u_gn[R2] = 0
 // u_gm[R3] - u_gn[R3] = 0
 
-// cppcheck-suppress unusedFunction -- called from linear_static.cpp
 void expand_rbe2(const Rbe2& rbe, const Model& model, std::vector<Mpc>& out) {
     const Vec3 pos_n = model.node(rbe.gn).position;
 
@@ -96,7 +95,6 @@ void expand_rbe2(const Rbe2& rbe, const Model& model, std::vector<Mpc>& out) {
 // Rearranging (multiply through by W, move ref to left):
 //   W * u_ref[Ti] - sum_j wj * u_j[Ti] - sum_j wj * (omega_j × r_j)[i] = 0
 
-// cppcheck-suppress unusedFunction -- called from linear_static.cpp
 void expand_rbe3(const Rbe3& rbe, const Model& model, std::vector<Mpc>& out) {
     const Vec3 pos_ref = model.node(rbe.ref_node).position;
     MpcSetId sid{0};

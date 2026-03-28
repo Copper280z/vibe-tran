@@ -10,9 +10,11 @@
 //   - INCLUDE statements (recursive)
 //   - Comment lines ($)
 //
-// Parsed card types: GRID, MAT1, PSHELL, PSOLID,
-//                    CQUAD4, CTRIA3, CHEXA, CTETRA,
-//                    FORCE, MOMENT, TEMP, TEMPD,
+// Parsed card types: GRID, MAT1, PSHELL, PSOLID, PBAR, PBARL, PBEAM, PBUSH,
+//                    PELAS, PMASS,
+//                    CQUAD4, CTRIA3, CHEXA, CTETRA, CPENTA,
+//                    CBAR, CBEAM, CBUSH, CELAS1, CELAS2, CMASS1, CMASS2,
+//                    FORCE, MOMENT, TEMP, TEMPD, GRAV, ACCEL1,
 //                    PLOAD, PLOAD1, PLOAD2, PLOAD4,
 //                    SPC, SPC1,
 //                    SOL, SUBCASE, LOAD, SPC (case control)
@@ -50,15 +52,31 @@ private:
     static void process_mat1    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_pshell  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_psolid  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_pbar    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_pbarl   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_pbeam   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_pbush   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_pelas   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_pmass   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_cquad4  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_ctria3  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_chexa   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_ctetra  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_cpenta  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_cbar    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_cbeam   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_cbush   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_celas1  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_celas2  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_cmass1  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_cmass2  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_force   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_moment  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_temp    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_tempd   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_grav    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_accel   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_accel1  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_pload   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_pload1  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_pload2  (ParseContext& ctx, const std::vector<std::string>& fields);

@@ -2,6 +2,7 @@
 
 #include "core/coord_sys.hpp"
 #include "elements/element_factory.hpp"
+#include "elements/line_elements.hpp"
 
 #include <algorithm>
 #include <array>
@@ -643,10 +644,17 @@ void LinearStaticSolver::apply_pressure_loads(const Model &model,
             }
 
           } else if constexpr (std::is_same_v<T, Pload1Load>) {
-            throw SolverError(std::format(
-                "PLOAD1 load set {} references element {}, but no supported "
-                "bar or beam elements are implemented yet",
-                load.sid.value, load.element.value));
+            const auto it = elements_by_id.find(load.element);
+            if (it == elements_by_id.end()) {
+              throw SolverError(std::format(
+                  "PLOAD1 references undefined element {}",
+                  load.element.value));
+            }
+            const ElementData &elem = *it->second;
+            const LocalFe fe = compute_pload1_equivalent_load(elem, model, load);
+            const std::vector<double> fe_vec(fe.data(), fe.data() + fe.size());
+            apply_element_force_vector(elem, model, dof_map, mpc_handler, fe_vec,
+                                       F);
 
           } else if constexpr (std::is_same_v<T, Pload2Load>) {
             const auto it = elements_by_id.find(load.element);

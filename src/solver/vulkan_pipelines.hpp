@@ -83,7 +83,7 @@ void cmd_spmv_d(VkCommandBuffer cmd, const Pipelines& pl,
 void cmd_dot_reduce_d(VkCommandBuffer cmd, const Pipelines& pl,
                       VkDescriptorSet ds, uint32_t n);
 void cmd_axpby_d(VkCommandBuffer cmd, const Pipelines& pl,
-                 VkDescriptorSet ds, PCAxpbyD pc, uint32_t n);
+                 VkDescriptorSet ds, const PCAxpbyD& pc, uint32_t n);
 void cmd_jacobi_d(VkCommandBuffer cmd, const Pipelines& pl,
                   VkDescriptorSet ds, uint32_t n);
 

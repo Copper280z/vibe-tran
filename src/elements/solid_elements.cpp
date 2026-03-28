@@ -4,8 +4,10 @@
 
 #include "elements/solid_elements.hpp"
 #include <Eigen/Dense>
+#include <algorithm>
 #include <cmath>
 #include <format>
+#include <iterator>
 
 namespace vibestran {
 
@@ -22,6 +24,21 @@ static Eigen::Matrix<double,6,6> isotropic_D(double E, double nu) {
     D(2,0)=lam;      D(2,1)=lam;      D(2,2)=lam+2*mu;
     D(3,3)=mu; D(4,4)=mu; D(5,5)=mu;
     return D;
+}
+
+template <std::size_t N>
+std::vector<EqIndex> solid_global_dof_indices(const std::array<NodeId, N>& nodes,
+                                              const DofMap& dof_map) {
+    static constexpr std::array<int, 3> kSolidDofs{0, 1, 2};
+
+    std::vector<EqIndex> result;
+    result.reserve(N * kSolidDofs.size());
+    std::for_each(nodes.begin(), nodes.end(), [&](NodeId nid) {
+        std::transform(kSolidDofs.begin(), kSolidDofs.end(),
+                       std::back_inserter(result),
+                       [&](int dof) { return dof_map.eq_index(nid, dof); });
+    });
+    return result;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -257,13 +274,7 @@ LocalFe CHexa8::thermal_load(std::span<const double> temperatures, double t_ref)
 }
 
 std::vector<EqIndex> CHexa8::global_dof_indices(const DofMap& dof_map) const {
-    std::vector<EqIndex> result;
-    result.reserve(NUM_DOFS);
-    static constexpr int solid_dofs[3] = {0,1,2}; // T1,T2,T3 only
-    for (NodeId nid : nodes_)
-        for (int d : solid_dofs)
-            result.push_back(dof_map.eq_index(nid, d));
-    return result;
+    return solid_global_dof_indices(nodes_, dof_map);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -457,13 +468,7 @@ LocalFe CTetra4::thermal_load(std::span<const double> temperatures, double t_ref
 }
 
 std::vector<EqIndex> CTetra4::global_dof_indices(const DofMap& dof_map) const {
-    std::vector<EqIndex> result;
-    result.reserve(NUM_DOFS);
-    static constexpr int solid_dofs[3] = {0,1,2};
-    for (NodeId nid : nodes_)
-        for (int d : solid_dofs)
-            result.push_back(dof_map.eq_index(nid, d));
-    return result;
+    return solid_global_dof_indices(nodes_, dof_map);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -742,13 +747,7 @@ LocalFe CPenta6::thermal_load(std::span<const double> temperatures, double t_ref
 }
 
 std::vector<EqIndex> CPenta6::global_dof_indices(const DofMap& dof_map) const {
-    std::vector<EqIndex> result;
-    result.reserve(NUM_DOFS);
-    static constexpr int solid_dofs[3] = {0,1,2};
-    for (NodeId nid : nodes_)
-        for (int d : solid_dofs)
-            result.push_back(dof_map.eq_index(nid, d));
-    return result;
+    return solid_global_dof_indices(nodes_, dof_map);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1017,13 +1016,7 @@ LocalFe CTetra10::thermal_load(std::span<const double> temperatures, double t_re
 }
 
 std::vector<EqIndex> CTetra10::global_dof_indices(const DofMap& dof_map) const {
-    std::vector<EqIndex> result;
-    result.reserve(NUM_DOFS);
-    static constexpr int solid_dofs[3] = {0,1,2};
-    for (NodeId nid : nodes_)
-        for (int d : solid_dofs)
-            result.push_back(dof_map.eq_index(nid, d));
-    return result;
+    return solid_global_dof_indices(nodes_, dof_map);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1063,7 +1056,7 @@ LocalKe CHexa8Eas::stiffness_matrix() const {
     // Static condensation: Ke = Kuu - Kua * Kaa^-1 * Kau
     // Centroidal Jacobian J0 used to map enhancement modes for frame objectivity.
 
-    LocalKe Ke = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+    LocalKe Ke;
     auto coords = node_coords();
     Eigen::Matrix<double,6,6> D = constitutive_D();
 
@@ -1302,13 +1295,7 @@ LocalFe CHexa8Eas::thermal_load(std::span<const double> temperatures, double t_r
 }
 
 std::vector<EqIndex> CHexa8Eas::global_dof_indices(const DofMap& dof_map) const {
-    std::vector<EqIndex> result;
-    result.reserve(NUM_DOFS);
-    static constexpr int solid_dofs[3] = {0,1,2};
-    for (NodeId nid : nodes_)
-        for (int d : solid_dofs)
-            result.push_back(dof_map.eq_index(nid, d));
-    return result;
+    return solid_global_dof_indices(nodes_, dof_map);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1400,7 +1387,7 @@ LocalKe CPenta6Eas::stiffness_matrix() const {
         double scale = detJ0 / detJ;
 
         // Parametric enhancement function values
-        double f[3] = { L1 - 1.0/3.0, L2 - 1.0/3.0, zeta };
+        const double f[3] = { L1 - 1.0/3.0, L2 - 1.0/3.0, zeta };
 
         // Physical gradient of each enhancement function via centroidal Jacobian:
         // grad_phys(f_k) = J0^{-T} * grad_param(f_k)
@@ -1581,13 +1568,7 @@ LocalFe CPenta6Eas::thermal_load(std::span<const double> temperatures, double t_
 }
 
 std::vector<EqIndex> CPenta6Eas::global_dof_indices(const DofMap& dof_map) const {
-    std::vector<EqIndex> result;
-    result.reserve(NUM_DOFS);
-    static constexpr int solid_dofs[3] = {0,1,2};
-    for (NodeId nid : nodes_)
-        for (int d : solid_dofs)
-            result.push_back(dof_map.eq_index(nid, d));
-    return result;
+    return solid_global_dof_indices(nodes_, dof_map);
 }
 
 } // namespace vibestran

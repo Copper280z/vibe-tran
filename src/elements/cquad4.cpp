@@ -534,6 +534,7 @@ void assemble_square_submatrix(LocalKe &Ke, const Eigen::MatrixXd &submatrix,
   }
 }
 
+// cppcheck-suppress constParameterReference -- Eigen matrices are mutated via operator()
 void assemble_coupling_submatrix(LocalKe &Ke,
                                  const Eigen::Matrix<double, 8, 12> &submatrix) {
   for (int i = 0; i < 4; ++i) {
@@ -548,8 +549,9 @@ void assemble_coupling_submatrix(LocalKe &Ke,
   }
 }
 
-void assemble_coupling_transpose_submatrix(
-    LocalKe &Ke, const Eigen::Matrix<double, 8, 12> &submatrix) {
+// cppcheck-suppress constParameterReference -- Eigen matrices are mutated via operator()
+void assemble_coupling_transpose_submatrix(LocalKe& Ke,
+                                           const Eigen::Matrix<double, 8, 12>& submatrix) {
   for (int i = 0; i < 4; ++i) {
     for (int j = 0; j < 4; ++j) {
       for (int a = 0; a < 2; ++a) {
@@ -562,6 +564,7 @@ void assemble_coupling_transpose_submatrix(
   }
 }
 
+// cppcheck-suppress constParameterReference -- Eigen vectors are mutated via operator()
 void assemble_membrane_force(LocalFe &fe, const Eigen::Matrix<double, 8, 1> &f) {
   for (int n = 0; n < 4; ++n) {
     fe(6 * n) += f(2 * n);
@@ -830,14 +833,6 @@ CQuad4::ShapeData CQuad4::shape_functions(double xi, double eta) noexcept {
   return s;
 }
 
-Eigen::Matrix3d CQuad4::membrane_D() const {
-  return build_shell_section(model_, eid_, pid_).membrane_D;
-}
-
-Eigen::Matrix3d CQuad4::bending_D() const {
-  return build_shell_section(model_, eid_, pid_).D;
-}
-
 LocalKe CQuad4::stiffness_matrix() const {
   return compute_shell_stiffness(eid_, pid_, nodes_, model_,
                                  ShellFormulation::MINDLIN);
@@ -889,14 +884,6 @@ double CQuad4Mitc4::thickness() const { return pshell().t; }
 
 std::array<Vec3, 4> CQuad4Mitc4::node_coords() const {
   return lookup_node_coords(model_, nodes_);
-}
-
-Eigen::Matrix3d CQuad4Mitc4::membrane_D() const {
-  return build_shell_section(model_, eid_, pid_).membrane_D;
-}
-
-Eigen::Matrix3d CQuad4Mitc4::bending_D() const {
-  return build_shell_section(model_, eid_, pid_).D;
 }
 
 LocalKe CQuad4Mitc4::stiffness_matrix() const {

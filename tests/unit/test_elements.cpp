@@ -7,6 +7,7 @@
 #include "core/model.hpp"
 #include "elements/cquad4.hpp"
 #include "elements/ctria3.hpp"
+#include "elements/line_elements.hpp"
 #include "elements/solid_elements.hpp"
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -318,7 +319,7 @@ TEST(CTria3, ZeroAreaThrows) {
 
   std::array<NodeId, 3> nodes{NodeId{1}, NodeId{2}, NodeId{3}};
   CTria3 elem(ElementId{1}, PropertyId{1}, nodes, m);
-  EXPECT_THROW(elem.stiffness_matrix(), SolverError);
+  EXPECT_THROW(static_cast<void>(elem.stiffness_matrix()), SolverError);
 }
 
 // ── CTETRA4 tests
@@ -1997,4 +1998,123 @@ TEST(CQuad4Mitc4, BendingEnergy_PureTwist_Analytical) {
   const double D = E * t * t * t / (12.0 * (1.0 - nu * nu));
   const double expected = 2.0 * D * (1.0 - nu); // u^T*K*u = E*t³/6 for ν=0
   EXPECT_NEAR(u.dot(Ke * u), expected, 1e-8 * expected);
+}
+
+TEST(CBar, StiffnessIsSymmetricAndMatchesAxialEAOverL) {
+  Model m;
+  add_mat1(m, 1, 2.0e7, 0.3);
+
+  PBar p;
+  p.pid = PropertyId{1};
+  p.mid = MaterialId{1};
+  p.A = 2.0;
+  p.I1 = 3.0;
+  p.I2 = 4.0;
+  p.J = 5.0;
+  m.properties[p.pid] = p;
+
+  add_grid(m, 1, 0.0, 0.0, 0.0);
+  add_grid(m, 2, 2.0, 0.0, 0.0);
+
+  CBarBeamElement elem(ElementType::CBAR, ElementId{1}, PropertyId{1},
+                       {NodeId{1}, NodeId{2}}, m, Vec3{0.0, 1.0, 0.0},
+                       std::nullopt);
+
+  const LocalKe Ke = elem.stiffness_matrix();
+  EXPECT_EQ(Ke.rows(), 12);
+  EXPECT_EQ(Ke.cols(), 12);
+  EXPECT_LT((Ke - Ke.transpose()).cwiseAbs().maxCoeff(), 1e-10 * Ke.norm());
+
+  Eigen::VectorXd u = Eigen::VectorXd::Zero(12);
+  u(6) = 1.0;
+  const Eigen::VectorXd f = Ke * u;
+  const double axial = 2.0e7 * 2.0 / 2.0;
+  EXPECT_NEAR(f(0), -axial, 1e-8 * axial);
+  EXPECT_NEAR(f(6), axial, 1e-8 * axial);
+}
+
+TEST(CBeam, ThermalLoadIsAxialAndSelfEquilibrated) {
+  Model m;
+  add_mat1(m, 1, 3.0e7, 0.25, 0.0, 1.2e-5);
+
+  PBeam p;
+  p.pid = PropertyId{1};
+  p.mid = MaterialId{1};
+  p.A = 1.5;
+  p.I1 = 0.2;
+  p.I2 = 0.3;
+  p.J = 0.4;
+  m.properties[p.pid] = p;
+
+  add_grid(m, 1, 0.0, 0.0, 0.0);
+  add_grid(m, 2, 5.0, 0.0, 0.0);
+
+  CBarBeamElement elem(ElementType::CBEAM, ElementId{1}, PropertyId{1},
+                       {NodeId{1}, NodeId{2}}, m, Vec3{0.0, 1.0, 0.0},
+                       std::nullopt);
+
+  const LocalFe fe =
+      elem.thermal_load(std::array<double, 2>{100.0, 100.0}, 0.0);
+  const double expected = 3.0e7 * 1.5 * 1.2e-5 * 100.0;
+  EXPECT_EQ(fe.size(), 12);
+  EXPECT_NEAR(fe(0), -expected, 1e-8 * expected);
+  EXPECT_NEAR(fe(6), expected, 1e-8 * expected);
+  EXPECT_NEAR(fe.segment<3>(0).sum() + fe.segment<3>(6).sum(), 0.0,
+              1e-8 * expected);
+}
+
+TEST(CBush, OrientationMapsLocalStiffnessAxes) {
+  Model m;
+
+  PBush p;
+  p.pid = PropertyId{1};
+  p.k = {0.0, 20.0, 0.0, 0.0, 0.0, 0.0};
+  m.properties[p.pid] = p;
+
+  add_grid(m, 1, 0.0, 0.0, 0.0);
+  add_grid(m, 2, 1.0, 0.0, 0.0);
+
+  CBushElement elem(ElementId{1}, PropertyId{1}, {NodeId{1}, NodeId{2}}, m,
+                    Vec3{0.0, 0.0, 1.0}, std::nullopt, CoordId{0});
+  const LocalKe Ke = elem.stiffness_matrix();
+
+  Eigen::VectorXd u = Eigen::VectorXd::Zero(12);
+  u(8) = 1.0; // relative global Z translation should align with local y
+  const Eigen::VectorXd f = Ke * u;
+  EXPECT_NEAR(f(2), -20.0, 1e-10);
+  EXPECT_NEAR(f(8), 20.0, 1e-10);
+}
+
+TEST(ScalarElements, GroundedSpringAndMassUseSingleTargetDof) {
+  Model m;
+
+  PElas pelas;
+  pelas.pid = PropertyId{1};
+  pelas.k = 55.0;
+  m.properties[pelas.pid] = pelas;
+
+  PMass pmass;
+  pmass.pid = PropertyId{2};
+  pmass.mass = 3.5;
+  m.properties[pmass.pid] = pmass;
+
+  add_grid(m, 1, 0.0, 0.0, 0.0);
+
+  ScalarSpringElement spring(ElementType::CELAS1, ElementId{1}, PropertyId{1},
+                             {NodeId{1}}, {2, 0}, 0.0, m);
+  ScalarMassElement mass(ElementType::CMASS1, ElementId{2}, PropertyId{2},
+                         {NodeId{1}}, {2, 0}, 0.0, m);
+
+  const LocalKe K = spring.stiffness_matrix();
+  const LocalKe M = mass.mass_matrix();
+  EXPECT_EQ(spring.num_dofs(), 1);
+  EXPECT_EQ(mass.num_dofs(), 1);
+  EXPECT_DOUBLE_EQ(K(0, 0), 55.0);
+  EXPECT_DOUBLE_EQ(M(0, 0), 3.5);
+
+  DofMap dmap;
+  dmap.build(m.nodes, 6);
+  const auto gdofs = spring.global_dof_indices(dmap);
+  ASSERT_EQ(gdofs.size(), 1u);
+  EXPECT_EQ(gdofs[0], dmap.eq_index(NodeId{1}, 1));
 }

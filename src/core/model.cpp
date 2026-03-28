@@ -3,9 +3,40 @@
 #include "core/coord_sys.hpp"
 #include <format>
 #include <algorithm>
+#include <type_traits>
 #include <unordered_set>
 
 namespace vibestran {
+
+namespace {
+
+bool element_requires_property(const ElementType type) {
+    switch (type) {
+    case ElementType::CQUAD4:
+    case ElementType::CTRIA3:
+    case ElementType::CHEXA8:
+    case ElementType::CHEXA20:
+    case ElementType::CTETRA4:
+    case ElementType::CTETRA10:
+    case ElementType::CPENTA6:
+    case ElementType::CBAR:
+    case ElementType::CBEAM:
+    case ElementType::CBUSH:
+    case ElementType::CELAS1:
+    case ElementType::CMASS1:
+        return true;
+    case ElementType::CELAS2:
+    case ElementType::CMASS2:
+        return false;
+    }
+    return false;
+}
+
+bool component_is_valid(const int component) {
+    return component >= 1 && component <= 6;
+}
+
+} // namespace
 
 void Model::validate() const {
     std::unordered_set<ElementId> element_ids;
@@ -20,9 +51,34 @@ void Model::validate() const {
         if (missing_node != elem.nodes.end())
             throw SolverError(std::format(
                 "Element {} references undefined node {}", elem.id.value, missing_node->value));
-        if (!properties.count(elem.pid))
+        if (element_requires_property(elem.type) && !properties.count(elem.pid))
             throw SolverError(std::format(
                 "Element {} references undefined property {}", elem.id.value, elem.pid.value));
+
+        if ((elem.type == ElementType::CBAR || elem.type == ElementType::CBEAM ||
+             elem.type == ElementType::CBUSH) && elem.nodes.size() != 2) {
+            throw SolverError(std::format(
+                "Element {} expects exactly 2 grid points", elem.id.value));
+        }
+        if ((elem.type == ElementType::CELAS1 || elem.type == ElementType::CELAS2 ||
+             elem.type == ElementType::CMASS1 || elem.type == ElementType::CMASS2) &&
+            (elem.nodes.empty() || elem.nodes.size() > 2)) {
+            throw SolverError(std::format(
+                "Scalar element {} must reference one or two grid points", elem.id.value));
+        }
+        if (elem.type == ElementType::CELAS1 || elem.type == ElementType::CELAS2 ||
+            elem.type == ElementType::CMASS1 || elem.type == ElementType::CMASS2) {
+            if (!component_is_valid(elem.components[0])) {
+                throw SolverError(std::format(
+                    "Element {} has invalid first component {}", elem.id.value,
+                    elem.components[0]));
+            }
+            if (elem.nodes.size() > 1 && !component_is_valid(elem.components[1])) {
+                throw SolverError(std::format(
+                    "Element {} has invalid second component {}", elem.id.value,
+                    elem.components[1]));
+            }
+        }
     }
 
     // Check property-material references
@@ -46,6 +102,12 @@ void Model::validate() const {
                 if (!materials.count(p.mid))
                     throw SolverError(std::format(
                         "PSOLID {} references undefined material {}", pid.value, p.mid.value));
+            } else if constexpr (std::is_same_v<T, PBar> ||
+                                 std::is_same_v<T, PBarL> ||
+                                 std::is_same_v<T, PBeam>) {
+                if (!materials.count(p.mid))
+                    throw SolverError(std::format(
+                        "Property {} references undefined material {}", pid.value, p.mid.value));
             }
         }, prop);
     }
@@ -87,6 +149,12 @@ void Model::validate() const {
                         throw SolverError(std::format(
                             "PLOAD4 references undefined face node {}", l.face_node34->value));
                 }
+            } else if constexpr (std::is_same_v<T, Accel1Load>) {
+                auto missing_node = std::find_if(l.nodes.begin(), l.nodes.end(),
+                    [&](NodeId nid) { return !nodes.count(nid); });
+                if (missing_node != l.nodes.end())
+                    throw SolverError(std::format(
+                        "ACCEL1 references undefined node {}", missing_node->value));
             }
         }, load);
     }

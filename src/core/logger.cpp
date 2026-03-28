@@ -35,10 +35,14 @@ void init_logger(const std::filesystem::path& log_file) {
     spdlog::set_default_logger(logger);
 }
 
+// cppcheck-suppress unusedFunction -- used from CUDA translation units
 void log_trace(const std::string& msg) { spdlog::trace("{}", msg); }
+// cppcheck-suppress unusedFunction -- used from CUDA translation units
 void log_debug(const std::string& msg) { spdlog::debug("{}", msg); }
+// cppcheck-suppress unusedFunction -- used from CUDA translation units
 void log_info (const std::string& msg) { spdlog::info("{}", msg); }
 void log_warn (const std::string& msg) { spdlog::warn("{}", msg); }
+// cppcheck-suppress unusedFunction -- used from CUDA translation units
 void log_error(const std::string& msg) { spdlog::error("{}", msg); }
 
 } // namespace vibestran

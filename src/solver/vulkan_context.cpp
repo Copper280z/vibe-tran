@@ -44,11 +44,9 @@ VulkanContext& VulkanContext::operator=(VulkanContext&& o) noexcept {
 
 const VulkanDeviceInfo& VulkanContext::device_info()     const noexcept { return device_info_; }
 VkDevice                VulkanContext::device()          const noexcept { return device_; }
-// cppcheck-suppress unusedFunction -- only used in tests
 VkPhysicalDevice        VulkanContext::physical_device() const noexcept { return phys_dev_; }
 VkQueue                 VulkanContext::compute_queue()   const noexcept { return compute_queue_; }
 VkCommandPool           VulkanContext::command_pool()    const noexcept { return command_pool_; }
-// cppcheck-suppress unusedFunction -- only used in tests
 uint32_t                VulkanContext::compute_queue_family() const noexcept { return compute_queue_family_; }
 
 uint32_t VulkanContext::find_memory_type(uint32_t type_filter,

@@ -2,6 +2,7 @@
 #include "elements/element_factory.hpp"
 #include "elements/cquad4.hpp"
 #include "elements/ctria3.hpp"
+#include "elements/line_elements.hpp"
 #include "elements/solid_elements.hpp"
 #include <format>
 
@@ -67,6 +68,36 @@ std::unique_ptr<ElementBase> make_element(const ElementData& data, const Model& 
                                         data.nodes[8],data.nodes[9]};
             return std::make_unique<CTetra10>(data.id, data.pid, nids, model);
         }
+        case ElementType::CBAR:
+        case ElementType::CBEAM: {
+            if (data.nodes.size() != 2)
+                throw SolverError(std::format("{} {} needs 2 nodes, got {}",
+                    (data.type == ElementType::CBAR) ? "CBAR" : "CBEAM",
+                    data.id.value, data.nodes.size()));
+            std::array<NodeId,2> nids{data.nodes[0], data.nodes[1]};
+            return std::make_unique<CBarBeamElement>(data.type, data.id, data.pid,
+                                                     nids, model, data.orientation,
+                                                     data.g0);
+        }
+        case ElementType::CBUSH: {
+            if (data.nodes.size() != 2)
+                throw SolverError(std::format("CBUSH {} needs 2 nodes, got {}",
+                                              data.id.value, data.nodes.size()));
+            std::array<NodeId,2> nids{data.nodes[0], data.nodes[1]};
+            return std::make_unique<CBushElement>(data.id, data.pid, nids, model,
+                                                  data.orientation, data.g0,
+                                                  data.cid);
+        }
+        case ElementType::CELAS1:
+        case ElementType::CELAS2:
+            return std::make_unique<ScalarSpringElement>(data.type, data.id, data.pid,
+                                                         data.nodes, data.components,
+                                                         data.value, model);
+        case ElementType::CMASS1:
+        case ElementType::CMASS2:
+            return std::make_unique<ScalarMassElement>(data.type, data.id, data.pid,
+                                                       data.nodes, data.components,
+                                                       data.value, model);
         default:
             throw SolverError(std::format("Unsupported element type for element {}", data.id.value));
     }

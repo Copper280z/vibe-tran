@@ -34,6 +34,25 @@ std::string banner_line(std::string_view left, std::string_view right,
          + std::string(right) + "\n";
 }
 
+const SubCase* find_model_subcase(const Model& model, int subcase_id) {
+    const auto it = std::find_if(
+        model.analysis.subcases.begin(), model.analysis.subcases.end(),
+        [&](const SubCase& sc) { return sc.id == subcase_id; });
+    return (it == model.analysis.subcases.end()) ? nullptr : &*it;
+}
+
+bool contains_plate_stress_type(const SubCaseResults& sc, ElementType etype) {
+    return std::any_of(
+        sc.plate_stresses.begin(), sc.plate_stresses.end(),
+        [&](const auto& ps) { return ps.etype == etype; });
+}
+
+bool contains_solid_stress_type(const SubCaseResults& sc, ElementType etype) {
+    return std::any_of(
+        sc.solid_stresses.begin(), sc.solid_stresses.end(),
+        [&](const auto& ss) { return ss.etype == etype; });
+}
+
 } // namespace
 
 // ── Principal stress helpers ──────────────────────────────────────────────────
@@ -140,16 +159,9 @@ void F06Writer::write(const SolverResults& results, const Model& model,
                       std::ostream& out) {
     write_header(out);
     for (const auto& sc : results.subcases) {
-        // Find the SubCase from the model for output flags
-        bool do_disp   = false;
-        bool do_stress = false;
-        for (const auto& msc : model.analysis.subcases) {
-            if (msc.id == sc.id) {
-                do_disp   = msc.disp_print;
-                do_stress = msc.stress_print;
-                break;
-            }
-        }
+        const SubCase* msc = find_model_subcase(model, sc.id);
+        const bool do_disp = (msc != nullptr) && msc->disp_print;
+        const bool do_stress = (msc != nullptr) && msc->stress_print;
 
         out << "\n OUTPUT FOR SUBCASE" << std::setw(9) << sc.id << "\n";
         if (!sc.label.empty())
@@ -210,10 +222,7 @@ void F06Writer::write_displacement_table(const SubCaseResults& sc,
 void F06Writer::write_quad4_stress_table(const SubCaseResults& sc,
                                           std::ostream& out) {
     // Filter CQUAD4 plate stresses
-    bool has_quad4 = false;
-    for (const auto& ps : sc.plate_stresses)
-        if (ps.etype == ElementType::CQUAD4) { has_quad4 = true; break; }
-    if (!has_quad4) return;
+    if (!contains_plate_stress_type(sc, ElementType::CQUAD4)) return;
 
     out << "\n                     S T R E S S E S   I N   Q U A D R I L A T E R A L   E L E M E N T S   ( C Q U A D 4 )\n\n";
     out << "  ELEMENT-ID    FIBER         NORMAL-X       NORMAL-Y      SHEAR-XY       ANGLE         MAJOR          MINOR        VON MISES\n";
@@ -238,10 +247,7 @@ void F06Writer::write_quad4_stress_table(const SubCaseResults& sc,
 
 void F06Writer::write_tria3_stress_table(const SubCaseResults& sc,
                                           std::ostream& out) {
-    bool has_tria3 = false;
-    for (const auto& ps : sc.plate_stresses)
-        if (ps.etype == ElementType::CTRIA3) { has_tria3 = true; break; }
-    if (!has_tria3) return;
+    if (!contains_plate_stress_type(sc, ElementType::CTRIA3)) return;
 
     out << "\n                         S T R E S S E S   I N   T R I A N G U L A R   E L E M E N T S   ( C T R I A 3 )\n\n";
     out << "  ELEMENT-ID    FIBER         NORMAL-X       NORMAL-Y      SHEAR-XY       ANGLE         MAJOR          MINOR        VON MISES\n";
@@ -267,10 +273,7 @@ void F06Writer::write_tria3_stress_table(const SubCaseResults& sc,
 void F06Writer::write_solid_stress_table(const SubCaseResults& sc,
                                           std::ostream& out,
                                           ElementType etype) {
-    bool has_type = false;
-    for (const auto& ss : sc.solid_stresses)
-        if (ss.etype == etype) { has_type = true; break; }
-    if (!has_type) return;
+    if (!contains_solid_stress_type(sc, etype)) return;
 
     const char* title = "S O L I D";
     int ngrids = 0;

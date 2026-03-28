@@ -342,7 +342,8 @@ if cppcheck.found()
       '--quiet',
       '--suppress=missingIncludeSystem',
       '--suppress=checkersReport',
-      '--quiet',
+      '--suppress=normalCheckLevelMaxBranches',
+      '--suppress=checkLevelNormal',
       # Optional: Add extra arguments
       # '--force', 
       # '-j', '4',
@@ -363,6 +364,7 @@ solver_sources = files(
   # Elements
   'src/elements/cquad4.cpp',
   'src/elements/ctria3.cpp',
+  'src/elements/line_elements.cpp',
   'src/elements/solid_elements.cpp',
   'src/elements/element_factory.cpp',
   'src/elements/rbe_constraints.cpp',
@@ -374,6 +376,7 @@ solver_sources = files(
   'src/io/csv_writer.cpp',
   # Solver
   'src/solver/solver_backend.cpp',
+  'src/solver/analysis_support.cpp',
   'src/solver/linear_static.cpp',
   'src/solver/linear_static_pressure.cpp',
   'src/solver/eigensolver_backend.cpp',
@@ -443,6 +446,7 @@ gtest_dep = dependency('gtest', main : true, fallback : ['gtest', 'gtest_dep'])
 unit_test_sources = files(
   'tests/unit/test_dof_map.cpp',
   'tests/unit/test_bdf_parser.cpp',
+  'tests/unit/test_eigensolver.cpp',
   'tests/unit/test_elements.cpp',
   'tests/unit/test_types.cpp',
   'tests/unit/test_sparse_matrix.cpp',

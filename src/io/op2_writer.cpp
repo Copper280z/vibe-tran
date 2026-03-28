@@ -19,6 +19,7 @@
 //   File close:  [4,0,4]
 
 #include "io/op2_writer.hpp"
+#include <algorithm>
 #include <cstring>
 #include <ctime>
 #include <cstdint>
@@ -55,8 +56,31 @@ static void write_record_i32(std::ostream& f, int32_t v) {
 /// Write a series of int32 Fortran-record markers: [4,v,4] per value.
 template<typename... Vs>
 static void write_markers(std::ostream& f, Vs... vs) {
-    int32_t vals[] = {static_cast<int32_t>(vs)...};
+    const int32_t vals[] = {static_cast<int32_t>(vs)...};
     for (int32_t v : vals) write_record_i32(f, v);
+}
+
+static std::pair<bool, bool> get_output_flags(const Model& model, int sc_id) {
+    const auto it = std::find_if(
+        model.analysis.subcases.begin(), model.analysis.subcases.end(),
+        [&](const SubCase& sc) { return sc.id == sc_id; });
+    if (it == model.analysis.subcases.end()) return {false, false};
+    return {
+        it->disp_print || it->disp_plot,
+        it->stress_print || it->stress_plot,
+    };
+}
+
+static bool has_plate_stress_type(const SubCaseResults& sc, ElementType etype) {
+    return std::any_of(
+        sc.plate_stresses.begin(), sc.plate_stresses.end(),
+        [&](const auto& ps) { return ps.etype == etype; });
+}
+
+static bool has_solid_stress_type(const SubCaseResults& sc, ElementType etype) {
+    return std::any_of(
+        sc.solid_stresses.begin(), sc.solid_stresses.end(),
+        [&](const auto& ss) { return ss.etype == etype; });
 }
 
 // ── OP2 table header ──────────────────────────────────────────────────────────
@@ -71,7 +95,7 @@ static void write_table_header(std::ostream& f, const char name8[8],
                                 int month, int day, int dyear) {
     // [4][2][4] [8][name8][8]
     {
-        int32_t m[3] = {4, 2, 4};
+        const int32_t m[3] = {4, 2, 4};
         f.write(reinterpret_cast<const char*>(m), 12);
         int32_t r = 8;
         f.write(reinterpret_cast<const char*>(&r), 4);
@@ -80,31 +104,31 @@ static void write_table_header(std::ostream& f, const char name8[8],
     }
     // [4,-1,4] [4,7,4]
     {
-        int32_t m1[3] = {4, -1, 4};
-        int32_t m2[3] = {4,  7, 4};
+        const int32_t m1[3] = {4, -1, 4};
+        const int32_t m2[3] = {4,  7, 4};
         f.write(reinterpret_cast<const char*>(m1), 12);
         f.write(reinterpret_cast<const char*>(m2), 12);
     }
     // [28][102,0,0,0,512,0,0][28]
     {
-        int32_t rec[9] = {28, 102, 0, 0, 0, 512, 0, 0, 28};
+        const int32_t rec[9] = {28, 102, 0, 0, 0, 512, 0, 0, 28};
         f.write(reinterpret_cast<const char*>(rec), 36);
     }
     // [4,-2,4][4,1,4][4,0,4]
     {
-        int32_t m[9] = {4,-2,4, 4,1,4, 4,0,4};
+        const int32_t m[9] = {4,-2,4, 4,1,4, 4,0,4};
         f.write(reinterpret_cast<const char*>(m), 36);
     }
     // [4,7,4][28][subtable(8)][month,day,dyear,0,1][28]
     // subtable = b'OUG1    ' for all tables (pyNastran default)
     {
-        int32_t m3[3] = {4, 7, 4};
+        const int32_t m3[3] = {4, 7, 4};
         f.write(reinterpret_cast<const char*>(m3), 12);
         int32_t r = 28;
         f.write(reinterpret_cast<const char*>(&r), 4);
         const char subtable[8] = {'O','U','G','1',' ',' ',' ',' '};
         f.write(subtable, 8);
-        int32_t date[5] = {month, day, dyear, 0, 1};
+        const int32_t date[5] = {month, day, dyear, 0, 1};
         f.write(reinterpret_cast<const char*>(date), 20);
         f.write(reinterpret_cast<const char*>(&r), 4);
     }
@@ -121,10 +145,10 @@ static void write_table3(std::ostream& f, bool new_result, int itable,
                          const std::string& label) {
     // Prefix markers before the 584-byte record
     if (new_result && itable != -3) {
-        int32_t m[3] = {4, 146, 4};
+        const int32_t m[3] = {4, 146, 4};
         f.write(reinterpret_cast<const char*>(m), 12);
     } else {
-        int32_t m[12] = {4, itable, 4, 4, 1, 4, 4, 0, 4, 4, 146, 4};
+        const int32_t m[12] = {4, itable, 4, 4, 1, 4, 4, 0, 4, 4, 146, 4};
         f.write(reinterpret_cast<const char*>(m), 48);
     }
 
@@ -167,15 +191,15 @@ static void write_table3(std::ostream& f, bool new_result, int itable,
 static void write_file_header(std::ostream& f, int month, int day, int dyear) {
     // [4,3,4]
     {
-        int32_t m[3] = {4, 3, 4};
+        const int32_t m[3] = {4, 3, 4};
         f.write(reinterpret_cast<const char*>(m), 12);
     }
     // [12, day, month, dyear, 12][4,7,4][28, tape_code, 28]
     {
-        int32_t date_rec[5] = {12, day, month, dyear, 12};
+        const int32_t date_rec[5] = {12, day, month, dyear, 12};
         f.write(reinterpret_cast<const char*>(date_rec), 20);
 
-        int32_t m2[3] = {4, 7, 4};
+        const int32_t m2[3] = {4, 7, 4};
         f.write(reinterpret_cast<const char*>(m2), 12);
 
         const char tape[] = "NASTRAN FORT TAPE ID CODE - ";  // 28 chars
@@ -186,7 +210,7 @@ static void write_file_header(std::ostream& f, int month, int day, int dyear) {
     }
     // [4,2,4][8, 'XXXXXXXX', 8]
     {
-        int32_t m3[3] = {4, 2, 4};
+        const int32_t m3[3] = {4, 2, 4};
         f.write(reinterpret_cast<const char*>(m3), 12);
         int32_t r = 8;
         f.write(reinterpret_cast<const char*>(&r), 4);
@@ -196,7 +220,7 @@ static void write_file_header(std::ostream& f, int month, int day, int dyear) {
     }
     // [4,-1,4][4,0,4]
     {
-        int32_t m4[6] = {4,-1,4, 4,0,4};
+        const int32_t m4[6] = {4,-1,4, 4,0,4};
         f.write(reinterpret_cast<const char*>(m4), 24);
     }
 }
@@ -234,11 +258,11 @@ static int write_ougv1(std::ostream& f,
 
     // TABLE-4 header markers
     {
-        int32_t m[13] = {4, itable, 4,
-                         4, 1, 4,
-                         4, 0, 4,
-                         4, ntotal, 4,
-                         4 * ntotal};
+        const int32_t m[13] = {4, itable, 4,
+                               4, 1, 4,
+                               4, 0, 4,
+                               4, ntotal, 4,
+                               4 * ntotal};
         f.write(reinterpret_cast<const char*>(m), 52);
     }
 
@@ -272,9 +296,9 @@ static int write_oes1x_plate(std::ostream& f,
                               ElementType etype,
                               const std::string& subtitle) {
     // Count matching elements
-    int nel = 0;
-    for (const auto& ps : sc.plate_stresses)
-        if (ps.etype == etype) ++nel;
+    const int nel = static_cast<int>(std::count_if(
+        sc.plate_stresses.begin(), sc.plate_stresses.end(),
+        [&](const auto& ps) { return ps.etype == etype; }));
     if (nel == 0) return itable;
 
     const int approach_code = 12;
@@ -291,11 +315,11 @@ static int write_oes1x_plate(std::ostream& f,
     itable--;
 
     {
-        int32_t m[13] = {4, itable, 4,
-                         4, 1, 4,
-                         4, 0, 4,
-                         4, ntotal, 4,
-                         4 * ntotal};
+        const int32_t m[13] = {4, itable, 4,
+                               4, 1, 4,
+                               4, 0, 4,
+                               4, ntotal, 4,
+                               4 * ntotal};
         f.write(reinterpret_cast<const char*>(m), 52);
     }
 
@@ -349,9 +373,9 @@ static int write_oes1x_solid(std::ostream& f,
                               bool new_result, int itable,
                               ElementType etype,
                               const std::string& subtitle) {
-    int nel = 0;
-    for (const auto& ss : sc.solid_stresses)
-        if (ss.etype == etype) ++nel;
+    const int nel = static_cast<int>(std::count_if(
+        sc.solid_stresses.begin(), sc.solid_stresses.end(),
+        [&](const auto& ss) { return ss.etype == etype; }));
     if (nel == 0) return itable;
 
     int etype_id, ngrids;
@@ -385,11 +409,11 @@ static int write_oes1x_solid(std::ostream& f,
     itable--;
 
     {
-        int32_t m[13] = {4, itable, 4,
-                         4, 1, 4,
-                         4, 0, 4,
-                         4, ntotal, 4,
-                         4 * ntotal};
+        const int32_t m[13] = {4, itable, 4,
+                               4, 1, 4,
+                               4, 0, 4,
+                               4, ntotal, 4,
+                               4 * ntotal};
         f.write(reinterpret_cast<const char*>(m), 52);
     }
 
@@ -488,7 +512,7 @@ static void write_ougv1_modal_mode(std::ostream& f,
 
     // TABLE-3 prefix: [-3, 1, 0, 146]
     {
-        int32_t m[12] = {4, -3, 4, 4, 1, 4, 4, 0, 4, 4, 146, 4};
+        const int32_t m[12] = {4, -3, 4, 4, 1, 4, 4, 0, 4, 4, 146, 4};
         f.write(reinterpret_cast<const char*>(m), 48);
     }
 
@@ -534,11 +558,11 @@ static void write_ougv1_modal_mode(std::ostream& f,
 
     // TABLE-4 header markers: [-4, 1, 0, ntotal]
     {
-        int32_t m[13] = {4, -4, 4,
-                         4, 1, 4,
-                         4, 0, 4,
-                         4, ntotal, 4,
-                         4 * ntotal};
+        const int32_t m[13] = {4, -4, 4,
+                               4, 1, 4,
+                               4, 0, 4,
+                               4, ntotal, 4,
+                               4 * ntotal};
         f.write(reinterpret_cast<const char*>(m), 52);
     }
 
@@ -558,7 +582,7 @@ static void write_ougv1_modal_mode(std::ostream& f,
     }
     // Footer: [-5, 1, 0] then table close [0]
     {
-        int32_t footer[9] = {4, -5, 4, 4, 1, 4, 4, 0, 4};
+        const int32_t footer[9] = {4, -5, 4, 4, 1, 4, 4, 0, 4};
         f.write(reinterpret_cast<const char*>(footer), 36);
     }
     write_markers(f, 0); // table close
@@ -572,7 +596,7 @@ void Op2Writer::write_modal(const ModalSolverResults& results, const Model& mode
     if (!f) throw SolverError(std::format("Cannot write OP2: {}", path.string()));
 
     std::time_t now = std::time(nullptr);
-    std::tm* lt = std::localtime(&now);
+    const std::tm* lt = std::localtime(&now);
     int month = lt->tm_mon + 1;
     int day   = lt->tm_mday;
     int dyear = lt->tm_year - 100;
@@ -603,33 +627,21 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
 
     // Date for header
     std::time_t now = std::time(nullptr);
-    std::tm* lt = std::localtime(&now);
+    const std::tm* lt = std::localtime(&now);
     int month = lt->tm_mon + 1;
     int day   = lt->tm_mday;
     int dyear = lt->tm_year - 100; // years since 2000
 
     write_file_header(f, month, day, dyear);
 
-    // Collect output flags per subcase
-    auto get_flags = [&](int sc_id, bool& do_disp, bool& do_stress) {
-        do_disp = do_stress = false;
-        for (const auto& msc : model.analysis.subcases) {
-            if (msc.id == sc_id) {
-                do_disp   = msc.disp_print   || msc.disp_plot;
-                do_stress = msc.stress_print || msc.stress_plot;
-                return;
-            }
-        }
-    };
-
     // ── OUGV1 table (displacements) ───────────────────────────────────────────
     {
-        bool any_disp = false;
-        for (const auto& sc : results.subcases) {
-            bool dd, ds;
-            get_flags(sc.id, dd, ds);
-            if (dd && !sc.displacements.empty()) { any_disp = true; break; }
-        }
+        const bool any_disp = std::any_of(
+            results.subcases.begin(), results.subcases.end(),
+            [&](const auto& sc) {
+                const auto [do_disp, _] = get_output_flags(model, sc.id);
+                return do_disp && !sc.displacements.empty();
+            });
         if (any_disp) {
             const char name8[8] = {'O','U','G','V','1',' ',' ',' '};
             write_table_header(f, name8, month, day, dyear);
@@ -637,14 +649,13 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
             int itable = -1;
             bool new_result = true;
             for (const auto& sc : results.subcases) {
-                bool dd, ds;
-                get_flags(sc.id, dd, ds);
+                const auto [dd, _] = get_output_flags(model, sc.id);
                 if (!dd || sc.displacements.empty()) continue;
                 if (itable == -1) { itable = -3; }
                 itable = write_ougv1(f, sc, new_result, itable, sc.label);
                 new_result = false;
                 // Inter-result footer
-                int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};
+                const int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};
                 f.write(reinterpret_cast<const char*>(footer), 36);
             }
             // Table close
@@ -654,15 +665,12 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
 
     // ── OES1X table for CQUAD4 ────────────────────────────────────────────────
     {
-        bool any = false;
-        for (const auto& sc : results.subcases) {
-            bool dd, ds;
-            get_flags(sc.id, dd, ds);
-            if (!ds) continue;
-            for (const auto& ps : sc.plate_stresses)
-                if (ps.etype == ElementType::CQUAD4) { any = true; break; }
-            if (any) break;
-        }
+        const bool any = std::any_of(
+            results.subcases.begin(), results.subcases.end(),
+            [&](const auto& sc) {
+                const auto [_, ds] = get_output_flags(model, sc.id);
+                return ds && has_plate_stress_type(sc, ElementType::CQUAD4);
+            });
         if (any) {
             const char name8[8] = {'O','E','S','1','X',' ',' ',' '};
             write_table_header(f, name8, month, day, dyear);
@@ -670,13 +678,12 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
             int itable = -3;
             bool new_result = true;
             for (const auto& sc : results.subcases) {
-                bool dd, ds;
-                get_flags(sc.id, dd, ds);
+                const auto [_, ds] = get_output_flags(model, sc.id);
                 if (!ds) continue;
                 itable = write_oes1x_plate(f, sc, new_result, itable,
                                            ElementType::CQUAD4, sc.label);
                 if (!new_result || itable < -3) new_result = false;
-                int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};
+                const int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};
                 f.write(reinterpret_cast<const char*>(footer), 36);
             }
             write_markers(f, 0);
@@ -685,15 +692,12 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
 
     // ── OES1X table for CTRIA3 ────────────────────────────────────────────────
     {
-        bool any = false;
-        for (const auto& sc : results.subcases) {
-            bool dd, ds;
-            get_flags(sc.id, dd, ds);
-            if (!ds) continue;
-            for (const auto& ps : sc.plate_stresses)
-                if (ps.etype == ElementType::CTRIA3) { any = true; break; }
-            if (any) break;
-        }
+        const bool any = std::any_of(
+            results.subcases.begin(), results.subcases.end(),
+            [&](const auto& sc) {
+                const auto [_, ds] = get_output_flags(model, sc.id);
+                return ds && has_plate_stress_type(sc, ElementType::CTRIA3);
+            });
         if (any) {
             const char name8[8] = {'O','E','S','1','X',' ',' ',' '};
             write_table_header(f, name8, month, day, dyear);
@@ -701,13 +705,12 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
             int itable = -3;
             bool new_result = true;
             for (const auto& sc : results.subcases) {
-                bool dd, ds;
-                get_flags(sc.id, dd, ds);
+                const auto [_, ds] = get_output_flags(model, sc.id);
                 if (!ds) continue;
                 itable = write_oes1x_plate(f, sc, new_result, itable,
                                            ElementType::CTRIA3, sc.label);
                 if (!new_result || itable < -3) new_result = false;
-                int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};
+                const int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};
                 f.write(reinterpret_cast<const char*>(footer), 36);
             }
             write_markers(f, 0);
@@ -717,15 +720,12 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
     // ── OES1X tables for solid elements ──────────────────────────────────────
     for (ElementType etype : {ElementType::CTETRA4, ElementType::CTETRA10,
                               ElementType::CHEXA8, ElementType::CPENTA6}) {
-        bool any = false;
-        for (const auto& sc : results.subcases) {
-            bool dd, ds;
-            get_flags(sc.id, dd, ds);
-            if (!ds) continue;
-            for (const auto& ss : sc.solid_stresses)
-                if (ss.etype == etype) { any = true; break; }
-            if (any) break;
-        }
+        const bool any = std::any_of(
+            results.subcases.begin(), results.subcases.end(),
+            [&](const auto& sc) {
+                const auto [_, ds] = get_output_flags(model, sc.id);
+                return ds && has_solid_stress_type(sc, etype);
+            });
         if (!any) continue;
 
         const char name8[8] = {'O','E','S','1','X',' ',' ',' '};
@@ -734,13 +734,12 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
         int itable = -3;
         bool new_result = true;
         for (const auto& sc : results.subcases) {
-            bool dd, ds;
-            get_flags(sc.id, dd, ds);
+            const auto [_, ds] = get_output_flags(model, sc.id);
             if (!ds) continue;
             itable = write_oes1x_solid(f, sc, new_result, itable,
                                        etype, sc.label);
             if (!new_result || itable < -3) new_result = false;
-            int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};
+            const int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};
             f.write(reinterpret_cast<const char*>(footer), 36);
         }
         write_markers(f, 0);
