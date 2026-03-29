@@ -38,6 +38,7 @@
 //   --log-file=<path>  Write all log output to <path> in addition to stdout.
 
 #include "core/logger.hpp"
+#include "core/quality_checks.hpp"
 #include "io/bdf_parser.hpp"
 #include "io/inp_parser.hpp"
 #include "io/results.hpp"
@@ -232,6 +233,16 @@ int main(int argc, const char *argv[]) {
     spdlog::info("  Elements: {}", model.elements.size());
     spdlog::info("  Materials:{}", model.materials.size());
     spdlog::info("  Subcases: {}", model.analysis.subcases.size());
+
+    // ── Pre-flight quality checks ─────────────────────────────────────────
+    {
+        auto tq0 = std::chrono::steady_clock::now();
+        vibestran::QualityThresholds qt = vibestran::build_thresholds(model);
+        vibestran::run_quality_checks(model, qt);
+        auto tq1 = std::chrono::steady_clock::now();
+        spdlog::info("quality checks: {:.3f} ms",
+            std::chrono::duration<double, std::milli>(tq1 - tq0).count());
+    }
 
     // ── Backend selection ─────────────────────────────────────────────────
     std::unique_ptr<vibestran::SolverBackend> backend;

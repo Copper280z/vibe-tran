@@ -369,6 +369,7 @@ solver_sources = files(
   # Core
   'src/core/logger.cpp',
   'src/core/model.cpp',
+  'src/core/quality_checks.cpp',
   'src/core/dof_map.cpp',
   'src/core/sparse_matrix.cpp',
   'src/core/coord_sys.cpp',
@@ -461,6 +462,7 @@ gtest_dep = dependency('gtest',
 # Unit tests
 unit_test_sources = files(
   'tests/unit/test_dof_map.cpp',
+  'tests/unit/test_quality_checks.cpp',
   'tests/unit/test_bdf_parser.cpp',
   'tests/unit/test_eigensolver.cpp',
   'tests/unit/test_elements.cpp',
