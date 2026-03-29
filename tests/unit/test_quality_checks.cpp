@@ -763,6 +763,17 @@ TEST(ModeDispatchStrict, MissingLoadSetIsWarningNotThrow) {
     EXPECT_NO_THROW(run_quality_checks(m, t));
 }
 
+TEST(ModeDispatchStrict, OpenShellBoundaryIsNotFatal) {
+    Model m = make_minimal_sol101_model();
+
+    auto topo = check_topology(m, 1e-8);
+    EXPECT_EQ(topo.free_edge_elements.size(), 1u);
+    EXPECT_EQ(topo.free_edge_elements[0].value, 1);
+
+    QualityThresholds t;
+    EXPECT_NO_THROW(run_quality_checks(m, t));
+}
+
 TEST(ModeDispatchStrict, MissingConstraintSol101Throws) {
     Model m;
     m.analysis.sol = SolutionType::LinearStatic;

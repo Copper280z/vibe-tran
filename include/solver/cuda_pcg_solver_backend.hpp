@@ -50,7 +50,8 @@ public:
     /// Throws SolverError if the system does not converge or on GPU errors.
     [[nodiscard]] std::vector<double> solve(
         const SparseMatrixBuilder::CsrData& K,
-        const std::vector<double>& F) override;
+        const std::vector<double>& F,
+        const FactorRatioCheckPolicy* factor_ratio_policy = nullptr) override;
 
     [[nodiscard]] std::string_view name() const noexcept override;
 

@@ -463,6 +463,7 @@ gtest_dep = dependency('gtest',
 unit_test_sources = files(
   'tests/unit/test_dof_map.cpp',
   'tests/unit/test_quality_checks.cpp',
+  'tests/unit/test_factor_ratio_check.cpp',
   'tests/unit/test_bdf_parser.cpp',
   'tests/unit/test_eigensolver.cpp',
   'tests/unit/test_elements.cpp',

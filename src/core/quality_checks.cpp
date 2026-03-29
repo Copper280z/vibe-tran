@@ -737,8 +737,9 @@ void run_quality_checks(Model& model, const QualityThresholds& t) {
     // ── Topology ──────────────────────────────────────────────────────────────
     TopologyResult topo = check_topology(model, t.dup_node_tol);
 
-    for (ElementId eid : topo.free_edge_elements)
-        issue(std::format("Element {}: has free edge(s) — possible mesh gap", eid.value), strict);
+    // Free shell boundaries are valid topology for plates, shells, and open-ended
+    // shell sections. Keep them in TopologyResult for diagnostics, but do not
+    // stop the solve here.
     for (NodeId nid : topo.orphaned_nodes)
         issue(std::format("Node {}: not referenced by any element or constraint", nid.value), strict);
     for (PropertyId pid : topo.orphaned_properties)

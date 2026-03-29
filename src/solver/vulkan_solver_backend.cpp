@@ -96,7 +96,8 @@ static Pipelines* ensure_pipelines(const VulkanContext& ctx,
 
 std::vector<double>
 VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
-                            const std::vector<double>& F) {
+                            const std::vector<double>& F,
+                            const FactorRatioCheckPolicy* factor_ratio_policy) {
     const int n = K.n;
     if (n == 0)
         throw SolverError("Vulkan solver: stiffness matrix is empty — no free DOFs");
@@ -130,7 +131,7 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
         last_iters_    = 1;
         last_residual_ = 0.0;
         EigenSolverBackend eigen;
-        return eigen.solve(K, F);
+        return eigen.solve(K, F, factor_ratio_policy);
     }
 
     // use_double requires shaderFloat64 device feature

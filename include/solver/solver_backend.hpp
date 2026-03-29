@@ -14,6 +14,8 @@
 
 namespace vibestran {
 
+struct FactorRatioCheckPolicy;
+
 /// Abstract interface for linear system solvers: K * u = F
 class SolverBackend {
 public:
@@ -21,10 +23,13 @@ public:
 
     /// Solve K*u = F.
     /// K is provided as CSR data (from SparseMatrixBuilder::build_csr()).
+    /// factor_ratio_policy applies PARAM,MAXRATIO to backends that can inspect
+    /// the diagonal of the actual factorization; unsupported backends ignore it.
     /// Returns displacement vector u.
     [[nodiscard]] virtual std::vector<double> solve(
         const SparseMatrixBuilder::CsrData& K,
-        const std::vector<double>& F) = 0;
+        const std::vector<double>& F,
+        const FactorRatioCheckPolicy* factor_ratio_policy = nullptr) = 0;
 
     /// Human-readable backend name (for logging)
     [[nodiscard]] virtual std::string_view name() const noexcept = 0;
@@ -51,7 +56,8 @@ class EigenSolverBackend final : public SolverBackend {
 public:
     [[nodiscard]] std::vector<double> solve(
         const SparseMatrixBuilder::CsrData& K,
-        const std::vector<double>& F) override;
+        const std::vector<double>& F,
+        const FactorRatioCheckPolicy* factor_ratio_policy = nullptr) override;
 
     [[nodiscard]] std::string_view name() const noexcept override {
 #if defined(HAVE_ACCELERATE)
@@ -81,7 +87,8 @@ public:
 
     [[nodiscard]] std::vector<double> solve(
         const SparseMatrixBuilder::CsrData& K,
-        const std::vector<double>& F) override;
+        const std::vector<double>& F,
+        const FactorRatioCheckPolicy* factor_ratio_policy = nullptr) override;
 
     [[nodiscard]] std::string_view name() const noexcept override {
         return "Eigen PCG + IncompleteCholesky (CPU)";

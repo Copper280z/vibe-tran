@@ -46,7 +46,8 @@ std::string_view CudaPCGSolverBackend::device_name() const noexcept {
 
 std::vector<double>
 CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
-                            const std::vector<double>& F) {
+                            const std::vector<double>& F,
+                            const FactorRatioCheckPolicy*) {
     return solve_cuda_pcg_stable(*ctx_, K, F);
 }
 

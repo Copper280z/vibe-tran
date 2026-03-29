@@ -14,6 +14,7 @@
 
 #include "solver/eigensolver_backend.hpp"
 #include "core/exceptions.hpp"
+#include "core/factor_ratio_check.hpp"
 
 #include <Spectra/SymGEigsShiftSolver.h>
 #include <Spectra/MatOp/SparseSymMatProd.h>
@@ -38,6 +39,43 @@
 namespace vibestran {
 
 namespace {
+
+#if !defined(HAVE_ACCELERATE)
+template <typename DiagonalExpr>
+std::vector<double> copy_diagonal(const DiagonalExpr& diag_expr) {
+    Eigen::VectorXd dense = diag_expr;
+    return std::vector<double>(dense.data(), dense.data() + dense.size());
+}
+
+[[maybe_unused]] void
+report_factor_ratio_result(const FactorRatioCheckPolicy& policy,
+                           const FactorRatioCheckResult& result,
+                           std::string_view backend_label) {
+    if (result.status == FactorRatioCheckStatus::Ok)
+        return;
+
+    const std::string matrix_name =
+        policy.matrix_name.empty() ? "matrix" : policy.matrix_name;
+    if (result.status == FactorRatioCheckStatus::NonPositiveFactorDiagonal) {
+        throw SolverError(std::format(
+            "{} {} has non-positive or near-zero factor diagonal at row {} "
+            "(matrix diag {:.3e}, factor diag {:.3e}, backend {})",
+            policy.context, matrix_name, result.row_1based,
+            result.matrix_diag, result.factor_diag, backend_label));
+    }
+
+    const std::string message = std::format(
+        "{} {} diagonal / factor diagonal ratio {:.3e} exceeds "
+        "MAXRATIO={:.3e} at row {} (matrix diag {:.3e}, factor diag {:.3e}, "
+        "backend {})",
+        policy.context, matrix_name, result.max_ratio, policy.maxratio,
+        result.row_1based, result.matrix_diag, result.factor_diag,
+        backend_label);
+    if (policy.fatal)
+        throw SolverError(message);
+    spdlog::warn("{}", message);
+}
+#endif
 
 #if defined(HAVE_ACCELERATE)
 
@@ -87,8 +125,10 @@ public:
     using SparseMatrix = Eigen::SparseMatrix<Scalar>;
     using Index = Eigen::Index;
 
-    SpectraDirectShiftInvert(const SparseMatrix& K, const SparseMatrix& M)
-        : K_(K), M_(M), n_(K.rows()) {
+    SpectraDirectShiftInvert(const SparseMatrix& K, const SparseMatrix& M,
+                             const FactorRatioCheckPolicy* factor_ratio_policy)
+        : K_(K), M_(M), n_(K.rows()),
+          factor_ratio_policy_(factor_ratio_policy) {
         if (n_ != K.cols() || n_ != M.rows() || n_ != M.cols()) {
             throw std::invalid_argument(
                 "SpectraDirectShiftInvert: K and M must be square matrices of the same size");
@@ -115,6 +155,12 @@ public:
         if (accelerate_llt_.info() == Eigen::Success) {
             active_backend_ = ActiveBackend::AccelerateLLT;
             backend_label_ = std::format("accelerate-llt(order={})", order_cfg.label);
+            if (factor_ratio_policy_ != nullptr) {
+                spdlog::debug(
+                    "[cpu-eig] skipping MAXRATIO check for {} because factor "
+                    "diagonal is unavailable",
+                    backend_label_);
+            }
             return;
         }
 
@@ -123,6 +169,12 @@ public:
         if (accelerate_ldlt_.info() == Eigen::Success) {
             active_backend_ = ActiveBackend::AccelerateLDLT;
             backend_label_ = std::format("accelerate-ldlt(order={})", order_cfg.label);
+            if (factor_ratio_policy_ != nullptr) {
+                spdlog::debug(
+                    "[cpu-eig] skipping MAXRATIO check for {} because factor "
+                    "diagonal is unavailable",
+                    backend_label_);
+            }
             return;
         }
 
@@ -136,6 +188,12 @@ public:
         if (cholmod_.info() == Eigen::Success) {
             active_backend_ = ActiveBackend::Cholmod;
             backend_label_ = "cholmod";
+            if (factor_ratio_policy_ != nullptr) {
+                spdlog::debug(
+                    "[cpu-eig] skipping MAXRATIO check for {} because factor "
+                    "diagonal is unavailable",
+                    backend_label_);
+            }
             return;
         }
 
@@ -143,6 +201,15 @@ public:
         if (simplicial_ldlt_.info() == Eigen::Success) {
             active_backend_ = ActiveBackend::SimplicialLDLT;
             backend_label_ = "simplicial-ldlt";
+            if (factor_ratio_policy_ != nullptr) {
+                report_factor_ratio_result(
+                    *factor_ratio_policy_,
+                    evaluate_factor_ratio_check(
+                        copy_diagonal(shift_.diagonal()),
+                        copy_diagonal(simplicial_ldlt_.vectorD()),
+                        factor_ratio_policy_->maxratio),
+                    backend_label_);
+            }
             return;
         }
 
@@ -157,6 +224,15 @@ public:
         if (simplicial_llt_.info() == Eigen::Success) {
             active_backend_ = ActiveBackend::SimplicialLLT;
             backend_label_ = "simplicial-llt";
+            if (factor_ratio_policy_ != nullptr) {
+                report_factor_ratio_result(
+                    *factor_ratio_policy_,
+                    evaluate_factor_ratio_check(
+                        copy_diagonal(shift_.diagonal()),
+                        copy_diagonal(simplicial_llt_.matrixL().diagonal()),
+                        factor_ratio_policy_->maxratio),
+                    backend_label_);
+            }
             return;
         }
 
@@ -164,6 +240,15 @@ public:
         if (simplicial_ldlt_.info() == Eigen::Success) {
             active_backend_ = ActiveBackend::SimplicialLDLT;
             backend_label_ = "simplicial-ldlt";
+            if (factor_ratio_policy_ != nullptr) {
+                report_factor_ratio_result(
+                    *factor_ratio_policy_,
+                    evaluate_factor_ratio_check(
+                        copy_diagonal(shift_.diagonal()),
+                        copy_diagonal(simplicial_ldlt_.vectorD()),
+                        factor_ratio_policy_->maxratio),
+                    backend_label_);
+            }
             return;
         }
 
@@ -225,6 +310,7 @@ private:
     SparseMatrix shift_;
     ActiveBackend active_backend_{ActiveBackend::None};
     std::string backend_label_{"uninitialized"};
+    const FactorRatioCheckPolicy* factor_ratio_policy_{nullptr};
 
 #if defined(HAVE_ACCELERATE)
     Eigen::AccelerateLLT<SparseMatrix> accelerate_llt_;
@@ -242,7 +328,8 @@ private:
 std::vector<EigenPair> SpectraEigensolverBackend::solve(
     const Eigen::SparseMatrix<double>& K,
     const Eigen::SparseMatrix<double>& M,
-    int nd, double sigma)
+    int nd, double sigma,
+    const FactorRatioCheckPolicy* factor_ratio_policy)
 {
     const int n = static_cast<int>(K.rows());
     if (n < 1)
@@ -263,7 +350,7 @@ std::vector<EigenPair> SpectraEigensolverBackend::solve(
     using OpType  = SpectraDirectShiftInvert;
     using BOpType = Spectra::SparseSymMatProd<double>;
 
-    OpType op(K, M);
+    OpType op(K, M, factor_ratio_policy);
     BOpType Bop(M);
     std::optional<Spectra::SymGEigsShiftSolver<
         OpType, BOpType, Spectra::GEigsMode::ShiftInvert>> solver;

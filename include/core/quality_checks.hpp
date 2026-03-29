@@ -48,7 +48,7 @@ struct QualityThresholds {
     bool   auto_merge_nodes   {true};   // PARAM,AUTOMERGE  0 → warn but don't merge
 
     // Solver-stage (read and stored here; consumed by linear_static / modal):
-    double maxratio           {1e7};    // PARAM,MAXRATIO   stiffness diagonal ratio
+    double maxratio           {1e7};    // PARAM,MAXRATIO   matrix diagonal / factor diagonal ratio
     int    bailout            {0};      // PARAM,BAILOUT    0=halt, -1=continue
 };
 
@@ -72,6 +72,8 @@ struct ElementQualityResult {
 // ── Topology summary ──────────────────────────────────────────────────────────
 
 struct TopologyResult {
+    // Shell elements with at least one unshared edge. This is informational:
+    // open shell boundaries are valid and do not by themselves imply a mesh gap.
     std::vector<ElementId>                      free_edge_elements;
     std::vector<NodeId>                         orphaned_nodes;
     std::vector<PropertyId>                     orphaned_properties;

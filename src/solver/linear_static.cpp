@@ -4,6 +4,7 @@
 
 #include "solver/linear_static.hpp"
 #include "core/coord_sys.hpp"
+#include "core/factor_ratio_check.hpp"
 #include "core/logger.hpp"
 #include "core/mpc_handler.hpp"
 #include "elements/cquad4.hpp"
@@ -255,51 +256,10 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   spdlog::debug("[subcase {}] apply_thermal_loads: {:.3f} ms", sc.id,
                 Ms(t5 - t4c).count());
 
-  // 4. Build CSR and check stiffness diagonal ratio (PARAM,MAXRATIO / PARAM,BAILOUT)
+  // 4. Build CSR
   auto csr = K_builder.build_csr();
   const auto t5b = Clock::now();
   spdlog::debug("[subcase {}] build_csr: {:.3f} ms  ({} nnz)", sc.id, Ms(t5b - t5).count(), csr.nnz);
-
-  if (csr.n > 0) {
-    double diag_max = -std::numeric_limits<double>::infinity();
-    double diag_min =  std::numeric_limits<double>::infinity();
-    for (int row = 0; row < csr.n; ++row) {
-      for (int j = csr.row_ptr[row]; j < csr.row_ptr[row + 1]; ++j) {
-        if (csr.col_ind[j] == row) {
-          diag_max = std::max(diag_max, csr.values[j]);
-          diag_min = std::min(diag_min, csr.values[j]);
-          break;
-        }
-      }
-    }
-    if (diag_min > 0.0 && diag_max > 0.0) {
-      double ratio = diag_max / diag_min;
-      double maxratio = 1e7;
-      int    bailout  = 0;
-      auto mr_it = model.params.find("MAXRATIO");
-      if (mr_it != model.params.end()) {
-        try { maxratio = std::stod(mr_it->second); } catch (...) {}
-      }
-      auto bo_it = model.params.find("BAILOUT");
-      if (bo_it != model.params.end()) {
-        try { bailout = std::stoi(bo_it->second); } catch (...) {}
-      }
-      auto cm_it = model.params.find("CHECKMODE");
-      bool lenient = (cm_it != model.params.end() && cm_it->second == "LENIENT");
-      if (lenient && bo_it == model.params.end())
-        bailout = -1;  // lenient default
-
-      if (ratio > maxratio) {
-        auto msg = std::format("[subcase {}] stiffness diagonal ratio {:.3e} exceeds "
-                               "MAXRATIO={:.3e} — model may be near-singular",
-                               sc.id, ratio, maxratio);
-        if (bailout == 0 && !lenient)
-          throw SolverError(msg);
-        else
-          spdlog::warn("{}", msg);
-      }
-    }
-  }
 
   const SparseMatrixBuilder::CsrData* solve_csr = &csr;
   SparseMatrixBuilder::CsrData expanded_csr;
@@ -308,7 +268,11 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
     solve_csr = &expanded_csr;
   }
 
-  std::vector<double> u_reduced = backend_->solve(*solve_csr, F);
+  const FactorRatioCheckPolicy factor_ratio_policy =
+      build_factor_ratio_check_policy(
+          model, std::format("[subcase {}]", sc.id), "stiffness matrix");
+  std::vector<double> u_reduced =
+      backend_->solve(*solve_csr, F, &factor_ratio_policy);
   const auto t6 = Clock::now();
   spdlog::debug("[subcase {}] linear solve: {:.3f} ms", sc.id, Ms(t6 - t5b).count());
 

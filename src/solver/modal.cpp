@@ -3,6 +3,7 @@
 
 #include "solver/modal.hpp"
 #include "core/coord_sys.hpp"
+#include "core/factor_ratio_check.hpp"
 #include "core/logger.hpp"
 #include "core/mpc_handler.hpp"
 #include "elements/element_factory.hpp"
@@ -99,48 +100,6 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
     auto K_csr = K_builder.build_csr();
     auto M_csr = M_builder.build_csr();
 
-    // Check stiffness diagonal ratio (PARAM,MAXRATIO / PARAM,BAILOUT)
-    if (K_csr.n > 0) {
-        double diag_max = -std::numeric_limits<double>::infinity();
-        double diag_min =  std::numeric_limits<double>::infinity();
-        for (int row = 0; row < K_csr.n; ++row) {
-            for (int j = K_csr.row_ptr[row]; j < K_csr.row_ptr[row + 1]; ++j) {
-                if (K_csr.col_ind[j] == row) {
-                    diag_max = std::max(diag_max, K_csr.values[j]);
-                    diag_min = std::min(diag_min, K_csr.values[j]);
-                    break;
-                }
-            }
-        }
-        if (diag_min > 0.0 && diag_max > 0.0) {
-            double ratio = diag_max / diag_min;
-            double maxratio = 1e7;
-            int    bailout  = 0;
-            auto mr_it = model.params.find("MAXRATIO");
-            if (mr_it != model.params.end()) {
-                try { maxratio = std::stod(mr_it->second); } catch (...) {}
-            }
-            auto bo_it = model.params.find("BAILOUT");
-            if (bo_it != model.params.end()) {
-                try { bailout = std::stoi(bo_it->second); } catch (...) {}
-            }
-            auto cm_it = model.params.find("CHECKMODE");
-            bool lenient = (cm_it != model.params.end() && cm_it->second == "LENIENT");
-            if (lenient && bo_it == model.params.end())
-                bailout = -1;
-
-            if (ratio > maxratio) {
-                auto msg = std::format("[modal sc {}] stiffness diagonal ratio {:.3e} exceeds "
-                                       "MAXRATIO={:.3e} — model may be near-singular",
-                                       sc.id, ratio, maxratio);
-                if (bailout == 0 && !lenient)
-                    throw SolverError(msg);
-                else
-                    spdlog::warn("{}", msg);
-            }
-        }
-    }
-
     Eigen::SparseMatrix<double> K_eigen = to_eigen(K_csr);
     Eigen::SparseMatrix<double> M_eigen = to_eigen(M_csr);
     const auto t4 = Clock::now();
@@ -156,8 +115,11 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
     spdlog::debug("[modal sc {}] launching {} (nd={}, sigma={:.6g})",
                   sc.id, backend_->name(), eigrl.nd, sigma);
 
-    std::vector<EigenPair> pairs = backend_->solve(K_eigen, M_eigen,
-                                                    eigrl.nd, sigma);
+    const FactorRatioCheckPolicy factor_ratio_policy =
+        build_factor_ratio_check_policy(
+            model, std::format("[modal sc {}]", sc.id), "shift matrix");
+    std::vector<EigenPair> pairs = backend_->solve(
+        K_eigen, M_eigen, eigrl.nd, sigma, &factor_ratio_policy);
     const auto t5 = Clock::now();
     spdlog::debug("[modal sc {}] eigensolver: {:.3f} ms  ({} modes)",
                   sc.id, Ms(t5 - t4).count(), pairs.size());

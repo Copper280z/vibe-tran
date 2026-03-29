@@ -3319,3 +3319,41 @@ TEST(Integration, Pload1ThrowsOnUnsupportedElementType) {
             "PLOAD1,1,1,FY,FR,0.0,25.0,1.0,25.0\n")),
         SolverError);
 }
+
+TEST(Integration, ThinShellFreeBoundaryDoesNotTripMaxratio) {
+    const std::string bdf = R"(SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC = 1
+BEGIN BULK
+MAT1,1,7.0E10,,0.33
+PSHELL,1,1,5.0E-04
+GRID,1,,0.0,0.0,0.0
+GRID,2,,0.5,0.0,0.0
+GRID,3,,1.0,0.0,0.0
+GRID,4,,0.0,0.02,0.0
+GRID,5,,0.5,0.02,0.0
+GRID,6,,1.0,0.02,0.0
+CQUAD4,1,1,1,2,5,4
+CQUAD4,2,1,2,3,6,5
+SPC1,1,123456,1,4
+FORCE,1,3,0,50.0,0.0,1.0,0.0
+FORCE,1,6,0,50.0,0.0,1.0,0.0
+ENDDATA
+)";
+
+    const SolverResults results = run_analysis(bdf);
+    ASSERT_EQ(results.subcases.size(), 1u);
+
+    const SubCaseResults& sc = results.subcases.front();
+    const double uy3 = get_subcase_disp(sc, 3, 1);
+    const double uy6 = get_subcase_disp(sc, 6, 1);
+    const double scale = std::max(std::abs(uy3), std::abs(uy6));
+
+    EXPECT_TRUE(std::isfinite(uy3));
+    EXPECT_TRUE(std::isfinite(uy6));
+    EXPECT_GT(uy3, 0.0);
+    EXPECT_GT(uy6, 0.0);
+    EXPECT_NEAR(uy3, uy6, scale * 1e-9);
+}

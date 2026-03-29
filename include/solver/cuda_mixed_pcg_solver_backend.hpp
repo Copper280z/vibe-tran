@@ -35,7 +35,8 @@ public:
 
     [[nodiscard]] std::vector<double> solve(
         const SparseMatrixBuilder::CsrData& K,
-        const std::vector<double>& F) override;
+        const std::vector<double>& F,
+        const FactorRatioCheckPolicy* factor_ratio_policy = nullptr) override;
 
     [[nodiscard]] std::string_view name() const noexcept override;
     [[nodiscard]] int last_iteration_count() const noexcept override;

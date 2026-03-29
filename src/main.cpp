@@ -36,6 +36,10 @@
 //
 // Logging:
 //   --log-file=<path>  Write all log output to <path> in addition to stdout.
+//
+// Quality checks:
+//   --checkmode=lenient  Override the deck and run quality checks in LENIENT
+//                        mode for this invocation.
 
 #include "core/logger.hpp"
 #include "core/quality_checks.hpp"
@@ -107,7 +111,8 @@ static void print_usage() {
       "Usage: vibestran "
       "[--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg|cuda-pcg-mixed>]\n"
       "                      [--cuda-precision=<fp32|fp64>] [--csv]\n"
-      "                      [--log-file=<path>]\n"
+      "                      [--log-file=<path>] "
+      "[--checkmode=lenient]\n"
       "                      <input.bdf|input.inp> [output.f06]\n"
       "  --backend=cpu              Eigen sparse Cholesky CPU solver "
       "(default)\n"
@@ -127,6 +132,8 @@ static void print_usage() {
       "PARAM,CSVOUT is not in the BDF\n"
       "  --log-file=<path>          Also write all log output to "
       "this file\n"
+      "  --checkmode=lenient        Override the deck and run quality "
+      "checks in LENIENT mode\n"
       "  OMP_NUM_THREADS=N          Limit CPU solver threads, e.g.:\n"
       "                             OMP_NUM_THREADS=8 vibestran "
       "input.bdf\n");
@@ -137,6 +144,7 @@ int main(int argc, const char *argv[]) {
   BackendChoice backend_choice = BackendChoice::Auto;
   CudaPrecisionChoice cuda_precision = CudaPrecisionChoice::Float64;
   bool force_csv = false;
+  bool force_checkmode_lenient = false;
   std::filesystem::path log_file_path;
   int positional = 0;
   std::filesystem::path bdf_path;
@@ -159,6 +167,16 @@ int main(int argc, const char *argv[]) {
       }
     } else if (arg == "--csv") {
       force_csv = true;
+    } else if (arg.starts_with("--checkmode=")) {
+      std::string_view val = arg.substr(std::string_view("--checkmode=").size());
+      if (val == "lenient") {
+        force_checkmode_lenient = true;
+      } else {
+        vibestran::init_logger();
+        spdlog::error("Unknown checkmode '{}'. Valid: lenient", val);
+        print_usage();
+        return 1;
+      }
     } else if (arg.starts_with("--log-file=")) {
       log_file_path =
           std::string(arg.substr(std::string_view("--log-file=").size()));
@@ -228,6 +246,11 @@ int main(int argc, const char *argv[]) {
     vibestran::Model model = (ext == ".inp")
                                  ? vibestran::InpParser::parse_file(bdf_path)
                                  : vibestran::BdfParser::parse_file(bdf_path);
+
+    if (force_checkmode_lenient) {
+      model.params["CHECKMODE"] = "LENIENT";
+      spdlog::info("CLI override: PARAM,CHECKMODE,LENIENT");
+    }
 
     spdlog::info("  Nodes:    {}", model.nodes.size());
     spdlog::info("  Elements: {}", model.elements.size());

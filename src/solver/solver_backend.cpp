@@ -1,5 +1,6 @@
 // src/solver/solver_backend.cpp
 #include "solver/solver_backend.hpp"
+#include "core/factor_ratio_check.hpp"
 #include "core/types.hpp"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
@@ -18,6 +19,60 @@
 #include <spdlog/spdlog.h>
 
 namespace vibestran {
+
+namespace {
+
+#if !defined(HAVE_ACCELERATE)
+std::vector<double>
+extract_csr_diagonal(const SparseMatrixBuilder::CsrData &csr) {
+  std::vector<double> diag(static_cast<std::size_t>(csr.n), 0.0);
+  for (int row = 0; row < csr.n; ++row) {
+    for (int j = csr.row_ptr[row]; j < csr.row_ptr[row + 1]; ++j) {
+      if (csr.col_ind[j] == row) {
+        diag[static_cast<std::size_t>(row)] = csr.values[j];
+        break;
+      }
+    }
+  }
+  return diag;
+}
+
+template <typename DiagonalExpr>
+std::vector<double> copy_diagonal(const DiagonalExpr &diag_expr) {
+  Eigen::VectorXd dense = diag_expr;
+  return std::vector<double>(dense.data(), dense.data() + dense.size());
+}
+
+[[maybe_unused]] void
+report_factor_ratio_result(const FactorRatioCheckPolicy &policy,
+                           const FactorRatioCheckResult &result,
+                           std::string_view backend_label) {
+  if (result.status == FactorRatioCheckStatus::Ok)
+    return;
+
+  const std::string matrix_name =
+      policy.matrix_name.empty() ? "matrix" : policy.matrix_name;
+  if (result.status == FactorRatioCheckStatus::NonPositiveFactorDiagonal) {
+    throw SolverError(std::format(
+        "{} {} has non-positive or near-zero factor diagonal at row {} "
+        "(matrix diag {:.3e}, factor diag {:.3e}, backend {})",
+        policy.context, matrix_name, result.row_1based, result.matrix_diag,
+        result.factor_diag, backend_label));
+  }
+
+  const std::string message = std::format(
+      "{} {} diagonal / factor diagonal ratio {:.3e} exceeds "
+      "MAXRATIO={:.3e} at row {} (matrix diag {:.3e}, factor diag {:.3e}, "
+      "backend {})",
+      policy.context, matrix_name, result.max_ratio, policy.maxratio,
+      result.row_1based, result.matrix_diag, result.factor_diag, backend_label);
+  if (policy.fatal)
+    throw SolverError(message);
+  spdlog::warn("{}", message);
+}
+#endif
+
+} // namespace
 
 #if defined(HAVE_ACCELERATE)
 namespace {
@@ -49,7 +104,8 @@ AccelerateOrderConfig accelerate_order_config() {
 
 std::vector<double>
 EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
-                          const std::vector<double> &F) {
+                          const std::vector<double> &F,
+                          const FactorRatioCheckPolicy *factor_ratio_policy) {
   using Clock = std::chrono::steady_clock;
   using Ms = std::chrono::duration<double, std::milli>;
 
@@ -90,6 +146,9 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
     K.makeCompressed();
   }
   const auto t_lower_end = Clock::now();
+#if !defined(HAVE_ACCELERATE)
+  const std::vector<double> matrix_diag = extract_csr_diagonal(K_csr);
+#endif
 
   // Map force vector
   Eigen::Map<const Eigen::VectorXd> F_eigen(F.data(), n);
@@ -116,6 +175,12 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
       throw SolverError(
           "Stiffness matrix factorization failed (Accelerate + LDLT fallback) — "
           "check boundary conditions (SPCs)");
+    if (factor_ratio_policy != nullptr) {
+      spdlog::debug(
+          "[cpu-direct] skipping MAXRATIO check for {} because factor diagonal "
+          "is unavailable",
+          backend_label);
+    }
     const auto t_fallback_solve_begin = Clock::now();
     Eigen::VectorXd u = ldlt.solve(F_eigen);
     const auto t_fallback_solve_end = Clock::now();
@@ -132,6 +197,12 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
         Ms(t_fallback_compute_end - t_fallback_compute_begin).count(),
         Ms(t_fallback_solve_end - t_fallback_solve_begin).count());
     return std::vector<double>(u.data(), u.data() + n);
+  }
+  if (factor_ratio_policy != nullptr) {
+    spdlog::debug(
+        "[cpu-direct] skipping MAXRATIO check for {} because factor diagonal "
+        "is unavailable",
+        backend_label);
   }
   const auto t_solve_begin = Clock::now();
   Eigen::VectorXd u = solver.solve(F_eigen);
@@ -164,6 +235,13 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
       throw SolverError(
           "Stiffness matrix factorization failed (CHOLMOD + LDLT fallback) — "
           "check boundary conditions (SPCs)");
+    if (factor_ratio_policy != nullptr) {
+      report_factor_ratio_result(
+          *factor_ratio_policy,
+          evaluate_factor_ratio_check(matrix_diag, copy_diagonal(ldlt.vectorD()),
+                                      factor_ratio_policy->maxratio),
+          backend_label);
+    }
     const auto t_fallback_solve_begin = Clock::now();
     Eigen::VectorXd u = ldlt.solve(F_eigen);
     const auto t_fallback_solve_end = Clock::now();
@@ -180,6 +258,12 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
         Ms(t_fallback_compute_end - t_fallback_compute_begin).count(),
         Ms(t_fallback_solve_end - t_fallback_solve_begin).count());
     return std::vector<double>(u.data(), u.data() + n);
+  }
+  if (factor_ratio_policy != nullptr) {
+    spdlog::debug(
+        "[cpu-direct] skipping MAXRATIO check for {} because factor diagonal "
+        "is unavailable",
+        backend_label);
   }
   const auto t_solve_begin = Clock::now();
   Eigen::VectorXd u = solver.solve(F_eigen);
@@ -210,6 +294,13 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
     if (ldlt.info() != Eigen::Success)
       throw SolverError(
           "Stiffness matrix factorization failed — check boundary conditions");
+    if (factor_ratio_policy != nullptr) {
+      report_factor_ratio_result(
+          *factor_ratio_policy,
+          evaluate_factor_ratio_check(matrix_diag, copy_diagonal(ldlt.vectorD()),
+                                      factor_ratio_policy->maxratio),
+          backend_label);
+    }
     const auto t_fallback_solve_begin = Clock::now();
     Eigen::VectorXd u = ldlt.solve(F_eigen);
     const auto t_fallback_solve_end = Clock::now();
@@ -226,6 +317,14 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
         Ms(t_fallback_compute_end - t_fallback_compute_begin).count(),
         Ms(t_fallback_solve_end - t_fallback_solve_begin).count());
     return std::vector<double>(u.data(), u.data() + n);
+  }
+  if (factor_ratio_policy != nullptr) {
+    report_factor_ratio_result(
+        *factor_ratio_policy,
+        evaluate_factor_ratio_check(matrix_diag,
+                                    copy_diagonal(solver.matrixL().diagonal()),
+                                    factor_ratio_policy->maxratio),
+        backend_label);
   }
   const auto t_solve_begin = Clock::now();
   Eigen::VectorXd u = solver.solve(F_eigen);
@@ -248,7 +347,8 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
 
 std::vector<double>
 EigenPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K_csr,
-                              const std::vector<double>& F) {
+                              const std::vector<double>& F,
+                              const FactorRatioCheckPolicy*) {
   using Clock = std::chrono::steady_clock;
   using Ms = std::chrono::duration<double, std::milli>;
 

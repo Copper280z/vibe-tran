@@ -518,7 +518,8 @@ std::string_view CudaEigensolverBackend::device_name() const noexcept {
 std::vector<EigenPair>
 CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
                               const Eigen::SparseMatrix<double> &M, int nd,
-                              double sigma) {
+                              double sigma,
+                              const FactorRatioCheckPolicy *) {
   const int n = static_cast<int>(K.rows());
   if (n < 1)
     throw SolverError("CUDA eigensolver: system has no free DOFs");

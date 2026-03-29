@@ -512,7 +512,8 @@ solve_single_precision(cudssHandle_t handle, const std::string &device_name,
 
 std::vector<double>
 CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
-                         const std::vector<double> &F) {
+                         const std::vector<double> &F,
+                         const FactorRatioCheckPolicy *) {
   const int n = K.n;
 
   if (n == 0)

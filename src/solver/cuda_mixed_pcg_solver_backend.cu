@@ -29,7 +29,8 @@ CudaMixedPCGSolverBackend::try_create(double tolerance, int max_iters) noexcept 
 
 std::vector<double>
 CudaMixedPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
-                                 const std::vector<double>& F) {
+                                 const std::vector<double>& F,
+                                 const FactorRatioCheckPolicy*) {
     return solve_cuda_pcg_mixed(*ctx_, K, F);
 }
 

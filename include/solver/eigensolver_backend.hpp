@@ -10,6 +10,8 @@
 
 namespace vibestran {
 
+struct FactorRatioCheckPolicy;
+
 /// One mode shape result (single eigenvalue/eigenvector pair)
 struct EigenPair {
     double eigenvalue;          ///< λ = ω² (rad²/s²), unshifted
@@ -27,11 +29,14 @@ public:
     /// @param M     Mass matrix (symmetric positive definite)
     /// @param nd    Number of desired eigenpairs
     /// @param sigma Shift: find eigenvalues closest to this value
+    /// @param factor_ratio_policy Optional PARAM,MAXRATIO enforcement policy
+    ///                            for backends that expose factor diagonals
     /// @return      Up to nd EigenPairs sorted by eigenvalue (ascending)
     [[nodiscard]] virtual std::vector<EigenPair> solve(
         const Eigen::SparseMatrix<double>& K,
         const Eigen::SparseMatrix<double>& M,
-        int nd, double sigma) = 0;
+        int nd, double sigma,
+        const FactorRatioCheckPolicy* factor_ratio_policy = nullptr) = 0;
 
     [[nodiscard]] virtual std::string name() const = 0;
 };
@@ -42,7 +47,8 @@ public:
     [[nodiscard]] std::vector<EigenPair> solve(
         const Eigen::SparseMatrix<double>& K,
         const Eigen::SparseMatrix<double>& M,
-        int nd, double sigma) override;
+        int nd, double sigma,
+        const FactorRatioCheckPolicy* factor_ratio_policy = nullptr) override;
 
     [[nodiscard]] std::string name() const override {
 #if defined(HAVE_ACCELERATE)

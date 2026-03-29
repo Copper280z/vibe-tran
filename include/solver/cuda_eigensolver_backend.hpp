@@ -60,7 +60,8 @@ public:
     [[nodiscard]] std::vector<EigenPair> solve(
         const Eigen::SparseMatrix<double>& K,
         const Eigen::SparseMatrix<double>& M,
-        int nd, double sigma) override;
+        int nd, double sigma,
+        const FactorRatioCheckPolicy* factor_ratio_policy = nullptr) override;
 
     [[nodiscard]] std::string name() const override;
 
